@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   Sparkles,
   ArrowRight,
-  Play,
+  ArrowDown,
   ShieldCheck,
   Layers,
   MessageSquare,
@@ -91,9 +91,12 @@ function Landing() {
               >
                 Get started free <ArrowRight className="h-4 w-4" />
               </Link>
-              <button className="inline-flex items-center gap-2 border border-border bg-surface rounded-lg px-5 py-3 font-medium hover:bg-accent">
-                <Play className="h-4 w-4" /> Watch demo
-              </button>
+              <a
+                href="#how"
+                className="inline-flex items-center gap-2 border border-border bg-surface rounded-lg px-5 py-3 font-medium hover:bg-accent"
+              >
+                <ArrowDown className="h-4 w-4" /> See how it works
+              </a>
             </div>
             <div className="mt-10 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-muted-foreground">
               {["SOC 2 Type II", "HIPAA Compliant", "GDPR Ready", "ISO 27001"].map((t) => (
@@ -141,10 +144,7 @@ function Landing() {
               <div key={u.title} className="rounded-xl border border-border bg-surface p-6">
                 <u.icon className="h-6 w-6 text-purple mb-4" />
                 <h3 className="font-semibold mb-2">{u.title}</h3>
-                <p className="text-sm text-muted-foreground mb-3">{u.desc}</p>
-                <a href="#" className="text-sm text-brand hover:underline inline-flex items-center gap-1">
-                  See example <ArrowRight className="h-3.5 w-3.5" />
-                </a>
+                <p className="text-sm text-muted-foreground">{u.desc}</p>
               </div>
             ))}
           </div>
@@ -190,10 +190,10 @@ function Landing() {
         <div className="mx-auto max-w-7xl px-6 flex flex-wrap items-center justify-between gap-4 text-xs text-muted-foreground">
           <div>© 2026 DocuMind AI. All rights reserved.</div>
           <div className="flex gap-6">
-            <a href="#" className="hover:text-foreground">Product</a>
-            <a href="#" className="hover:text-foreground">Compliance</a>
-            <a href="#" className="hover:text-foreground">Company</a>
-            <a href="#" className="hover:text-foreground">Resources</a>
+            <a href="#features" className="hover:text-foreground">Features</a>
+            <a href="#usecases" className="hover:text-foreground">Use cases</a>
+            <a href="#how" className="hover:text-foreground">How it works</a>
+            <Link to="/login" search={{ redirect: undefined }} className="hover:text-foreground">Sign in</Link>
           </div>
         </div>
       </footer>

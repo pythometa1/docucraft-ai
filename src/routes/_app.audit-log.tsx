@@ -1,4 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
+import { api } from "@/lib/api";
 import { Download, Filter, Search, FileText, UserCog, ShieldCheck, Trash2, Upload, CheckCircle2, LogIn, Sparkles } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -10,22 +13,8 @@ export const Route = createFileRoute("/_app/audit-log")({
 });
 
 type Sev = "info" | "success" | "warning" | "danger";
-type Entry = { time: string; actor: string; action: string; target: string; ip: string; severity: Sev; icon: React.ComponentType<{ className?: string }> };
+type Entry = { time: string; actor: string; action: string; target: string; severity: Sev; entity_type: string };
 
-const ENTRIES: Entry[] = [
-  { time: "2026-07-23 22:41:12", actor: "Shubham Yeljale", action: "Approved draft", target: "test222 · HR Letter EN.docx", ip: "10.14.2.88", severity: "success", icon: CheckCircle2 },
-  { time: "2026-07-23 22:39:04", actor: "Shubham Yeljale", action: "Generated document", target: "HR_Offer_EU_Q3.docx via GPT-4 Turbo", ip: "10.14.2.88", severity: "info", icon: Sparkles },
-  { time: "2026-07-23 22:35:47", actor: "Elena Vasquez", action: "Uploaded source", target: "Clinical_Study_ONCO_003 · protocol_v2.pdf", ip: "10.14.5.22", severity: "info", icon: Upload },
-  { time: "2026-07-23 21:58:20", actor: "Priya Sharma", action: "Updated template", target: "CMC Section 3.2.P → v3.0", ip: "10.14.6.19", severity: "info", icon: FileText },
-  { time: "2026-07-23 21:12:03", actor: "Shubham Yeljale", action: "Changed role", target: "Ahmed Nasser: Viewer → Editor", ip: "10.14.2.88", severity: "warning", icon: UserCog },
-  { time: "2026-07-23 20:44:55", actor: "System", action: "MFA enforced", target: "Workspace policy updated", ip: "—", severity: "success", icon: ShieldCheck },
-  { time: "2026-07-23 20:02:11", actor: "Marcus Lindqvist", action: "Deleted draft", target: "Marketing_Launch_Q4 · draft_v1", ip: "10.14.9.71", severity: "danger", icon: Trash2 },
-  { time: "2026-07-23 19:22:38", actor: "Dina Karlsson", action: "Signed in", target: "Session started (SSO — Okta)", ip: "10.14.4.03", severity: "info", icon: LogIn },
-  { time: "2026-07-23 18:47:19", actor: "Elena Vasquez", action: "Generated document", target: "CSR_ONCO_003_draft.docx via Claude 3.5", ip: "10.14.5.22", severity: "info", icon: Sparkles },
-  { time: "2026-07-23 17:33:02", actor: "Shubham Yeljale", action: "Invited member", target: "kenji.w@company.com as Editor", ip: "10.14.2.88", severity: "info", icon: UserCog },
-  { time: "2026-07-23 16:15:44", actor: "Priya Sharma", action: "Approved draft", target: "cmc_888 · CMC_3.2.P.docx", ip: "10.14.6.19", severity: "success", icon: CheckCircle2 },
-  { time: "2026-07-23 15:02:29", actor: "System", action: "Retention policy applied", target: "12 drafts archived (>90d)", ip: "—", severity: "warning", icon: ShieldCheck },
-];
 
 const sevTone: Record<Sev, string> = {
   info: "bg-blue-500/10 text-blue-500",
@@ -35,6 +24,22 @@ const sevTone: Record<Sev, string> = {
 };
 
 function AuditLogPage() {
+  const [entries, setEntries] = useState<Entry[]>([]);
+
+  useEffect(() => {
+    api.auditLogs()
+      .then((r) => setEntries(r.items.map((e: any) => ({
+        time: e.time ? new Date(e.time).toLocaleString() : "—",
+        actor: e.actor ?? "System",
+        action: e.action,
+        target: e.target ?? "—",
+        severity: (e.severity ?? "info") as Sev,
+        entity_type: e.entity_type ?? "",
+      }))))
+      .catch((e: any) => toast.error("Could not load the audit log", { description: e?.message ?? String(e) }));
+  }, []);
+
+  const ENTRIES = entries;
   return (
     <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
       <div className="flex items-start justify-between flex-wrap gap-4">
@@ -50,10 +55,10 @@ function AuditLogPage() {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { label: "Events today", value: "412" },
-          { label: "Approvals", value: "38" },
-          { label: "Deletions", value: "4" },
-          { label: "Sign-ins", value: "27" },
+          { label: "Events", value: String(ENTRIES.length) },
+          { label: "Approvals", value: String(ENTRIES.filter((e) => e.action.toLowerCase().includes("approv")).length) },
+          { label: "Generations", value: String(ENTRIES.filter((e) => e.action.toLowerCase().includes("generat")).length) },
+          { label: "Warnings", value: String(ENTRIES.filter((e) => e.severity === "warning").length) },
         ].map((s) => (
           <div key={s.label} className="rounded-xl border border-border bg-card p-4">
             <div className="text-xs text-muted-foreground uppercase tracking-wider">{s.label}</div>
@@ -68,7 +73,7 @@ function AuditLogPage() {
             <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <Input placeholder="Search actor, action, target…" className="pl-9" />
           </div>
-          <div className="ml-auto text-xs text-muted-foreground">Showing {ENTRIES.length} of 412 events</div>
+          <div className="ml-auto text-xs text-muted-foreground">Showing {ENTRIES.length} events</div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -78,7 +83,7 @@ function AuditLogPage() {
                 <th className="px-4 py-3 font-medium whitespace-nowrap">Actor</th>
                 <th className="px-4 py-3 font-medium">Action</th>
                 <th className="px-4 py-3 font-medium">Target</th>
-                <th className="px-4 py-3 font-medium whitespace-nowrap">IP</th>
+                <th className="px-4 py-3 font-medium whitespace-nowrap">Entity</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
@@ -88,18 +93,18 @@ function AuditLogPage() {
                   <td className="px-4 py-3 whitespace-nowrap">{e.actor}</td>
                   <td className="px-4 py-3">
                     <span className={cn("inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium", sevTone[e.severity])}>
-                      <e.icon className="h-3 w-3" /> {e.action}
+                      {e.action}
                     </span>
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">{e.target}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-muted-foreground whitespace-nowrap">{e.ip}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-muted-foreground whitespace-nowrap">{e.entity_type}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
         <div className="p-4 border-t border-border flex items-center justify-between text-xs text-muted-foreground">
-          <span>Page 1 of 34</span>
+          <span>Most recent first</span>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" disabled>Previous</Button>
             <Button variant="outline" size="sm">Next</Button>

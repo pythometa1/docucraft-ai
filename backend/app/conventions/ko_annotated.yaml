@@ -1,0 +1,44 @@
+# Korean masters. The one feature no other family needs is `particles`, which
+# turns on the post-fill pass in `korean.py`: Korean postpositions alternate on
+# whether the preceding syllable ends in a consonant, so a letter that inserts a
+# name in front of a fixed 이/가 reads as machine output to every native reader.
+
+id: ko_annotated
+language: ko
+description: Korean instruction prose, fullwidth delimiters, particle agreement.
+
+delimiters:
+  - {open: "<", close: ">", kind: angle}
+  - {open: "＜", close: "＞", kind: angle_fullwidth}
+  - {open: "《", close: "》", kind: angle_cjk}
+  - {open: "【", close: "】", kind: bracket_cjk}
+
+# 「고용형태가 정규직인 경우에만 아래 내용을 삽입:」
+include_pattern: '(.{1,20}?)(?:가|이)\s*(.+?)(?:인|일)\s*경우에만.*?(?:삽입|적용)\s*[：:]?\s*$'
+include_groups: {field: 1, value: 2}
+
+# 「정규직 직원용:」 -- value first, entity second. No prefix form is in use.
+entity_nouns: '직원용|근로자용|사원용|임직원용'
+for_entity_first_pattern: null
+for_value_first_pattern: '^\s*(.+?)\s*({entity_nouns})\s*[：:]?\s*$'
+for_start_pattern: null
+
+entity_field_overrides:
+  직원용: colleague_type
+  근로자용: colleague_type
+  사원용: colleague_type
+  임직원용: colleague_type
+
+gloss_pattern: '\s*[（(](?:예|예를\s*들어|예시)[：:]?[^）)]*[）)]\s*$'
+
+put_pattern: '^\s*(?:소스\s*파일에서)?\s*(.+?)\s*(?:입력|삽입)\s*$'
+
+# Korean postposition agreement. Authors write the alternation explicitly after a
+# placeholder -- `<성명>이(가)` -- and the renderer resolves it against the value
+# that was actually inserted.
+particles: true
+
+heading_max_len: 40
+
+# 경우에만 -- "only in the case of".
+instruction_shape_pattern: '경우에만|인 경우|삭제하십시오|삽입하십시오'

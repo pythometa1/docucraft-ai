@@ -1,5 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
+import { api } from "@/lib/api";
 import { User, Building2, Bell, Key, Cpu, CreditCard, Shield, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -87,12 +89,18 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 }
 
 function ProfileTab() {
+  const [me, setMe] = useState<any>(null);
+  useEffect(() => {
+    api.me().then(setMe).catch((e: any) => toast.error("Could not load your profile", { description: e?.message ?? String(e) }));
+  }, []);
+  const initials = (me?.full_name ?? "")
+    .split(" ").map((n: string) => n[0]).slice(0, 2).join("") || "–";
   return (
     <>
       <Section title="Profile" description="Your personal information visible to teammates.">
         <div className="flex items-center gap-4 mb-6">
           <Avatar className="h-16 w-16">
-            <AvatarFallback className="bg-gradient-to-br from-primary to-purple-500 text-white text-lg">SY</AvatarFallback>
+            <AvatarFallback className="bg-gradient-to-br from-primary to-purple-500 text-white text-lg">{initials}</AvatarFallback>
           </Avatar>
           <div>
             <Button variant="outline" size="sm">Change photo</Button>
@@ -100,15 +108,14 @@ function ProfileTab() {
           </div>
         </div>
         <div className="grid sm:grid-cols-2 gap-4">
-          <div><Label>Full name</Label><Input defaultValue="Shubham Yeljale" className="mt-1.5" /></div>
-          <div><Label>Email</Label><Input defaultValue="shubham.y@company.com" className="mt-1.5" /></div>
-          <div><Label>Job title</Label><Input defaultValue="Head of AI Platform" className="mt-1.5" /></div>
-          <div><Label>Time zone</Label><Input defaultValue="Europe/Berlin (UTC+02:00)" className="mt-1.5" /></div>
+          <div><Label>Full name</Label><Input value={me?.full_name ?? ""} readOnly className="mt-1.5" /></div>
+          <div><Label>Email</Label><Input value={me?.email ?? ""} readOnly className="mt-1.5" /></div>
+          <div><Label>Job title</Label><Input value={me?.job_title ?? ""} readOnly className="mt-1.5" /></div>
+          <div><Label>Time zone</Label><Input value={me?.timezone ?? ""} readOnly className="mt-1.5" /></div>
         </div>
-        <div className="mt-6 flex justify-end gap-2">
-          <Button variant="ghost">Cancel</Button>
-          <Button>Save changes</Button>
-        </div>
+        <p className="text-xs text-muted-foreground mt-6">
+          Profile editing isn't wired up yet — these values come from your account.
+        </p>
       </Section>
     </>
   );

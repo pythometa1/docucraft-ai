@@ -1,14 +1,16 @@
-import { createFileRoute, Link, useNavigate, notFound } from "@tanstack/react-router";
-import { useState } from "react";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { api } from "@/lib/api";
+import { CompileProgressList, useCompileProgress } from "@/components/compile-progress";
+import { DocumentMapping } from "@/components/document-mapping";
 import {
   ChevronDown,
   ChevronRight,
   Upload,
   UploadCloud,
-  Sparkles,
   FolderTree,
   Network,
   FileText,
@@ -17,24 +19,38 @@ import {
   Download,
   Pencil,
   Eye,
-  RefreshCcw,
   Trash2,
   Share2,
+  Archive,
   Layout,
   LayoutGrid,
   Check,
   Wand2,
-  MessageSquare,
-  Target,
-  GitBranch,
+  Wand2 as WandIcon,
+  Loader2,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Slider } from "@/components/ui/slider";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 export const Route = createFileRoute("/_app/projects/$id")({
   head: ({ params }) => ({
@@ -43,40 +59,67 @@ export const Route = createFileRoute("/_app/projects/$id")({
       { name: "description", content: "Configure templates, sources, mappings, and generate documents." },
     ],
   }),
-  loader: ({ params }) => {
-    const proj = useStore.getState().getProject(params.id);
-    if (!proj) throw notFound();
-    return null;
-  },
   component: ProjectDetail,
 });
 
 const STAGES = [
-  { key: "template", n: 1, title: "Template", short: "Blueprint", icon: UploadCloud, hint: "Define the document structure" },
-  { key: "source", n: 2, title: "Sources", short: "Inputs", icon: FolderTree, hint: "Bring in the raw content" },
-  { key: "method", n: 3, title: "Method", short: "Engine", icon: Sparkles, hint: "Choose how to generate" },
-  { key: "mapping", n: 4, title: "Mapping", short: "Link", icon: Network, hint: "Connect sources to sections" },
-  { key: "drafts", n: 5, title: "Drafts", short: "Output", icon: FileText, hint: "Review generated documents" },
+  { key: "template", n: 1, title: "Template", short: "Blueprint", icon: UploadCloud, hint: "Upload the document to fill" },
+  { key: "source", n: 2, title: "Sources", short: "Inputs", icon: FolderTree, hint: "Upload the spreadsheet of rows" },
+  { key: "mapping2", n: 3, title: "Document Mapping", short: "Fill", icon: Network, hint: "Compile, map columns, generate" },
+  { key: "drafts", n: 4, title: "Documents", short: "Output", icon: FileText, hint: "Everything this project has produced" },
 ] as const;
 
 type StageKey = typeof STAGES[number]["key"];
 
 function ProjectDetail() {
   const { id } = Route.useParams();
-  const project = useStore((s) => s.projects.find((p) => p.id === id))!;
+  const project = useStore((s) => s.projects.find((p) => p.id === id));
+  const loadProjectDetail = useStore((s) => s.loadProjectDetail);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Every hook has to run on every render, and `project` is undefined on the
+  // first render of a cold load (direct URL / refresh). So this starts null and
+  // falls back to the first incomplete stage below, rather than seeding itself
+  // from data that isn't there yet.
+  const [active, setActive] = useState<StageKey | null>(null);
+
+  useEffect(() => {
+    // Cleared first: navigating from a project that failed to load to one that
+    // loads fine otherwise leaves the previous project's error on screen for
+    // good, because nothing else ever resets it.
+    setLoadError(null);
+    loadProjectDetail(id).catch((e: any) => setLoadError(e?.message ?? String(e)));
+  }, [id]);
 
   const done: Record<StageKey, boolean> = {
-    template: project.templates.length > 0,
-    source: project.sources.length > 0,
-    method: !!project.generationMethod,
-    mapping: project.drafts.length > 0,
-    drafts: project.generated.length > 0,
+    // Uploading is not the same as being ready. A template nobody has compiled
+    // tells the rest of the pipeline nothing about what data the letter needs,
+    // so the stage stays open until at least one has been read.
+    template: (project?.templates ?? []).some((t: any) => !!t.manifestId),
+    source: (project?.sources.length ?? 0) > 0,
+    // These were the same expression, so the counter went straight from 2/4 to
+    // 4/4 and could never read 3/4. Generation having run is what says the
+    // mapping stage was completed; a document that survived the §19 canary gate
+    // is what says the project actually has an output. A batch where every row
+    // came back "blocked" is the case that has to tell those apart.
+    mapping2: (project?.generated.length ?? 0) > 0,
+    drafts: (project?.generated ?? []).some((g) => g.status !== "blocked"),
   };
-
   const firstIncomplete = (STAGES.find((s) => !done[s.key])?.key ?? "drafts") as StageKey;
-  const [active, setActive] = useState<StageKey>(firstIncomplete);
 
-  const activeIdx = STAGES.findIndex((s) => s.key === active);
+  if (loadError) {
+    return (
+      <div className="p-8 max-w-lg mx-auto text-center space-y-3">
+        <p className="text-muted-foreground">This project couldn't be loaded: {loadError}</p>
+        <Link to="/dashboard" className="text-brand hover:underline">Back to dashboard</Link>
+      </div>
+    );
+  }
+  if (!project) {
+    return <div className="p-8 text-muted-foreground">Loading project…</div>;
+  }
+
+  const activeKey = active ?? firstIncomplete;
+  const activeIdx = STAGES.findIndex((s) => s.key === activeKey);
   const activeStage = STAGES[activeIdx];
   const completedCount = Object.values(done).filter(Boolean).length;
   const progressPct = (completedCount / STAGES.length) * 100;
@@ -108,12 +151,8 @@ function ProjectDetail() {
               <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Progress</div>
               <div className="text-sm font-semibold">{completedCount}/{STAGES.length} stages</div>
             </div>
-            <button className="h-9 px-3 rounded-lg border border-border bg-surface hover:bg-accent text-sm inline-flex items-center gap-1.5">
-              <Share2 className="h-4 w-4" /> Share
-            </button>
-            <button className="h-9 w-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center">
-              <MoreVertical className="h-4 w-4" />
-            </button>
+            <ShareButton />
+            <ProjectActions project={project} />
           </div>
         </div>
         {/* Progress bar */}
@@ -123,14 +162,14 @@ function ProjectDetail() {
       </div>
 
       {/* Pipeline rail */}
-      <PipelineRail stages={STAGES} done={done} active={active} onSelect={setActive} />
+      <PipelineRail stages={STAGES} done={done} active={activeKey} onSelect={setActive} />
 
       {/* Active stage panel */}
       <div className="rounded-2xl border border-border bg-surface">
         <div className="flex items-center gap-4 p-6 border-b border-border">
           <div className={cn(
             "h-11 w-11 rounded-xl flex items-center justify-center border",
-            done[active] ? "bg-success/10 text-success border-success/30" : "bg-brand/10 text-brand border-brand/30",
+            done[activeKey] ? "bg-success/10 text-success border-success/30" : "bg-brand/10 text-brand border-brand/30",
           )}>
             <activeStage.icon className="h-5 w-5" />
           </div>
@@ -157,14 +196,168 @@ function ProjectDetail() {
           </div>
         </div>
         <div className="p-6">
-          {active === "template" && <Step1Template project={project} />}
-          {active === "source" && <Step2Source project={project} />}
-          {active === "method" && <Step3Method project={project} />}
-          {active === "mapping" && <Step4Drafts project={project} />}
-          {active === "drafts" && <Step5Generated project={project} />}
+          {activeKey === "template" && <Step1Template project={project} />}
+          {activeKey === "source" && <Step2Source project={project} />}
+          {activeKey === "drafts" && <StageDocuments project={project} />}
+          {activeKey === "mapping2" && <DocumentMapping project={project} />}
         </div>
       </div>
     </div>
+  );
+}
+
+/* ------------------ Header actions ------------------ */
+
+/* There is no sharing endpoint -- no invites, no share links, no per-project
+   ACL. Rather than leave a button that promises one, this copies the project
+   URL, which is all "share" can honestly mean today: anyone who can already
+   sign in to this workspace can open it. */
+function ShareButton() {
+  const [copying, setCopying] = useState(false);
+  const copy = async () => {
+    setCopying(true);
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      toast.success("Project link copied", { description: "Anyone who can sign in to this workspace can open it." });
+    } catch (e: any) {
+      toast.error("Couldn't copy the link", { description: e?.message ?? String(e) });
+    } finally {
+      setCopying(false);
+    }
+  };
+  return (
+    <button
+      onClick={copy}
+      disabled={copying}
+      className="h-9 px-3 rounded-lg border border-border bg-surface hover:bg-accent text-sm inline-flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+      title="Copy a link to this project"
+    >
+      <Share2 className="h-4 w-4" /> Share
+    </button>
+  );
+}
+
+function ProjectActions({ project }: { project: any }) {
+  const navigate = useNavigate();
+  const loadProjectDetail = useStore((s) => s.loadProjectDetail);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [name, setName] = useState(project.name);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [busy, setBusy] = useState<null | "rename" | "archive" | "delete">(null);
+
+  const rename = async () => {
+    const next = name.trim();
+    if (!next || next === project.name) {
+      setRenameOpen(false);
+      return;
+    }
+    setBusy("rename");
+    try {
+      await api.patchProject(project.id, { name: next });
+      await loadProjectDetail(project.id);
+      toast.success("Project renamed", { description: next });
+      setRenameOpen(false);
+    } catch (e: any) {
+      toast.error("Rename failed", { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const archive = async () => {
+    setBusy("archive");
+    try {
+      await api.archiveProject(project.id);
+      await loadProjectDetail(project.id);
+      toast.success("Project archived", { description: project.name });
+    } catch (e: any) {
+      toast.error("Archive failed", { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async () => {
+    setBusy("delete");
+    try {
+      await api.deleteProject(project.id);
+      toast.success("Project deleted", { description: project.name });
+      setConfirmDelete(false);
+      // No refresh here: the record this page renders is gone, so leave first
+      // and let the dashboard reload the list.
+      navigate({ to: "/dashboard" });
+    } catch (e: any) {
+      toast.error("Delete failed", { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            disabled={busy != null}
+            className="h-9 w-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Project actions"
+          >
+            <MoreVertical className="h-4 w-4" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-44">
+          <DropdownMenuItem onSelect={() => { setName(project.name); setRenameOpen(true); }}>
+            <Pencil className="h-4 w-4 mr-2" /> Rename
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={busy === "archive"} onSelect={() => { void archive(); }}>
+            <Archive className="h-4 w-4 mr-2" /> Archive
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="text-destructive focus:text-destructive"
+            onSelect={() => setConfirmDelete(true)}
+          >
+            <Trash2 className="h-4 w-4 mr-2" /> Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <Dialog open={renameOpen} onOpenChange={(v) => { if (busy !== "rename") setRenameOpen(v); }}>
+        <DialogContent className="bg-surface border-border">
+          <DialogHeader><DialogTitle>Rename project</DialogTitle></DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="project-name">Project name</Label>
+            <Input
+              id="project-name"
+              value={name}
+              autoFocus
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void rename(); }}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" disabled={busy === "rename"} onClick={() => setRenameOpen(false)}>Cancel</Button>
+            <Button
+              disabled={busy === "rename" || !name.trim()}
+              onClick={() => { void rename(); }}
+              className="bg-gradient-brand text-white hover:opacity-90"
+            >
+              {busy === "rename" ? "Saving…" : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        busy={busy === "delete"}
+        title={`Delete "${project.name}"?`}
+        description="This permanently removes the project along with its templates, sources, manifests and generated documents. This cannot be undone."
+        confirmLabel="Delete project"
+        onConfirm={remove}
+      />
+    </>
   );
 }
 
@@ -181,7 +374,13 @@ function PipelineRail({
 }) {
   return (
     <div className="rounded-2xl border border-border bg-surface p-4">
-      <div className="grid grid-cols-5 gap-3 relative">
+      {/* Column count comes from the stage list, not a literal. It was hardcoded
+          to five, so adding a sixth stage rendered it onto a second row with no
+          heading -- present in the DOM, invisible on the page. */}
+      <div
+        className="grid gap-3 relative"
+        style={{ gridTemplateColumns: `repeat(${stages.length}, minmax(0, 1fr))` }}
+      >
         {stages.map((s, i) => {
           const isActive = active === s.key;
           const isDone = done[s.key];
@@ -235,6 +434,7 @@ function StepCard({ children }: { n?: number; title?: string; count?: number; de
 function Step1Template({ project }: { project: any }) {
   const [uploadOpen, setUploadOpen] = useState(false);
   const add = useStore((s) => s.addTemplate);
+  const loadProjectDetail = useStore((s) => s.loadProjectDetail);
   const count = project.templates.length;
   return (
     <StepCard
@@ -268,10 +468,43 @@ function Step1Template({ project }: { project: any }) {
                 <div className="text-xs text-muted-foreground">
                   {t.size} · uploaded {t.uploadedAt} by {t.uploadedBy}
                 </div>
+                {/* Compiling is a fact about the template, so it is stated on the
+                    template. Until it has happened nothing downstream knows what
+                    data the letter needs, which is why this stage is not complete
+                    without it. */}
+                <div className="mt-1 text-xs">
+                  {t.manifestId ? (
+                    <span className="text-emerald-500">
+                      Compiled · {t.fieldCount} fields, {t.conditionCount} conditions
+                      {t.manifestStatus === "approved" ? " · approved" : ""}
+                    </span>
+                  ) : (
+                    <span className="text-amber-500">Not compiled yet — open it in Studio to read it</span>
+                  )}
+                </div>
               </div>
-              <button className="p-1.5 rounded hover:bg-accent text-muted-foreground"><Eye className="h-4 w-4" /></button>
-              <button className="p-1.5 rounded hover:bg-accent text-muted-foreground"><Download className="h-4 w-4" /></button>
-              <button className="p-1.5 rounded hover:bg-accent text-muted-foreground"><Trash2 className="h-4 w-4" /></button>
+              {t.manifestId && <TemplateDataButton manifestId={t.manifestId} />}
+              {!t.manifestId && <CompileTemplateButton templateId={t.id} projectId={project.id} />}
+              <Link
+                to="/projects/$id/studio/$templateId"
+                params={{ id: project.id, templateId: t.id }}
+                className="h-8 px-3 rounded-lg border border-border text-xs inline-flex items-center gap-1.5 hover:bg-accent"
+                title="Inspect the compiled manifest, its warnings and its conditions"
+              >
+                <WandIcon className="h-3.5 w-3.5" /> Studio
+              </Link>
+              <RowDeleteButton
+                label="Delete template"
+                title={`Delete "${t.name}"?`}
+                description="The template is removed from this project. Manifests already compiled from it, and any documents already generated, are kept."
+                confirmLabel="Delete template"
+                successMessage="Template deleted"
+                errorMessage="Couldn't delete the template"
+                onDelete={async () => {
+                  await api.deleteTemplate(t.id);
+                  await loadProjectDetail(project.id);
+                }}
+              />
             </div>
           ))}
           <Button variant="outline" onClick={() => setUploadOpen(true)}>
@@ -283,10 +516,11 @@ function Step1Template({ project }: { project: any }) {
         open={uploadOpen}
         onOpenChange={setUploadOpen}
         title="Upload template"
-        accept=".docx, .dotx, .html, .txt"
-        onUpload={(name) => {
-          add(project.id, name);
-          toast.success("Template uploaded", { description: name });
+        accept=".docx,.dotx"
+        onUpload={(file) => {
+          add(project.id, file)
+            .then(() => toast.success("Template uploaded", { description: file.name }))
+            .catch((e: any) => toast.error("Upload failed", { description: e?.message ?? String(e) }));
         }}
       />
     </StepCard>
@@ -297,6 +531,7 @@ function Step1Template({ project }: { project: any }) {
 function Step2Source({ project }: { project: any }) {
   const [uploadOpen, setUploadOpen] = useState(false);
   const add = useStore((s) => s.addSource);
+  const loadProjectDetail = useStore((s) => s.loadProjectDetail);
   const count = project.sources.length;
   return (
     <StepCard
@@ -325,7 +560,19 @@ function Step2Source({ project }: { project: any }) {
             <div key={s.id} className="rounded-lg border border-border bg-background/40 p-4">
               <div className="flex items-center gap-2 mb-2">
                 <FileText className="h-4 w-4 text-purple" />
-                <div className="font-medium text-sm truncate">{s.name}</div>
+                <div className="font-medium text-sm truncate flex-1">{s.name}</div>
+                <RowDeleteButton
+                  label="Delete source"
+                  title={`Delete "${s.name}"?`}
+                  description="The source is removed from this project. Column mappings already saved against it are kept, and so is anything already generated. The uploaded file and the embeddings built from it are destroyed later by the retention sweep, on the schedule your organisation set."
+                  confirmLabel="Delete source"
+                  successMessage="Source deleted"
+                  errorMessage="Couldn't delete the source"
+                  onDelete={async () => {
+                    await api.deleteSource(s.id);
+                    await loadProjectDetail(project.id);
+                  }}
+                />
               </div>
               <div className="text-xs text-muted-foreground">{s.type.toUpperCase()} · {s.rows ?? "—"} rows · {s.size}</div>
             </div>
@@ -342,219 +589,68 @@ function Step2Source({ project }: { project: any }) {
         open={uploadOpen}
         onOpenChange={setUploadOpen}
         title="Upload source file"
-        accept=".csv, .xlsx, .json, .pdf, .docx, .txt"
-        onUpload={(name) => {
-          const ext = name.split(".").pop() ?? "csv";
-          add(project.id, name, ext);
-          toast.success("Source uploaded", { description: name });
+        accept=".csv,.xlsx,.pdf,.docx,.txt"
+        onUpload={(file) => {
+          add(project.id, file)
+            .then(() => toast.success("Source uploaded", { description: file.name }))
+            .catch((e: any) => toast.error("Upload failed", { description: e?.message ?? String(e) }));
         }}
       />
     </StepCard>
   );
 }
 
-/* ------------------ Step 3 ------------------ */
-const METHODS: Array<{ key: string; icon: any; title: string; desc: string; badge?: string }> = [
-  { key: "ai", icon: Sparkles, title: "AI Auto-Generate", desc: "Full AI-powered generation. Fastest option.", badge: "Recommended" },
-  { key: "chat", icon: MessageSquare, title: "Chat-Assisted", desc: "Interactive chat to guide AI through the generation." },
-  { key: "manual", icon: Target, title: "Manual Mapping", desc: "Precise control over each section mapping." },
-  { key: "hybrid", icon: GitBranch, title: "Hybrid", desc: "AI suggestions with manual review at each section." },
-];
+/* ------------------ Step 4: generated documents ------------------ */
 
-function Step3Method({ project }: { project: any }) {
-  const set = useStore((s) => s.setGenerationMethod);
-  const [choice, setChoice] = useState<string>(project.generationMethod ?? "");
-  const [temp, setTemp] = useState([0.5]);
-  const [model, setModel] = useState("claude-sonnet-4.6");
+/* The download endpoint is /document-versions/{id}/download, but a row here
+   carries the *document* id -- the store drops current_version_id when it maps
+   the API response -- so resolve the current version before asking for a file. */
+async function downloadDocument(documentId: string, filename: string) {
+  const doc = await api.getDocument(documentId);
+  const versionId = doc?.current_version_id;
+  if (!versionId) throw new Error("This document has no saved version to download yet.");
+  const url = await api.authedDownloadUrl(versionId);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function DownloadDocButton({ documentId, filename }: { documentId: string; filename: string }) {
+  const [busy, setBusy] = useState(false);
   return (
-    <StepCard
-      n={3}
-      title="Generation method"
-      count={choice ? 1 : 0}
-      description="Select your preferred method to create content"
-      icon={Sparkles}
-      iconColor="bg-brand/15 text-brand"
-      status={project.generationMethod ? "Completed" : "Pending"}
+    <button
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await downloadDocument(documentId, filename);
+        } catch (e: any) {
+          toast.error("Download failed", { description: e?.message ?? String(e) });
+        } finally {
+          setBusy(false);
+        }
+      }}
+      disabled={busy}
+      className="p-1.5 rounded hover:bg-accent text-muted-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+      title="Download"
+      aria-label="Download"
     >
-      <div className="grid md:grid-cols-2 gap-3">
-        {METHODS.map((m) => {
-          const active = choice === m.key;
-          return (
-            <button
-              key={m.key}
-              onClick={() => setChoice(m.key)}
-              className={cn(
-                "text-left rounded-lg border p-4 transition-colors relative",
-                active ? "border-brand bg-brand/5" : "border-border bg-background/40 hover:border-border-strong",
-              )}
-            >
-              {m.badge && (
-                <span className="absolute top-3 right-3 text-[10px] uppercase font-semibold px-2 py-0.5 rounded-full bg-gradient-brand text-white">
-                  {m.badge}
-                </span>
-              )}
-              <m.icon className={cn("h-5 w-5 mb-2", active ? "text-brand" : "text-muted-foreground")} />
-              <div className="font-semibold">{m.title}</div>
-              <div className="text-sm text-muted-foreground mt-1">{m.desc}</div>
-              {active && (
-                <div className="absolute bottom-3 right-3 h-5 w-5 rounded-full bg-brand text-white flex items-center justify-center">
-                  <Check className="h-3 w-3" />
-                </div>
-              )}
-            </button>
-          );
-        })}
-      </div>
-      <div className="mt-6 grid md:grid-cols-2 gap-6">
-        <div>
-          <Label className="mb-2 block">AI Model</Label>
-          <Select value={model} onValueChange={setModel}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="claude-sonnet-4.6">Claude Sonnet 4.6</SelectItem>
-              <SelectItem value="gpt-5.5">GPT-5.5</SelectItem>
-              <SelectItem value="gemini-pro">Gemini Pro</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div>
-          <Label className="mb-2 block">Creativity ({temp[0].toFixed(2)})</Label>
-          <Slider value={temp} onValueChange={setTemp} min={0} max={1} step={0.05} />
-          <div className="mt-1 flex justify-between text-xs text-muted-foreground">
-            <span>Precise</span><span>Creative</span>
-          </div>
-        </div>
-      </div>
-      <div className="mt-6 flex justify-end">
-        <Button
-          disabled={!choice}
-          onClick={() => {
-            set(project.id, choice as any);
-            toast.success("Generation method saved");
-          }}
-          className="bg-gradient-brand text-white hover:opacity-90"
-        >
-          Save method
-        </Button>
-      </div>
-    </StepCard>
+      <Download className="h-4 w-4" />
+    </button>
   );
 }
 
-/* ------------------ Step 4 ------------------ */
-function Step4Drafts({ project }: { project: any }) {
-  const [dlgOpen, setDlgOpen] = useState(false);
-  const [draftName, setDraftName] = useState("");
-  const [draftDesc, setDraftDesc] = useState("");
-  const addDraft = useStore((s) => s.addDraft);
-  const navigate = useNavigate();
 
-  const count = project.drafts.length;
-
-  const createDraft = () => {
-    if (!draftName.trim()) return;
-    const draftId = addDraft(project.id, draftName.trim(), draftDesc.trim() || undefined);
-    toast.success(`${draftName} draft created successfully!`, {
-      description: "You can now map content inside the draft document.",
-    });
-    setDraftName("");
-    setDraftDesc("");
-    setDlgOpen(false);
-    setTimeout(() => {
-      // stay on project page; user clicks Map content
-      void draftId;
-    }, 0);
-  };
-
-  return (
-    <StepCard
-      n={4}
-      title="Map data sources to template sections"
-      count={count}
-      description="Create a draft document to define and manage content mapping within it"
-      icon={FolderTree}
-      iconColor="bg-purple/15 text-purple"
-      status={count > 0 ? "Completed" : "Pending"}
-    >
-      {count === 0 ? (
-        <EmptyState
-          illustration={<DraftBox />}
-          title="You don't have any draft document(s) yet!"
-          subtitle="Create one or more draft documents to map content inside it."
-          action={
-            <Button onClick={() => setDlgOpen(true)} className="bg-gradient-brand text-white hover:opacity-90">
-              <FileText className="h-4 w-4 mr-1.5" /> Create draft document
-            </Button>
-          }
-        />
-      ) : (
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {project.drafts.map((d: any) => (
-            <div key={d.id} className="rounded-lg border border-border bg-background/40 p-4 hover:border-border-strong transition-colors">
-              <div className="flex items-start justify-between">
-                <div className="text-xs text-muted-foreground">{d.createdAt}</div>
-                <button className="p-1 rounded hover:bg-accent text-muted-foreground">
-                  <MoreVertical className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="font-semibold mt-2">{d.name}</div>
-              <div className="text-xs text-muted-foreground">Created by {d.createdBy}</div>
-              <div className="mt-3">
-                <span className="inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5 text-xs">
-                  {d.mappingsCount} Mappings
-                </span>
-              </div>
-              {d.description && <div className="text-sm text-muted-foreground mt-3">{d.description}</div>}
-              <button
-                onClick={() => navigate({ to: "/projects/$id/mapping/$draftId", params: { id: project.id, draftId: d.id } })}
-                className="mt-4 text-sm text-brand hover:underline inline-flex items-center gap-1"
-              >
-                Map content <ChevronRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ))}
-          <button
-            onClick={() => setDlgOpen(true)}
-            className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground hover:text-foreground hover:border-border-strong flex items-center justify-center min-h-32"
-          >
-            <Plus className="h-4 w-4 mr-1.5" /> Create new draft
-          </button>
-        </div>
-      )}
-      <Dialog open={dlgOpen} onOpenChange={setDlgOpen}>
-        <DialogContent className="bg-surface border-border">
-          <DialogHeader><DialogTitle>Create draft document</DialogTitle></DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>Draft name *</Label>
-              <Input value={draftName} onChange={(e) => setDraftName(e.target.value)} placeholder="e.g. Batch A" />
-            </div>
-            <div className="space-y-2">
-              <Label>Description</Label>
-              <Textarea rows={3} value={draftDesc} onChange={(e) => setDraftDesc(e.target.value)} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setDlgOpen(false)}>Cancel</Button>
-            <Button onClick={createDraft} disabled={!draftName.trim()} className="bg-gradient-brand text-white hover:opacity-90">
-              Create
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </StepCard>
-  );
-}
-
-/* ------------------ Step 5 ------------------ */
-function Step5Generated({ project }: { project: any }) {
+function StageDocuments({ project }: { project: any }) {
+  const loadProjectDetail = useStore((s) => s.loadProjectDetail);
   const count = project.generated.length;
   return (
     <StepCard
-      n={5}
-      title="View draft documents"
+      n={4}
+      title="Documents"
       count={count}
-      description="View draft documents created using your content mappings"
+      description="The letters generated from this template and your source data"
       icon={Network}
       iconColor="bg-brand/15 text-brand"
       status={count > 0 ? "Completed" : "Pending"}
@@ -573,11 +669,10 @@ function Step5Generated({ project }: { project: any }) {
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-sm truncate">{g.filename}</div>
                 <div className="text-xs text-muted-foreground">
-                  Generated from {g.fromDraft} · {g.generatedAt} · {g.size} · by {g.generatedBy}
+                  {g.generatedAt} · {g.size} · by {g.generatedBy}
                 </div>
               </div>
-              <button className="p-1.5 rounded hover:bg-accent text-muted-foreground" title="Preview"><Eye className="h-4 w-4" /></button>
-              <button className="p-1.5 rounded hover:bg-accent text-muted-foreground" title="Download"><Download className="h-4 w-4" /></button>
+              <DownloadDocButton documentId={g.id} filename={g.filename} />
               <Link
                 to="/projects/$id/edit/$docId"
                 params={{ id: project.id, docId: g.id }}
@@ -586,7 +681,30 @@ function Step5Generated({ project }: { project: any }) {
               >
                 <Pencil className="h-4 w-4" />
               </Link>
-              <button className="p-1.5 rounded hover:bg-accent text-muted-foreground" title="Regenerate"><RefreshCcw className="h-4 w-4" /></button>
+              {/* No Regenerate control: a document record keeps no manifest,
+                  source version or row index, so there is nothing to re-run it
+                  from. Re-generate the batch from Document Mapping instead. */}
+              <RowDeleteButton
+                label="Delete document"
+                title={`Delete "${g.filename}"?`}
+                description="This permanently deletes the document, every version of it, and the rendered file on disk. This cannot be undone."
+                confirmLabel="Delete document"
+                successMessage="Document deleted"
+                errorMessage="Couldn't delete the document"
+                // The server refuses an approved document with 409: approval is
+                // where somebody put their name to the contents, and §16's
+                // four-eyes rule means withdrawing that is its own recorded act.
+                // Saying so here beats letting them confirm and then be refused.
+                disabledReason={
+                  g.status === "approved"
+                    ? "Approved documents cannot be deleted. Revoke the approval first."
+                    : undefined
+                }
+                onDelete={async () => {
+                  await api.deleteDocument(g.id);
+                  await loadProjectDetail(project.id);
+                }}
+              />
             </div>
           ))}
         </div>
@@ -596,6 +714,192 @@ function Step5Generated({ project }: { project: any }) {
 }
 
 /* ------------------ Shared ------------------ */
+function ConfirmDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  confirmLabel,
+  busy,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  busy: boolean;
+  onConfirm: () => void | Promise<void>;
+}) {
+  return (
+    <AlertDialog open={open} onOpenChange={(v) => { if (!busy) onOpenChange(v); }}>
+      <AlertDialogContent className="bg-surface border-border">
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={busy}
+            // Radix closes on action click; the dialog has to stay up while the
+            // request is in flight so the disabled state is visible and a second
+            // click can't fire it. It closes when the caller's promise settles.
+            onClick={(e) => { e.preventDefault(); void onConfirm(); }}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {busy ? "Working…" : confirmLabel}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** Trash icon + confirmation for one row. `onDelete` should perform the request
+ *  and refresh; it throws on failure and this reports it. */
+function CompileTemplateButton({ templateId, projectId }: { templateId: string; projectId: string }) {
+  const loadProjectDetail = useStore((s) => s.loadProjectDetail);
+  const [busy, setBusy] = useState(false);
+  const { newToken, stages, failed } = useCompileProgress(busy);
+  const run = async () => {
+    const progressToken = newToken();
+    setBusy(true);
+    // No toast up front and no time estimate: an uncoloured template goes to a
+    // model and can take a couple of minutes, while a colour-coded one is read
+    // by the rules almost instantly. Promising a duration we cannot predict is
+    // worse than a spinner that plainly means "working".
+    try {
+      await api.compileManifest(templateId, { progressToken });
+      await loadProjectDetail(projectId);
+      toast.success("Template compiled", {
+        description: "Download the data template to get a spreadsheet with the right columns.",
+      });
+    } catch (e: any) {
+      toast.error("Could not compile this template", { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-col items-end gap-2">
+      <button
+        onClick={run}
+        disabled={busy}
+        title="Read this template and work out what data it needs"
+        className="h-8 px-3 rounded-lg bg-gradient-brand text-white text-xs inline-flex items-center gap-1.5 hover:opacity-90 disabled:opacity-60"
+      >
+        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <WandIcon className="h-3.5 w-3.5" />}
+        {busy ? "Reading…" : "Compile"}
+      </button>
+      {/* Only while it runs. A finished compile is described by the row itself
+          -- "Compiled · 25 fields, 5 conditions" -- and leaving the stage list
+          behind would say the same thing twice. */}
+      {busy && (
+        <div className="w-full min-w-[22rem]">
+          <CompileProgressList stages={stages} failed={failed} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function TemplateDataButton({ manifestId }: { manifestId: string }) {
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      const { url, filename } = await api.sourceTemplate(manifestId);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      toast.success("Data template downloaded", {
+        description: "Fill it in, then upload it under Sources — its columns already match this template.",
+      });
+    } catch (e: any) {
+      toast.error("Could not build the data template", { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button
+      onClick={run}
+      disabled={busy}
+      title="Download a spreadsheet with this template's columns already named"
+      className="h-8 px-3 rounded-lg border border-border text-xs inline-flex items-center gap-1.5 hover:bg-accent disabled:opacity-50"
+    >
+      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+      Data template
+    </button>
+  );
+}
+
+
+function RowDeleteButton({
+  label,
+  title,
+  description,
+  confirmLabel,
+  successMessage,
+  errorMessage,
+  onDelete,
+  disabledReason,
+}: {
+  label: string;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  successMessage: string;
+  errorMessage: string;
+  onDelete: () => Promise<void>;
+  /** When set, the control is inert and this says why. Better than letting the
+   *  user confirm a destructive dialog only to be refused by the server. */
+  disabledReason?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      await onDelete();
+      toast.success(successMessage);
+      setOpen(false);
+    } catch (e: any) {
+      toast.error(errorMessage, { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        disabled={busy || !!disabledReason}
+        className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-destructive disabled:opacity-40 disabled:cursor-not-allowed"
+        title={disabledReason ?? label}
+        aria-label={label}
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+      <ConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        busy={busy}
+        title={title}
+        description={description}
+        confirmLabel={confirmLabel}
+        onConfirm={run}
+      />
+    </>
+  );
+}
+
 function EmptyState({
   illustration,
   title,
@@ -628,12 +932,12 @@ function UploadDialog({
   onOpenChange: (v: boolean) => void;
   title: string;
   accept: string;
-  onUpload: (name: string) => void;
+  onUpload: (file: File) => void;
 }) {
   const [dragging, setDragging] = useState(false);
   const handle = (files: FileList | null) => {
     if (!files || !files[0]) return;
-    onUpload(files[0].name);
+    onUpload(files[0]);
     onOpenChange(false);
   };
   return (

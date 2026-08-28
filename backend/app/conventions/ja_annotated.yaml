@@ -1,0 +1,38 @@
+# Japanese masters. Formal Japanese business letters need no inflection handling
+# beyond the locale formatters, so this family is the Chinese shape with Japanese
+# vocabulary and the fullwidth delimiter set.
+
+id: ja_annotated
+language: ja
+description: Japanese instruction prose, fullwidth and CJK delimiters.
+
+delimiters:
+  - {open: "<", close: ">", kind: angle}
+  - {open: "＜", close: "＞", kind: angle_fullwidth}
+  - {open: "《", close: "》", kind: angle_cjk}
+  - {open: "【", close: "】", kind: bracket_cjk}
+
+# 「雇用形態が正社員の場合のみ以下を挿入：」
+include_pattern: '(.{1,20}?)が\s*(.+?)\s*の場合のみ.*?(?:挿入|適用)\s*[：:]?\s*$'
+include_groups: {field: 1, value: 2}
+
+# 「正社員の方へ：」 / 「正社員用：」
+entity_nouns: '社員用|従業員用|の方へ|職員用'
+for_entity_first_pattern: null
+for_value_first_pattern: '^\s*(.+?)\s*({entity_nouns})\s*[：:]?\s*$'
+for_start_pattern: null
+
+entity_field_overrides:
+  社員用: colleague_type
+  従業員用: colleague_type
+  の方へ: colleague_type
+  職員用: colleague_type
+
+gloss_pattern: '\s*[（(](?:例|例えば)[：:]?[^）)]*[）)]\s*$'
+
+put_pattern: '^\s*(?:ソースファイルから)?\s*(.+?)\s*(?:を入力|を挿入)\s*$'
+
+heading_max_len: 40
+
+# の場合 -- "in the case of". Written above the clause it governs.
+instruction_shape_pattern: 'の場合|の場合のみ|削除してください|挿入してください'

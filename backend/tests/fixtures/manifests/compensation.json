@@ -1,0 +1,1651 @@
+{
+ "_source": "compiled by llm:gemini-2.5-pro, reviewed and approved; snapshotted so fill tests run offline. Recompiling is a deliberate act, not a test side effect.",
+ "blocks": [
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 32,
+   "id": "blk_0_show_address_line2",
+   "start_paragraph": 32
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 45,
+   "id": "blk_1_show_variable_pay_clause",
+   "start_paragraph": 45
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 47,
+   "id": "blk_2_show_fixed_pay_clause",
+   "start_paragraph": 47
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 51,
+   "id": "blk_3_show_joining_bonus",
+   "start_paragraph": 51
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 54,
+   "id": "blk_4_show_retention_bonus",
+   "start_paragraph": 54
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 57,
+   "id": "blk_5_show_esop_units",
+   "start_paragraph": 57
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 58,
+   "id": "blk_6_delete_bonus_section_if_empty",
+   "start_paragraph": 49
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 62,
+   "id": "blk_7_show_relocation",
+   "start_paragraph": 62
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 65,
+   "id": "blk_8_show_shift_allowance",
+   "start_paragraph": 65
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 71,
+   "id": "blk_9_show_probation_clause",
+   "start_paragraph": 71
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 73,
+   "id": "blk_10_show_no_probation_clause",
+   "start_paragraph": 73
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 75,
+   "id": "blk_11_show_fixed_term_clause",
+   "start_paragraph": 75
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 105,
+   "id": "blk_12_show_variable_pay_row_annexure",
+   "start_paragraph": 104
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 109,
+   "id": "blk_13_show_joining_bonus_row_annexure",
+   "start_paragraph": 108
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 111,
+   "id": "blk_14_show_retention_bonus_row_annexure",
+   "start_paragraph": 110
+  },
+  {
+   "boundary_method": "llm",
+   "contains_fields": [],
+   "end_paragraph": 113,
+   "id": "blk_15_show_shift_allowance_row_annexure",
+   "start_paragraph": 112
+  }
+ ],
+ "compiled_by": "llm:gemini-2.5-pro",
+ "conditions": [
+  {
+   "compiled_from": "[[IF address_line2 is not blank]]<address_line2>[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "address_line2 is not blank",
+   "id": "show_address_line2",
+   "keeps_blocks": [
+    "blk_0_show_address_line2"
+   ]
+  },
+  {
+   "compiled_from": "[[IF variable_pay_percent > 0]]...[[ELSE]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "variable_pay_percent > 0",
+   "id": "show_variable_pay_clause",
+   "keeps_blocks": [
+    "blk_1_show_variable_pay_clause"
+   ]
+  },
+  {
+   "compiled_from": "[[IF variable_pay_percent > 0]]...[[ELSE]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "NOT (variable_pay_percent > 0)",
+   "id": "show_fixed_pay_clause",
+   "keeps_blocks": [
+    "blk_2_show_fixed_pay_clause"
+   ]
+  },
+  {
+   "compiled_from": "[[IF joining_bonus > 0]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "joining_bonus > 0",
+   "id": "show_joining_bonus",
+   "keeps_blocks": [
+    "blk_3_show_joining_bonus"
+   ]
+  },
+  {
+   "compiled_from": "[[IF retention_bonus > 0]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "retention_bonus > 0",
+   "id": "show_retention_bonus",
+   "keeps_blocks": [
+    "blk_4_show_retention_bonus"
+   ]
+  },
+  {
+   "compiled_from": "[[IF esop_units > 0]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "esop_units > 0",
+   "id": "show_esop_units",
+   "keeps_blocks": [
+    "blk_5_show_esop_units"
+   ]
+  },
+  {
+   "compiled_from": "[[IF joining_bonus = 0 AND retention_bonus = 0 AND esop_units = 0]] Delete this entire section including its heading. [[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "not (joining_bonus = 0 AND retention_bonus = 0 AND esop_units = 0)",
+   "id": "delete_bonus_section_if_empty",
+   "keeps_blocks": [
+    "blk_6_delete_bonus_section_if_empty"
+   ]
+  },
+  {
+   "compiled_from": "[[IF relocation_applicable = \"Yes\"]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "relocation_applicable = \"Yes\"",
+   "id": "show_relocation",
+   "keeps_blocks": [
+    "blk_7_show_relocation"
+   ]
+  },
+  {
+   "compiled_from": "[[IF shift_allowance_applicable = \"Yes\"]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "shift_allowance_applicable = \"Yes\"",
+   "id": "show_shift_allowance",
+   "keeps_blocks": [
+    "blk_8_show_shift_allowance"
+   ]
+  },
+  {
+   "compiled_from": "[[IF employment_type = \"Permanent\" AND probation_months > 0]]...[[ELSE IF]]...[[ELSE]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "employment_type = \"Permanent\" AND probation_months > 0",
+   "id": "show_probation_clause",
+   "keeps_blocks": [
+    "blk_9_show_probation_clause"
+   ]
+  },
+  {
+   "compiled_from": "[[ELSE IF employment_type = \"Permanent\" AND probation_months = 0]]...[[ELSE]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "employment_type = \"Permanent\" AND probation_months = 0",
+   "id": "show_no_probation_clause",
+   "keeps_blocks": [
+    "blk_10_show_no_probation_clause"
+   ]
+  },
+  {
+   "compiled_from": "[[ELSE]]...[[ENDIF]]",
+   "confidence": 0.6,
+   "expression": "employment_type != \"Permanent\"",
+   "id": "show_fixed_term_clause",
+   "keeps_blocks": [
+    "blk_11_show_fixed_term_clause"
+   ]
+  },
+  {
+   "compiled_from": "[[IF variable_pay_percent > 0]]...[[ENDIF]] and [[NOTE]] at [117]",
+   "confidence": 0.6,
+   "expression": "variable_pay_percent > 0",
+   "id": "show_variable_pay_row_annexure",
+   "keeps_blocks": [
+    "blk_12_show_variable_pay_row_annexure"
+   ]
+  },
+  {
+   "compiled_from": "[[IF joining_bonus > 0]]...[[ENDIF]] and [[NOTE]] at [117]",
+   "confidence": 0.6,
+   "expression": "joining_bonus > 0",
+   "id": "show_joining_bonus_row_annexure",
+   "keeps_blocks": [
+    "blk_13_show_joining_bonus_row_annexure"
+   ]
+  },
+  {
+   "compiled_from": "[[IF retention_bonus > 0]]...[[ENDIF]] and [[NOTE]] at [117]",
+   "confidence": 0.6,
+   "expression": "retention_bonus > 0",
+   "id": "show_retention_bonus_row_annexure",
+   "keeps_blocks": [
+    "blk_14_show_retention_bonus_row_annexure"
+   ]
+  },
+  {
+   "compiled_from": "[[IF shift_allowance_applicable = \"Yes\"]]...[[ENDIF]] and [[NOTE]] at [117]",
+   "confidence": 0.6,
+   "expression": "shift_allowance_applicable = \"Yes\"",
+   "id": "show_shift_allowance_row_annexure",
+   "keeps_blocks": [
+    "blk_15_show_shift_allowance_row_annexure"
+   ]
+  }
+ ],
+ "confidence": 0.7,
+ "delete_always": [
+  {
+   "paragraph_index": 0,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 12,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 14,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 18,
+   "partial": true,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 19,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 32,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 32,
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 44,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 46,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 48,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 50,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 52,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 53,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 55,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 56,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 58,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 59,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 61,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 63,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 64,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 66,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 68,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 70,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 72,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 74,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 76,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 104,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 104,
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 108,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 108,
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 110,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 110,
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 112,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 112,
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 117,
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 14,
+   "remove": [
+    "[[IF joining_bonus > 0]]",
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 18,
+   "remove": [
+    "[[IF <expr>]]",
+    "[[ELSE]]",
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 19,
+   "remove": [
+    "[[PROMPT: ...]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 32,
+   "remove": [
+    "[[IF address_line2 is not blank]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 32,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 44,
+   "remove": [
+    "[[IF variable_pay_percent > 0]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 46,
+   "remove": [
+    "[[ELSE]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 48,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 50,
+   "remove": [
+    "[[IF joining_bonus > 0]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 52,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 53,
+   "remove": [
+    "[[IF retention_bonus > 0]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 55,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 56,
+   "remove": [
+    "[[IF esop_units > 0]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 58,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 59,
+   "remove": [
+    "[[IF joining_bonus = 0 AND retention_bonus = 0 AND esop_units = 0]]",
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 61,
+   "remove": [
+    "[[IF relocation_applicable = \"Yes\"]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 63,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 64,
+   "remove": [
+    "[[IF shift_allowance_applicable = \"Yes\"]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 66,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 68,
+   "remove": [
+    "[[PROMPT: If work_location is Bengaluru, Chennai or Hyderabad, add one sentence on the location-specific transport facility; otherwise omit. Keep to a single sentence, same register as the surrounding text.]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 70,
+   "remove": [
+    "[[IF employment_type = \"Permanent\" AND probation_months > 0]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 72,
+   "remove": [
+    "[[ELSE IF employment_type = \"Permanent\" AND probation_months = 0]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 74,
+   "remove": [
+    "[[ELSE]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 76,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 104,
+   "remove": [
+    "[[IF variable_pay_percent > 0]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 104,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 108,
+   "remove": [
+    "[[IF joining_bonus > 0]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 108,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 110,
+   "remove": [
+    "[[IF retention_bonus > 0]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 110,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 112,
+   "remove": [
+    "[[IF shift_allowance_applicable = \"Yes\"]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 112,
+   "remove": [
+    "[[ENDIF]]"
+   ],
+   "span_index": 2
+  },
+  {
+   "paragraph_index": 117,
+   "remove": [
+    "[[NOTE: delete any row whose condition evaluates false - do not print the row with a zero or a blank amount.]]"
+   ],
+   "span_index": 0
+  },
+  {
+   "paragraph_index": 0,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 1,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 2,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 3,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 4,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 5,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 6,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 7,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 8,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 9,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 10,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 11,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 12,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 13,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 14,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 16,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 17,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 18,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 19,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 20,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 22,
+   "span_index": null
+  },
+  {
+   "paragraph_index": 117,
+   "span_index": null
+  }
+ ],
+ "fields": [
+  {
+   "compiled_from": null,
+   "id": "first_name",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 11,
+     "span_index": 0,
+     "text": "<first_name>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 30,
+     "span_index": 2,
+     "text": "<first_name>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 37,
+     "span_index": 1,
+     "text": "<first_name>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 83,
+     "span_index": 0,
+     "text": "<first_name>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 128,
+     "span_index": 0,
+     "text": "<first_name>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "last_name",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 11,
+     "span_index": 0,
+     "text": "<last_name>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 30,
+     "span_index": 4,
+     "text": "<last_name>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 83,
+     "span_index": 0,
+     "text": "<last_name>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 128,
+     "span_index": 2,
+     "text": "<last_name>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "letter_reference_no",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 27,
+     "span_index": 1,
+     "text": "<letter_reference_no>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "offer_date",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 28,
+     "span_index": 1,
+     "text": "<offer_date>"
+    }
+   ],
+   "source_hint": null,
+   "type": "date",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "salutation",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 30,
+     "span_index": 0,
+     "text": "<salutation>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 83,
+     "span_index": 0,
+     "text": "<salutation>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "address_line1",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 31,
+     "span_index": 0,
+     "text": "<address_line1>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "address_line2",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 32,
+     "span_index": 1,
+     "text": "<address_line2>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "city",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 33,
+     "span_index": 0,
+     "text": "<city>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "state",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 33,
+     "span_index": 2,
+     "text": "<state>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "pincode",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 33,
+     "span_index": 4,
+     "text": "<pincode>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "designation",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 38,
+     "span_index": 1,
+     "text": "<designation>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "grade_band",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 38,
+     "span_index": 3,
+     "text": "<grade_band>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "department",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 38,
+     "span_index": 5,
+     "text": "<department>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "work_location",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 38,
+     "span_index": 7,
+     "text": "<work_location>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "employment_type",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 38,
+     "span_index": 9,
+     "text": "<employment_type>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 75,
+     "span_index": 1,
+     "text": "<employment_type>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "reporting_manager",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 38,
+     "span_index": 11,
+     "text": "<reporting_manager>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "joining_date",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 39,
+     "span_index": 1,
+     "text": "<joining_date>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 83,
+     "span_index": 4,
+     "text": "<joining_date>"
+    }
+   ],
+   "source_hint": null,
+   "type": "date",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "currency",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 41,
+     "span_index": 1,
+     "text": "<currency>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 41,
+     "span_index": 5,
+     "text": "<currency>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 41,
+     "span_index": 9,
+     "text": "<currency>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 45,
+     "span_index": 3,
+     "text": "<currency>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 51,
+     "span_index": 1,
+     "text": "<currency>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 54,
+     "span_index": 1,
+     "text": "<currency>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 62,
+     "span_index": 1,
+     "text": "<currency>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 65,
+     "span_index": 1,
+     "text": "<currency>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 67,
+     "span_index": 3,
+     "text": "<currency>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "annual_ctc",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 41,
+     "span_index": 3,
+     "text": "<annual_ctc>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 107,
+     "span_index": 0,
+     "text": "<annual_ctc>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "total_fixed_pay",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 41,
+     "span_index": 7,
+     "text": "<total_fixed_pay>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 103,
+     "span_index": 0,
+     "text": "<total_fixed_pay>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "monthly_gross",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 41,
+     "span_index": 11,
+     "text": "<monthly_gross>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 115,
+     "span_index": 0,
+     "text": "<monthly_gross>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "variable_pay_percent",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 45,
+     "span_index": 1,
+     "text": "<variable_pay_percent>"
+    }
+   ],
+   "source_hint": null,
+   "type": "percent",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "variable_pay_amount",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 45,
+     "span_index": 5,
+     "text": "<variable_pay_amount>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 105,
+     "span_index": 0,
+     "text": "<variable_pay_amount>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "joining_bonus",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 51,
+     "span_index": 3,
+     "text": "<joining_bonus>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 109,
+     "span_index": 0,
+     "text": "<joining_bonus>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "joining_bonus_clawback_months",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 51,
+     "span_index": 5,
+     "text": "<joining_bonus_clawback_months>"
+    }
+   ],
+   "source_hint": null,
+   "type": "number",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "retention_bonus",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 54,
+     "span_index": 3,
+     "text": "<retention_bonus>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 111,
+     "span_index": 0,
+     "text": "<retention_bonus>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "retention_bonus_period_months",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 54,
+     "span_index": 5,
+     "text": "<retention_bonus_period_months>"
+    }
+   ],
+   "source_hint": null,
+   "type": "number",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "esop_units",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 57,
+     "span_index": 1,
+     "text": "<esop_units>"
+    }
+   ],
+   "source_hint": null,
+   "type": "number",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "esop_vesting_years",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 57,
+     "span_index": 3,
+     "text": "<esop_vesting_years>"
+    }
+   ],
+   "source_hint": null,
+   "type": "number",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "relocation_amount",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 62,
+     "span_index": 3,
+     "text": "<relocation_amount>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "shift_allowance_monthly",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 65,
+     "span_index": 3,
+     "text": "<shift_allowance_monthly>"
+    },
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 113,
+     "span_index": 0,
+     "text": "<shift_allowance_monthly>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "insurance_plan",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 67,
+     "span_index": 1,
+     "text": "<insurance_plan>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "insurance_sum_insured",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 67,
+     "span_index": 5,
+     "text": "<insurance_sum_insured>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "probation_months",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 71,
+     "span_index": 1,
+     "text": "<probation_months>"
+    }
+   ],
+   "source_hint": null,
+   "type": "number",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "notice_period_days",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 77,
+     "span_index": 1,
+     "text": "<notice_period_days>"
+    }
+   ],
+   "source_hint": null,
+   "type": "number",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "employee_id",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 83,
+     "span_index": 2,
+     "text": "<employee_id>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "basic_salary",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 87,
+     "span_index": 0,
+     "text": "<basic_salary>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "hra",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 89,
+     "span_index": 0,
+     "text": "<hra>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "conveyance_allowance",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 91,
+     "span_index": 0,
+     "text": "<conveyance_allowance>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "medical_allowance",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 93,
+     "span_index": 0,
+     "text": "<medical_allowance>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "lta",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 95,
+     "span_index": 0,
+     "text": "<lta>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "special_allowance",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 97,
+     "span_index": 0,
+     "text": "<special_allowance>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "pf_employer",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 99,
+     "span_index": 0,
+     "text": "<pf_employer>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "gratuity",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 101,
+     "span_index": 0,
+     "text": "<gratuity>"
+    }
+   ],
+   "source_hint": null,
+   "type": "currency",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "hr_spoc_name",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 121,
+     "span_index": 1,
+     "text": "<hr_spoc_name>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "hr_spoc_email",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 121,
+     "span_index": 3,
+     "text": "<hr_spoc_email>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "signatory_name",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 127,
+     "span_index": 0,
+     "text": "<signatory_name>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  },
+  {
+   "compiled_from": null,
+   "id": "signatory_designation",
+   "required": false,
+   "slots": [
+    {
+     "kind": "blue_placeholder",
+     "paragraph_index": 129,
+     "span_index": 0,
+     "text": "<signatory_designation>"
+    }
+   ],
+   "source_hint": null,
+   "type": "string",
+   "value_rule": null
+  }
+ ]
+}

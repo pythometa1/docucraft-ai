@@ -1,6 +1,7 @@
-import { createFileRoute, Link, notFound, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 import { useStore } from "@/lib/store";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
@@ -27,10 +28,13 @@ import {
   ArrowLeft,
   Save,
   Type,
+  AlertTriangle,
+  FileText,
+  Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-export const Route = createFileRoute("/_app/projects/$id/edit/$docId")({
+export const Route = createFileRoute("/_app/projects/$id_/edit/$docId")({
   head: ({ params }) => ({
     meta: [
       { title: `Edit document — DocuMind AI` },
@@ -39,39 +43,141 @@ export const Route = createFileRoute("/_app/projects/$id/edit/$docId")({
       { property: "og:description", content: "Refine AI-generated drafts with rich formatting before approval." },
     ],
   }),
-  loader: ({ params }) => {
-    const proj = useStore.getState().getProject(params.id);
-    const doc = proj?.generated.find((g) => g.id === params.docId);
-    if (!proj || !doc) throw notFound();
-    return null;
-  },
   component: DocEditor,
 });
 
-const DEFAULT_HTML = `
-<h1>Generated Draft</h1>
-<p>This draft was produced by <strong>DocuMind AI</strong> from your mapped source data. Review, edit, and approve when ready.</p>
-<h2>Summary</h2>
-<p>Replace this section with the executive summary. Use <em>italics</em> for emphasis and <strong>bold</strong> for key terms.</p>
-<h2>Details</h2>
-<ul><li>Point one from your source data</li><li>Point two with supporting evidence</li><li>Point three for context</li></ul>
-<blockquote>Any relevant citation or callout goes here.</blockquote>
-<h2>Next steps</h2>
-<ol><li>Verify data accuracy</li><li>Adjust tone and terminology</li><li>Approve for downstream workflow</li></ol>
-`;
+// There is deliberately no placeholder document here.
+//
+// This file used to define a DEFAULT_HTML draft -- "Replace this section with
+// the executive summary", "Point one from your source data" -- and fall back to
+// it whenever a version had no html_content. Every document produced by the
+// manifest path is exactly that case: it is a filled copy of the original .docx
+// and carries no HTML at all. So opening a real generated letter showed
+// invented content that looked like output, and one edit plus Save rebuilt the
+// .docx from that placeholder, overwriting the letter in place.
 
 function DocEditor() {
   const { id, docId } = Route.useParams();
-  const navigate = useNavigate();
-  const project = useStore((s) => s.projects.find((p) => p.id === id))!;
-  const doc = project.generated.find((g) => g.id === docId)!;
-  const storedContent = useStore((s) => s.docContent[docId]);
-  const approved = useStore((s) => !!s.docApproved[docId]);
-  const setDocContent = useStore((s) => s.setDocContent);
-  const approveDoc = useStore((s) => s.approveDoc);
+  const project = useStore((s) => s.projects.find((p) => p.id === id));
+  const loadProjectDetail = useStore((s) => s.loadProjectDetail);
+  const doc = project?.generated.find((g) => g.id === docId);
 
-  const initialContent = useMemo(() => storedContent ?? DEFAULT_HTML, [storedContent]);
+  const [versionId, setVersionId] = useState<string | null>(null);
+  const [initialHtml, setInitialHtml] = useState<string | null>(null);
+  const [htmlEditable, setHtmlEditable] = useState(false);
+  const [initialApproved, setInitialApproved] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!project) loadProjectDetail(id).catch((e: any) => setLoadError(e?.message ?? String(e)));
+  }, [id, project]);
+
+  useEffect(() => {
+    api.getDocument(docId)
+      .then((d) => api.getDocumentVersion(d.current_version_id).then((v) => {
+        setVersionId(v.id);
+        setInitialHtml(v.html_content ?? "");
+        // The backend decides this from the renderer that produced the file.
+        // Inferring it here from "does it have HTML?" is what put a rich-text
+        // editor in front of template-rendered letters: they carry an HTML
+        // preview, so they looked editable, and saving rebuilt the .docx from
+        // scratch and lost the layout.
+        setHtmlEditable(v.html_editable === true);
+        setInitialApproved(v.status === "approved" || v.status === "final");
+      }))
+      .catch((e: any) => setLoadError(e?.message ?? String(e)));
+  }, [docId]);
+
+  if (loadError) {
+    return (
+      <div className="p-8 max-w-lg mx-auto text-center space-y-3">
+        <p className="text-muted-foreground">{loadError}</p>
+        <Link to="/dashboard" className="text-brand hover:underline">Back to dashboard</Link>
+      </div>
+    );
+  }
+  if (!project || !doc || versionId === null || initialHtml === null) {
+    return <div className="p-8 text-muted-foreground">Loading document…</div>;
+  }
+
+  // Not HTML all the way down: the document *is* the .docx, and its layout came
+  // from a Word template. Offering a rich-text editor over it would show content
+  // that is not quite what is in the file, and saving would destroy the file.
+  if (!htmlEditable) {
+    return <TemplateGeneratedDocument projectId={id} versionId={versionId} filename={doc.filename} />;
+  }
+
+  return (
+    <DocEditorInner
+      key={versionId}
+      projectId={id}
+      projectName={project.name}
+      filename={doc.filename}
+      versionId={versionId}
+      initialHtml={initialHtml}
+      initialApproved={initialApproved}
+    />
+  );
+}
+
+function TemplateGeneratedDocument({ projectId, versionId, filename }: { projectId: string; versionId: string; filename: string }) {
+  const [downloading, setDownloading] = useState(false);
+
+  async function download() {
+    setDownloading(true);
+    try {
+      const url = await api.authedDownloadUrl(versionId);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  return (
+    <div className="p-8 max-w-2xl mx-auto space-y-5">
+      <Link to="/projects/$id" params={{ id: projectId }} className="text-sm text-muted-foreground hover:text-foreground">
+        ← Back to project
+      </Link>
+      <div className="rounded-xl border border-border bg-card p-6 space-y-4">
+        <div className="flex items-start gap-3">
+          <FileText className="h-5 w-5 mt-0.5 text-brand shrink-0" />
+          <div>
+            <h1 className="font-semibold">{filename}</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Generated by filling your Word template, so the letterhead, tables, headers and
+              hyperlinks are the template's own.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+          <AlertTriangle className="h-4 w-4 mt-0.5 text-amber-500 shrink-0" />
+          <span>
+            This document's layout comes from the template, not from HTML. Editing it here would
+            rebuild the file from scratch and lose that layout — download it and edit in Word instead.
+          </span>
+        </div>
+        <Button onClick={download} disabled={downloading}>
+          <Download className="h-4 w-4" /> {downloading ? "Preparing…" : "Download .docx"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function DocEditorInner({
+  projectId, projectName, filename, versionId, initialHtml, initialApproved,
+}: {
+  projectId: string; projectName: string; filename: string; versionId: string;
+  initialHtml: string; initialApproved: boolean;
+}) {
+  const navigate = useNavigate();
+  const id = projectId;
   const [dirty, setDirty] = useState(false);
+  const [approved, setApproved] = useState(initialApproved);
 
   const editor = useEditor({
     extensions: [
@@ -79,7 +185,7 @@ function DocEditor() {
       Underline,
       Placeholder.configure({ placeholder: "Start writing…" }),
     ],
-    content: initialContent,
+    content: initialHtml,
     editorProps: {
       attributes: {
         class:
@@ -96,21 +202,32 @@ function DocEditor() {
   if (!editor) return null;
 
   const save = () => {
-    setDocContent(docId, editor.getHTML());
-    setDirty(false);
-    toast.success("Draft saved");
+    api.saveDocumentVersion(versionId, editor.getHTML())
+      .then(() => {
+        setDirty(false);
+        toast.success("Draft saved");
+      })
+      .catch((e: any) => toast.error("Could not save", { description: e?.message ?? String(e) }));
   };
 
   const approve = () => {
-    setDocContent(docId, editor.getHTML());
-    approveDoc(docId, true);
-    setDirty(false);
-    toast.success("Draft approved");
+    api.saveDocumentVersion(versionId, editor.getHTML())
+      .then(() => api.approveDocumentVersion(versionId))
+      .then(() => {
+        setApproved(true);
+        setDirty(false);
+        toast.success("Draft approved");
+      })
+      .catch((e: any) => toast.error("Could not approve", { description: e?.message ?? String(e) }));
   };
 
   const unapprove = () => {
-    approveDoc(docId, false);
-    toast("Approval revoked");
+    api.revokeDocumentVersion(versionId)
+      .then(() => {
+        setApproved(false);
+        toast("Approval revoked");
+      })
+      .catch((e: any) => toast.error("Could not revoke", { description: e?.message ?? String(e) }));
   };
 
   return (
@@ -127,9 +244,9 @@ function DocEditor() {
         <div className="text-sm text-muted-foreground flex items-center gap-2 min-w-0">
           <Link to="/dashboard" className="hover:text-foreground">Projects</Link>
           <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-          <Link to="/projects/$id" params={{ id }} className="hover:text-foreground truncate">{project.name}</Link>
+          <Link to="/projects/$id" params={{ id }} className="hover:text-foreground truncate">{projectName}</Link>
           <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-          <span className="text-foreground truncate">{doc.filename}</span>
+          <span className="text-foreground truncate">{filename}</span>
         </div>
         <div className="ml-auto flex items-center gap-2">
           {approved ? (
@@ -152,6 +269,14 @@ function DocEditor() {
             </Button>
           )}
         </div>
+      </div>
+
+      {/* Editing rebuilds the .docx from this HTML, which discards the original
+          template's letterhead, tables and headers. Say so before they lose it. */}
+      <div className="border-b border-border bg-warning/10 px-6 py-2 text-xs text-warning flex items-center gap-2">
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        Saving here rebuilds the .docx from this editor's content — the original template's letterhead,
+        tables and headers won't survive. Download first if you need the original layout.
       </div>
 
       {/* Toolbar */}

@@ -1,8 +1,43 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState, useMemo } from "react";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { useStore, FUNCTION_COLORS } from "@/lib/store";
+import { api } from "@/lib/api";
+import type { FunctionKey, ProjectStatus } from "@/lib/types";
 import { StatusBadge } from "@/components/status-badge";
 import { CreateProjectSheet } from "@/components/create-project-sheet";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Search,
   Filter,
@@ -14,6 +49,9 @@ import {
   FileText,
   ChevronLeft,
   ChevronRight,
+  Archive,
+  ExternalLink,
+  Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -29,24 +67,175 @@ export const Route = createFileRoute("/_app/dashboard")({
   component: Dashboard,
 });
 
+const PAGE_SIZE = 10;
+
+/** The raw `status` values the backend stores and filters on -- the keys of
+ * STATUS_MAP in src/lib/store.ts. `archived` is a real stored status even though
+ * STATUS_MAP folds it onto the "Completed" badge, so it is filterable here. */
+const STATUS_FILTERS: { value: string; label: string }[] = [
+  { value: "pending", label: "Pending" },
+  { value: "in_progress", label: "In Progress" },
+  { value: "completed", label: "Completed" },
+  { value: "failed", label: "Failed" },
+  { value: "archived", label: "Archived" },
+];
+
+const DISPLAY_STATUS: Record<string, ProjectStatus> = {
+  pending: "Pending",
+  in_progress: "In Progress",
+  completed: "Completed",
+  failed: "Failed",
+  archived: "Completed",
+};
+
+interface Row {
+  id: string;
+  displayId: string;
+  name: string;
+  description: string;
+  documentType: string;
+  function: FunctionKey;
+  createdAt: string;
+  modifiedAt: string;
+  status: ProjectStatus;
+  /** The stored value, not the badge label: Archive has nothing to do once the
+   * project is already archived, and the badge cannot tell us that. */
+  rawStatus: string;
+}
+
+function toDisplayDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("en-US", {
+    month: "short", day: "numeric", year: "numeric",
+    hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
+  });
+}
+
+// The store's loadProjects() takes only `q`, and this screen also filters by
+// status and pages, so it queries the API directly and shapes the rows it needs.
+// If loadProjects ever grows those options this mapping should go back to it.
+function mapRow(p: any): Row {
+  return {
+    id: p.id,
+    displayId: String(p.display_id),
+    name: p.name,
+    description: p.description ?? "",
+    documentType: p.document_type,
+    function: p.function as FunctionKey,
+    createdAt: toDisplayDateTime(p.created_at),
+    modifiedAt: toDisplayDateTime(p.updated_at),
+    status: DISPLAY_STATUS[p.status] ?? "Pending",
+    rawStatus: p.status,
+  };
+}
+
 function Dashboard() {
-  const { projects, currentUser, totalCount } = useStore();
+  const currentUser = useStore((s) => s.currentUser);
+  const navigate = useNavigate();
+
   const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<string>("all");
+  const [offset, setOffset] = useState(0);
   const [createOpen, setCreateOpen] = useState(false);
 
-  const filtered = useMemo(() => {
-    if (!search) return projects;
-    const q = search.toLowerCase();
-    return projects.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.projectId.includes(q) ||
-        p.documentType.toLowerCase().includes(q) ||
-        p.function.toLowerCase().includes(q),
-    );
-  }, [projects, search]);
+  const [rows, setRows] = useState<Row[]>([]);
+  /** Size of the current result set when it can be established; null when the
+   * server's count cannot be trusted for this query (see load()). */
+  const [total, setTotal] = useState(0);
+  const [hasNext, setHasNext] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const [renameTarget, setRenameTarget] = useState<Row | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Row | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  // Keystrokes and page clicks can land out of order; only the newest response
+  // is allowed to write state, or a slow earlier query overwrites a later one.
+  const reqRef = useRef(0);
+  const load = useCallback(async () => {
+    const seq = ++reqRef.current;
+    setLoading(true);
+    try {
+      const res = await api.listProjects(search || undefined, {
+        status: status === "all" ? undefined : status,
+        limit: PAGE_SIZE,
+        offset,
+      });
+      if (seq !== reqRef.current) return;
+
+      const page = res.items ?? [];
+
+      // A page past the end (a delete emptied it, or the filter narrowed) strands
+      // the user on an empty table; step back instead. offset only shrinks, so
+      // this terminates.
+      if (page.length === 0 && offset > 0) {
+        setOffset((o) => Math.max(0, o - PAGE_SIZE));
+        return;
+      }
+
+      // `total` counts the rows matching the current q/status, which is what a
+      // pager has to divide. It used to count every project in the organisation,
+      // so a filtered list offered pages that were always empty.
+      const known = res.total;
+
+      setRows(page.map(mapRow));
+      setTotal(known);
+      setHasNext(offset + page.length < known);
+    } catch (e: any) {
+      if (seq !== reqRef.current) return;
+      toast.error("Could not load projects", { description: e?.message ?? String(e) });
+    } finally {
+      if (seq === reqRef.current) setLoading(false);
+    }
+  }, [search, status, offset]);
+
+  // Debounced so each keystroke doesn't fire a request, and filtered by the
+  // server rather than over whatever happens to be loaded on this page.
+  useEffect(() => {
+    const t = setTimeout(() => { void load(); }, search ? 250 : 0);
+    return () => clearTimeout(t);
+  }, [load, search]);
+
+  const resetToFirstPage = () => setOffset(0);
+
+  const runRowAction = async (row: Row, action: () => Promise<unknown>, success: string, failure: string): Promise<boolean> => {
+    // Returning undefined here read as failure to `confirmDelete`, which then
+    // left the dialog open with no toast and no explanation of why nothing
+    // happened. Unreachable while the trigger is disabled mid-action, but the
+    // caller is entitled to a definite answer.
+    if (busyId) return false;
+    setBusyId(row.id);
+    try {
+      await action();
+      toast.success(success, { description: row.name });
+      // The row has to leave (or change) on screen, or the action reads as a no-op.
+      await load();
+      return true;
+    } catch (e: any) {
+      toast.error(failure, { description: e?.message ?? String(e) });
+      return false;
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const archive = (row: Row) =>
+    runRowAction(row, () => api.archiveProject(row.id), "Project archived", "Could not archive project");
+
+  const confirmDelete = async () => {
+    const row = deleteTarget;
+    if (!row) return;
+    // Emptying the last page is handled by the reload inside runRowAction, which
+    // walks the offset back -- doing it here too would skip a page.
+    const ok = await runRowAction(row, () => api.deleteProject(row.id), "Project deleted", "Could not delete project");
+    if (ok) setDeleteTarget(null);
+  };
 
   const firstName = currentUser.split(" ")[0];
+  const shownCount = total;
+  const activeStatus = STATUS_FILTERS.find((s) => s.value === status);
+  const page = Math.floor(offset / PAGE_SIZE) + 1;
 
   return (
     <div className="p-8 space-y-8">
@@ -71,7 +260,7 @@ function Dashboard() {
         <div className="flex items-end justify-between gap-4 flex-wrap">
           <div>
             <h2 className="text-2xl font-semibold tracking-tight">
-              Content studio <span className="text-muted-foreground font-normal">({totalCount})</span>
+              Content studio <span className="text-muted-foreground font-normal">({shownCount})</span>
             </h2>
             <p className="text-sm text-muted-foreground mt-1">
               Start by creating a project. Everything you create will appear here for easy access and management.
@@ -82,16 +271,49 @@ function Dashboard() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <input
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => { setSearch(e.target.value); resetToFirstPage(); }}
                 className="h-9 rounded-lg bg-surface border border-border pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/50 w-56"
                 placeholder="Search projects…"
               />
             </div>
-            <button className="h-9 w-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center text-muted-foreground">
-              <Filter className="h-4 w-4" />
-            </button>
-            <button className="h-9 w-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center text-muted-foreground">
-              <RefreshCcw className="h-4 w-4" />
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  title={activeStatus ? `Status: ${activeStatus.label}` : "Filter by status"}
+                  className={cn(
+                    "h-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center gap-1.5 text-muted-foreground",
+                    activeStatus ? "px-3 border-brand/40 text-brand" : "w-9",
+                  )}
+                >
+                  <Filter className="h-4 w-4" />
+                  {activeStatus && <span className="text-xs font-medium">{activeStatus.label}</span>}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuLabel>Filter by status</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuRadioGroup
+                  value={status}
+                  onValueChange={(v) => { setStatus(v); resetToFirstPage(); }}
+                >
+                  <DropdownMenuRadioItem value="all">All statuses</DropdownMenuRadioItem>
+                  {STATUS_FILTERS.map((s) => (
+                    <DropdownMenuRadioItem key={s.value} value={s.value}>
+                      {s.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <button
+              onClick={() => void load()}
+              disabled={loading}
+              title="Refresh"
+              className="h-9 w-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center text-muted-foreground disabled:opacity-50"
+            >
+              <RefreshCcw className={cn("h-4 w-4", loading && "animate-spin")} />
             </button>
             <button
               onClick={() => setCreateOpen(true)}
@@ -119,12 +341,13 @@ function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((p, idx) => (
+                {rows.map((p, idx) => (
                   <tr
                     key={p.id}
                     className={cn(
                       "border-t border-border hover:bg-accent/40 transition-colors group",
                       idx % 2 === 1 && "bg-surface-elevated/30",
+                      busyId === p.id && "opacity-60",
                     )}
                   >
                     <td className="px-4 py-3 max-w-[220px]">
@@ -137,7 +360,7 @@ function Dashboard() {
                         {p.name}
                       </Link>
                     </td>
-                    <td className="px-4 py-3 font-mono text-sm text-muted-foreground whitespace-nowrap">{p.projectId}</td>
+                    <td className="px-4 py-3 font-mono text-sm text-muted-foreground whitespace-nowrap">{p.displayId}</td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       <span className="inline-flex items-center gap-2">
                         <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -164,24 +387,68 @@ function Dashboard() {
                       <StatusBadge status={p.status} />
                     </td>
                     <td className="px-4 py-3 pr-6">
+                      {/* Rename stays on the row because it is the everyday edit;
+                          Delete lives in the menu instead of beside it, so the one
+                          irreversible action is not a mis-click away from the one
+                          harmless one. */}
                       <div className="flex items-center justify-end gap-1 opacity-70 group-hover:opacity-100">
-                        <button className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground">
+                        <button
+                          onClick={() => setRenameTarget(p)}
+                          disabled={busyId != null}
+                          title="Rename project"
+                          className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-50"
+                        >
                           <Pencil className="h-4 w-4" />
                         </button>
-                        <button className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-destructive">
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                        <button className="p-1.5 rounded hover:bg-accent text-muted-foreground">
-                          <MoreHorizontal className="h-4 w-4" />
-                        </button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              disabled={busyId != null}
+                              title="More options"
+                              className="p-1.5 rounded hover:bg-accent text-muted-foreground disabled:opacity-50"
+                            >
+                              {busyId === p.id
+                                ? <Loader2 className="h-4 w-4 animate-spin" />
+                                : <MoreHorizontal className="h-4 w-4" />}
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-44">
+                            <DropdownMenuItem
+                              onSelect={() => navigate({ to: "/projects/$id", params: { id: p.id } })}
+                            >
+                              <ExternalLink className="h-4 w-4" /> Open
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => setRenameTarget(p)}>
+                              <Pencil className="h-4 w-4" /> Rename
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={p.rawStatus === "archived"}
+                              onSelect={() => { void archive(p); }}
+                            >
+                              <Archive className="h-4 w-4" />
+                              {p.rawStatus === "archived" ? "Archived" : "Archive"}
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              className="text-destructive focus:text-destructive"
+                              onSelect={() => setDeleteTarget(p)}
+                            >
+                              <Trash2 className="h-4 w-4" /> Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </div>
                     </td>
                   </tr>
                 ))}
-                {filtered.length === 0 && (
+                {rows.length === 0 && (
                   <tr>
                     <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground text-sm">
-                      No projects match your search.
+                      {loading
+                        ? "Loading projects…"
+                        : search || status !== "all"
+                          ? "No projects match your search."
+                          : "No projects yet. Create one to get started."}
                     </td>
                   </tr>
                 )}
@@ -189,13 +456,27 @@ function Dashboard() {
             </table>
           </div>
           <div className="border-t border-border px-4 py-3 flex items-center justify-between text-xs text-muted-foreground">
-            <div>Showing 1-{filtered.length} of {totalCount}</div>
+            <div>
+              {rows.length === 0
+                ? "Showing 0 projects"
+                : `Showing ${offset + 1}-${offset + rows.length} of ${total}`}
+            </div>
             <div className="flex items-center gap-1">
-              <button className="h-7 w-7 rounded border border-border hover:bg-accent flex items-center justify-center">
+              <button
+                onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+                disabled={offset === 0 || loading}
+                title="Previous page"
+                className="h-7 w-7 rounded border border-border hover:bg-accent flex items-center justify-center disabled:opacity-40 disabled:hover:bg-transparent"
+              >
                 <ChevronLeft className="h-3.5 w-3.5" />
               </button>
-              <span className="px-2">1</span>
-              <button className="h-7 w-7 rounded border border-border hover:bg-accent flex items-center justify-center">
+              <span className="px-2">{page}</span>
+              <button
+                onClick={() => setOffset((o) => o + PAGE_SIZE)}
+                disabled={!hasNext || loading}
+                title="Next page"
+                className="h-7 w-7 rounded border border-border hover:bg-accent flex items-center justify-center disabled:opacity-40 disabled:hover:bg-transparent"
+              >
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             </div>
@@ -204,7 +485,113 @@ function Dashboard() {
       </div>
 
       <CreateProjectSheet open={createOpen} onOpenChange={setCreateOpen} />
+
+      <RenameProjectDialog
+        target={renameTarget}
+        onClose={() => setRenameTarget(null)}
+        onSaved={() => { void load(); }}
+      />
+
+      <AlertDialog open={deleteTarget != null} onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete “{deleteTarget?.name}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes the project along with its templates, source files and every
+              document generated from it. This cannot be undone — archive it instead if you only want
+              it out of the way.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busyId != null}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={busyId != null}
+              // Radix closes on click; hold the dialog open so a failure stays
+              // in front of the user instead of vanishing behind a toast.
+              onClick={(e) => { e.preventDefault(); void confirmDelete(); }}
+            >
+              {busyId != null ? "Deleting…" : "Delete project"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+  );
+}
+
+function RenameProjectDialog({
+  target,
+  onClose,
+  onSaved,
+}: {
+  target: Row | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (target) {
+      setName(target.name);
+      setDescription(target.description);
+    }
+  }, [target]);
+
+  const save = async () => {
+    if (!target || saving || !name.trim()) return;
+    setSaving(true);
+    try {
+      await api.patchProject(target.id, { name: name.trim(), description });
+      toast.success("Project updated", { description: name.trim() });
+      onClose();
+      onSaved();
+    } catch (e: any) {
+      toast.error("Could not update project", { description: e?.message ?? String(e) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={target != null} onOpenChange={(o) => { if (!o && !saving) onClose(); }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit project</DialogTitle>
+          <DialogDescription>Rename this project or update its description.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="rename-name">Project name *</Label>
+            <Input
+              id="rename-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void save(); } }}
+              autoFocus
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="rename-desc">Description</Label>
+            <Textarea
+              id="rename-desc"
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Optional details about this project"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button onClick={() => void save()} disabled={saving || !name.trim()}>
+            {saving ? "Saving…" : "Save changes"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

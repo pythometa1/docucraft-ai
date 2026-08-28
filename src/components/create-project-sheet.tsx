@@ -34,20 +34,28 @@ export function CreateProjectSheet({
 
   const docOptions = fn ? DOCUMENT_TYPES[fn] ?? [] : [];
   const canCreate = name && fn && docType;
+  const [submitting, setSubmitting] = useState(false);
 
-  const submit = () => {
-    if (!canCreate) return;
-    const id = createProject({
-      name,
-      description,
-      region,
-      function: fn as FunctionKey,
-      documentType: docType,
-      language,
-    });
-    toast.success("Project created", { description: `"${name}" is ready to configure.` });
-    onOpenChange(false);
-    navigate({ to: "/projects/$id", params: { id } });
+  const submit = async () => {
+    if (!canCreate || submitting) return;
+    setSubmitting(true);
+    try {
+      const id = await createProject({
+        name,
+        description,
+        region,
+        function: fn as FunctionKey,
+        documentType: docType,
+        language,
+      });
+      toast.success("Project created", { description: `"${name}" is ready to configure.` });
+      onOpenChange(false);
+      navigate({ to: "/projects/$id", params: { id } });
+    } catch (e: any) {
+      toast.error("Could not create project", { description: e?.message ?? String(e) });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -144,7 +152,7 @@ export function CreateProjectSheet({
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button
             onClick={submit}
-            disabled={!canCreate}
+            disabled={!canCreate || submitting}
             className="bg-gradient-brand text-white hover:opacity-90"
           >
             Create

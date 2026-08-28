@@ -17,6 +17,13 @@ export interface TemplateFile {
   size: string;
   uploadedAt: string;
   uploadedBy: string;
+  // Whether the template has been read yet. A project cannot move past its
+  // first stage without this: nothing downstream knows what data the letter
+  // needs until the template has been compiled into a manifest.
+  manifestId?: string;
+  manifestStatus?: string;
+  fieldCount: number;
+  conditionCount: number;
 }
 
 export interface SourceFile {
@@ -26,21 +33,19 @@ export interface SourceFile {
   size: string;
   rows?: number;
   uploadedAt: string;
-}
-
-export interface Draft {
-  id: string;
-  name: string;
-  description?: string;
-  createdBy: string;
-  createdAt: string;
-  mappingsCount: number;
+  // The version everything downstream addresses: binding suggestions and
+  // generation are per source *version*, not per file.
+  currentVersionId?: string;
 }
 
 export interface GeneratedDoc {
   id: string;
   filename: string;
-  fromDraft: string;
+  // The download endpoint is /document-versions/{id}/download, so the version
+  // is what a download needs -- `id` here is the GeneratedDocument, and passing
+  // it produced a 404 on every document the new flow generates.
+  currentVersionId?: string;
+  status: string;
   generatedAt: string;
   size: string;
   generatedBy: string;
@@ -60,7 +65,6 @@ export interface Project {
   status: ProjectStatus;
   templates: TemplateFile[];
   sources: SourceFile[];
-  drafts: Draft[];
   generated: GeneratedDoc[];
   generationMethod?: "ai" | "chat" | "manual" | "hybrid";
 }

@@ -1,13 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FileText, Search, Plus, Star, Wand2, Braces, Sparkles, GitBranch, Repeat } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { TemplateEditor, DEFAULT_TEMPLATE_HTML } from "@/components/template-editor";
+import { TemplateEditor } from "@/components/template-editor";
 import { TemplateConversionWizard } from "@/components/template-conversion-wizard";
-import { useStore } from "@/lib/store";
+import { api } from "@/lib/api";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_app/templates")({
@@ -28,31 +28,31 @@ type Template = {
   id: string;
   name: string;
   category: string;
-  description: string;
-  updated: string;
-  author: string;
-  uses: number;
+  description: string | null;
   starred: boolean;
+  uses: number;
   version: string;
 };
 
-const SEED_TEMPLATES: Template[] = [
-  { id: "t1", name: "Offer Letter — EU Standard", category: "HR", description: "Compliant offer letter for EU-based hires with probation, benefits, and bonus clauses.", updated: "Jul 20, 2026", author: "Shubham Y.", uses: 142, starred: true, version: "v4.2" },
-  { id: "t2", name: "Clinical Study Report (CSR)", category: "Clinical", description: "ICH E3-compliant CSR skeleton with efficacy, safety, and PK sections.", updated: "Jul 18, 2026", author: "Elena V.", uses: 87, starred: true, version: "v2.1" },
-  { id: "t3", name: "CMC Section 3.2.P", category: "Quality-CMC", description: "Drug product CMC section following ICH M4Q Common Technical Document format.", updated: "Jul 15, 2026", author: "Priya S.", uses: 63, starred: false, version: "v3.0" },
-  { id: "t4", name: "Medical Affairs Poster", category: "Medical Affairs", description: "Congress poster layout with abstract, methods, results, and references blocks.", updated: "Jul 12, 2026", author: "Dina K.", uses: 41, starred: false, version: "v1.5" },
-  { id: "t5", name: "Product Launch Brief", category: "Marketing", description: "Cross-functional launch brief covering positioning, channels, KPIs, and timeline.", updated: "Jul 10, 2026", author: "Marcus L.", uses: 55, starred: true, version: "v2.0" },
-  { id: "t6", name: "Termination Letter — EU", category: "HR", description: "Compliant termination letter with notice periods per country.", updated: "Jul 08, 2026", author: "Shubham Y.", uses: 28, starred: false, version: "v1.3" },
-  { id: "t7", name: "MSA — Vendor Agreement", category: "Legal", description: "Master services agreement template with data processing addendum.", updated: "Jul 05, 2026", author: "Legal Team", uses: 34, starred: false, version: "v5.1" },
-];
-
 function TemplatesPage() {
-  const [templates, setTemplates] = useState<Template[]>(SEED_TEMPLATES);
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("All");
-  const [selectedId, setSelectedId] = useState<string>(SEED_TEMPLATES[0].id);
+  const [selectedId, setSelectedId] = useState<string>("");
   const [importOpen, setImportOpen] = useState(false);
-  const setTemplateContent = useStore((s) => s.setTemplateContent);
+
+  const refresh = () => {
+    api.listLibrary()
+      .then((r) => {
+        setTemplates(r.items);
+        if (!selectedId && r.items[0]) setSelectedId(r.items[0].id);
+      })
+      .catch((e: any) => toast.error("Could not load templates", { description: e?.message ?? String(e) }))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { refresh(); }, []);
 
   const list = useMemo(
     () => templates.filter(
@@ -64,30 +64,23 @@ function TemplatesPage() {
   const selected = templates.find((t) => t.id === selectedId) ?? list[0];
 
   const createBlank = () => {
-    const id = `tpl-${Date.now()}`;
-    const tpl: Template = {
-      id, name: "Untitled template", category: "HR",
-      description: "New template — start editing.",
-      updated: new Date().toLocaleDateString(),
-      author: "You", uses: 0, starred: false, version: "v0.1",
-    };
-    setTemplates((s) => [tpl, ...s]);
-    setTemplateContent(id, "<h1>Untitled template</h1><p>Start writing…</p>");
-    setSelectedId(id);
-    toast.success("New template created");
+    api.createLibraryEntry({ name: "Untitled template", category: "HR", content_html: "<h1>Untitled template</h1><p>Start writing…</p>" })
+      .then((tpl) => {
+        setTemplates((s) => [tpl, ...s]);
+        setSelectedId(tpl.id);
+        toast.success("New template created");
+      })
+      .catch((e: any) => toast.error("Could not create template", { description: e?.message ?? String(e) }));
   };
 
   const handleConvert = (r: { name: string; category: string; html: string }) => {
-    const id = `tpl-${Date.now()}`;
-    const tpl: Template = {
-      id, name: r.name, category: r.category,
-      description: "Converted from legacy document.",
-      updated: new Date().toLocaleDateString(),
-      author: "You", uses: 0, starred: false, version: "v0.1",
-    };
-    setTemplates((s) => [tpl, ...s]);
-    setTemplateContent(id, r.html);
-    setSelectedId(id);
+    api.createLibraryEntry({ name: r.name, category: r.category, content_html: r.html })
+      .then((tpl) => {
+        setTemplates((s) => [tpl, ...s]);
+        setSelectedId(tpl.id);
+        toast.success("Template converted", { description: r.name });
+      })
+      .catch((e: any) => toast.error("Could not save converted template", { description: e?.message ?? String(e) }));
   };
 
   return (
@@ -174,7 +167,7 @@ function TemplatesPage() {
                 </div>
               </button>
             ))}
-            {list.length === 0 && (
+            {!loading && list.length === 0 && (
               <div className="p-6 text-center text-sm text-muted-foreground">No templates match.</div>
             )}
           </div>
@@ -187,11 +180,10 @@ function TemplatesPage() {
               key={selected.id}
               templateId={selected.id}
               templateName={selected.name}
-              initialHtml={DEFAULT_TEMPLATE_HTML}
             />
           ) : (
             <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-              Select a template to start editing.
+              {loading ? "Loading templates…" : "Select a template to start editing."}
             </div>
           )}
         </div>

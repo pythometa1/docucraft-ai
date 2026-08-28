@@ -1,0 +1,113 @@
+name: CI
+
+# The gate itself lives in backend/scripts/check.sh, and this workflow calls it
+# rather than restating the commands. One definition, two triggers -- otherwise
+# "green locally" and "green in CI" drift into two different meanings of done.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        # pgvector's image, not stock postgres:16. §10 makes pgvector the
+        # semantic-memory store, so migration b2f47c9e1a63 runs
+        # `CREATE EXTENSION IF NOT EXISTS vector` -- which fails on an image
+        # that does not ship the extension files. Same server version, one
+        # extension more.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: documind
+          POSTGRES_PASSWORD: documind
+          POSTGRES_DB: documind_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+
+    env:
+      # The gate runs on SQLite, and a second job runs the identical suite
+      # against the PostgreSQL service below. Both are needed. SQLite keeps the
+      # suite runnable on a laptop with nothing installed; PostgreSQL is the only
+      # place row-level security, the pgvector column, foreign keys and the
+      # session timezone actually exist -- and every one of those has hidden a
+      # real defect in this codebase while the SQLite run stayed green.
+      DATABASE_URL: postgresql+psycopg://documind:documind@localhost:5432/documind_test
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-secret-not-used-outside-ci
+      # Deliberately empty. The suite must pass with no model configured; a test
+      # that needs a paid key is a test that gets skipped.
+      ANTHROPIC_API_KEY: ""
+      GEMINI_API_KEY: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Apply migrations against Postgres
+        # Not a formality: the schema is owned by Alembic, so a revision that
+        # fails on a real database fails here rather than on a deploy.
+        run: alembic upgrade head
+
+      - name: Run the gate
+        env:
+          PYTHON: python
+        run: ./scripts/check.sh
+
+      - name: Run the same suite against PostgreSQL
+        # The half SQLite cannot answer. Foreign keys are enforced here and
+        # ignored there; `json` has no equality operator here and does there;
+        # aware timestamps are converted to the session timezone here and stored
+        # verbatim there. A suite that only ever runs on SQLite is not evidence
+        # about the database this ships on.
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://documind:documind@localhost:5432/documind_test
+        run: python -m pytest -q
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: backend/coverage.xml
+
+      - name: Show changed goldens
+        # A golden diff is the signal the harness exists to produce, so make it
+        # visible in the log instead of leaving it as "binary files differ".
+        if: failure()
+        run: git diff --stat -- tests/fixtures/goldens tests/fixtures/snapshots || true
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun x tsc --noEmit

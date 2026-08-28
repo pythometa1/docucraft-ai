@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import { Link, useLocation } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import {
@@ -8,6 +9,7 @@ import {
   Users,
   Shield,
   Settings,
+  ClipboardCheck,
   Search,
   Bell,
   Sparkles,
@@ -18,8 +20,10 @@ import {
   X,
   Sun,
   Moon,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { useTheme } from "@/lib/theme";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -28,16 +32,40 @@ const NAV = [
   { to: "/dashboard", label: "Projects", icon: FolderKanban },
   { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/templates", label: "Templates", icon: FileText },
+  { to: "/review", label: "Review", icon: ClipboardCheck },
   { to: "/analytics", label: "Analytics", icon: BarChart3 },
   { to: "/team", label: "Team", icon: Users },
   { to: "/audit-log", label: "Audit Log", icon: Shield },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 
+function initials(name: string): string {
+  return name.split(" ").filter(Boolean).map((n) => n[0]).join("").slice(0, 2).toUpperCase();
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const location = useLocation();
   const user = useStore((s) => s.currentUser);
+  const loadCurrentUser = useStore((s) => s.loadCurrentUser);
   const { theme, toggle } = useTheme();
+
+  // Who is actually signed in, asked of the server. The name in the header used
+  // to be a constant in the bundle, so it read the same no matter whose token
+  // the app was holding.
+  useEffect(() => {
+    // A failure here is usually an expired or rejected token, which is exactly
+    // the case the header must not hide: swallowed, the app renders a signed-in
+    // shell around a session the server has already stopped honouring, and every
+    // screen inside it fails separately with no explanation.
+    void loadCurrentUser().catch((e: any) =>
+      toast.error("Could not confirm who is signed in", { description: e?.message ?? String(e) }),
+    );
+  }, [loadCurrentUser]);
+
+  async function signOut() {
+    await api.logout();
+    window.location.assign("/login");
+  }
 
   // Desktop: collapsed rail vs expanded. Persist preference.
   const [collapsed, setCollapsed] = useState<boolean>(() => {
@@ -148,9 +176,17 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Bell className="h-4 w-4" />
             <span className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-destructive" />
           </button>
+          <button
+            onClick={signOut}
+            className="p-2 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground"
+            aria-label="Sign out"
+            title="Sign out"
+          >
+            <LogOut className="h-4 w-4" />
+          </button>
           <Avatar className="h-8 w-8">
             <AvatarFallback className="bg-gradient-brand text-white text-xs">
-              {user.split(" ").map((n) => n[0]).join("")}
+              {initials(user)}
             </AvatarFallback>
           </Avatar>
         </header>
@@ -245,12 +281,12 @@ function SidebarInner({
         >
           <Avatar className="h-8 w-8 shrink-0">
             <AvatarFallback className="bg-gradient-brand text-white text-xs">
-              {user.split(" ").map((n) => n[0]).join("")}
+              {initials(user)}
             </AvatarFallback>
           </Avatar>
           {!collapsed && (
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">{user}</div>
+              <div className="truncate text-sm font-medium">{user || "…"}</div>
               <div className="text-xs text-muted-foreground">Enterprise</div>
             </div>
           )}

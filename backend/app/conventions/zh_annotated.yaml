@@ -1,0 +1,55 @@
+# Simplified Chinese masters. Same red/blue (or green/yellow) marking as
+# `en_annotated`; only the grammar of the instruction and the shape of the
+# delimiters differ, which is exactly the boundary a convention family draws.
+#
+# Fullwidth ＜＞ are folded to ASCII by NFKC, so they would match the ASCII pair
+# anyway -- but they are declared explicitly because the *token* the fill engine
+# replaces has to be the one the template actually wrote. 《》 and 【】 are not
+# compatibility forms and NFKC leaves them alone, so they must be declared.
+
+id: zh_annotated
+language: zh
+description: Simplified Chinese instruction prose, fullwidth and CJK delimiters.
+
+delimiters:
+  - {open: "<", close: ">", kind: angle}
+  - {open: "＜", close: "＞", kind: angle_fullwidth}
+  - {open: "《", close: "》", kind: angle_cjk}
+  - {open: "【", close: "】", kind: bracket_cjk}
+
+# 「以下内容仅在员工类型为全职时插入：」-- the explicit form written for an
+# assembly tool, mirroring the English `Include the following text only if ...`.
+include_pattern: '以下(?:内容|段落)?(?:仅|只)?在(.{1,20}?)(?:为|是)(.+?)时(?:插入|适用|显示)\s*[：:]?\s*$'
+include_groups: {field: 1, value: 2}
+
+# Both orders occur: 「适用于全职员工：」 (prefix) and 「全职员工适用：」 (suffix).
+entity_nouns: '员工|同事|职员|雇员'
+for_entity_first_pattern: '^\s*(?:仅|只)?适用于\s*(.+?)\s*({entity_nouns})\s*[：:]?\s*$'
+for_value_first_pattern: '^\s*(.+?)\s*({entity_nouns})\s*(?:适用|专用)\s*[：:]?\s*$'
+# No leading keyword to anchor on; the parser always tries position 0.
+for_start_pattern: null
+
+# The noun names the field. Chinese has no plural inflection to strip, so every
+# recognised noun is mapped explicitly.
+entity_field_overrides:
+  员工: colleague_type
+  同事: colleague_type
+  职员: colleague_type
+  雇员: colleague_type
+
+# 「（例如：调岗）」 -- the author's aside to a human reader, not part of the value.
+gloss_pattern: '\s*[（(](?:例如|比如|如)[：:]?[^）)]*[）)]\s*$'
+
+put_pattern: '^\s*(?:请)?(?:从源文件)?(?:填入|填写|插入)\s*(.+?)\s*$'
+
+instruction_phrases:
+  - 参见联系人矩阵
+
+heading_max_len: 40
+
+# 「适用于全职员工：」 names the value before the entity noun, unlike English.
+for_entity_first_groups: {value: 1, entity: 2}
+for_value_first_groups: {value: 1, entity: 2}
+
+# 适用 -- "applies to". The shape this family writes above a conditional clause.
+instruction_shape_pattern: '适用|仅当|如果|请删除|请插入|保留'

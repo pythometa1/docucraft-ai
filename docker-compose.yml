@@ -1,0 +1,94 @@
+# A whole DocuMind, locally, on the same components it runs on in production.
+#
+# The point is not convenience. The suite defaults to SQLite, and SQLite cannot
+# express row-level security, the pgvector column type, or PostgreSQL's session
+# timezone -- all three of which have already hidden real defects in this
+# codebase. Running against this stack is how those get caught before a deploy
+# rather than after one.
+#
+#   docker compose up -d db redis
+#   docker compose run --rm migrate
+#   docker compose up api
+#
+services:
+  db:
+    # pgvector's image, not stock postgres: §10 stores embeddings in a `vector`
+    # column and stock postgres does not ship the extension, so the migration
+    # that creates it fails.
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: documind_owner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-documind_local_dev}
+      POSTGRES_DB: documind
+      # Deterministic timestamps regardless of where the host thinks it is.
+      # Every DateTime column here is TIMESTAMP WITHOUT TIME ZONE and the app
+      # writes aware UTC; PostgreSQL converts to the session timezone before
+      # stripping the offset, so a server in another zone silently shifts every
+      # timestamp it stores. The app pins this per connection too -- belt and
+      # braces, because this one is invisible when it goes wrong.
+      TZ: UTC
+      PGTZ: UTC
+    command: ["postgres", "-c", "timezone=UTC"]
+    ports: ["5432:5432"]
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./backend/scripts/init-db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U documind_owner -d documind"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # Rate-limit buckets, token revocation and download grants. All of it is
+    # transient by design (§14), so no volume: losing it costs a user one
+    # re-login, and persisting it means restoring stale revocations.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: ./backend
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      # The OWNER role, not the application role: migrations create tables,
+      # enable row-level security and create the pgvector extension, none of
+      # which the application role is allowed to do -- deliberately.
+      DATABASE_URL: postgresql+psycopg://documind_owner:${POSTGRES_PASSWORD:-documind_local_dev}@db:5432/documind
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-local-development-only-not-a-real-secret}
+    depends_on:
+      db: {condition: service_healthy}
+
+  api:
+    build: ./backend
+    environment:
+      ENV: ${ENV:-development}
+      # The APPLICATION role: NOSUPERUSER, NOBYPASSRLS. This is what makes
+      # row-level security a control rather than an ornament -- a superuser
+      # reads through every policy while everything still looks correct.
+      DATABASE_URL: postgresql+psycopg://documind_app:${APP_DB_PASSWORD:-documind_app_local}@db:5432/documind
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-local-development-only-not-a-real-secret}
+      STORAGE_DIR: /var/lib/documind
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      LLM_RESIDENCY: ${LLM_RESIDENCY:-GLOBAL}
+      LLM_ZERO_RETENTION: ${LLM_ZERO_RETENTION:-false}
+    ports: ["8000:8000"]
+    volumes:
+      - storage:/var/lib/documind
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+
+volumes:
+  db_data:
+  storage:

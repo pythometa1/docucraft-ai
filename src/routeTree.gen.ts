@@ -9,19 +9,26 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AppTemplatesRouteImport } from './routes/_app.templates'
 import { Route as AppTeamRouteImport } from './routes/_app.team'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
+import { Route as AppReviewRouteImport } from './routes/_app.review'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppChatRouteImport } from './routes/_app.chat'
 import { Route as AppAuditLogRouteImport } from './routes/_app.audit-log'
 import { Route as AppAnalyticsRouteImport } from './routes/_app.analytics'
 import { Route as AppProjectsIdRouteImport } from './routes/_app.projects.$id'
-import { Route as AppProjectsIdMappingDraftIdRouteImport } from './routes/_app.projects.$id.mapping.$draftId'
-import { Route as AppProjectsIdEditDocIdRouteImport } from './routes/_app.projects.$id.edit.$docId'
+import { Route as AppProjectsIdStudioTemplateIdRouteImport } from './routes/_app.projects.$id_.studio.$templateId'
+import { Route as AppProjectsIdEditDocIdRouteImport } from './routes/_app.projects.$id_.edit.$docId'
 
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AppRoute = AppRouteImport.update({
   id: '/_app',
   getParentRoute: () => rootRouteImport,
@@ -44,6 +51,11 @@ const AppTeamRoute = AppTeamRouteImport.update({
 const AppSettingsRoute = AppSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppReviewRoute = AppReviewRouteImport.update({
+  id: '/review',
+  path: '/review',
   getParentRoute: () => AppRoute,
 } as any)
 const AppDashboardRoute = AppDashboardRouteImport.update({
@@ -71,109 +83,129 @@ const AppProjectsIdRoute = AppProjectsIdRouteImport.update({
   path: '/projects/$id',
   getParentRoute: () => AppRoute,
 } as any)
-const AppProjectsIdMappingDraftIdRoute =
-  AppProjectsIdMappingDraftIdRouteImport.update({
-    id: '/mapping/$draftId',
-    path: '/mapping/$draftId',
-    getParentRoute: () => AppProjectsIdRoute,
+const AppProjectsIdStudioTemplateIdRoute =
+  AppProjectsIdStudioTemplateIdRouteImport.update({
+    id: '/projects/$id_/studio/$templateId',
+    path: '/projects/$id/studio/$templateId',
+    getParentRoute: () => AppRoute,
   } as any)
 const AppProjectsIdEditDocIdRoute = AppProjectsIdEditDocIdRouteImport.update({
-  id: '/edit/$docId',
-  path: '/edit/$docId',
-  getParentRoute: () => AppProjectsIdRoute,
+  id: '/projects/$id_/edit/$docId',
+  path: '/projects/$id/edit/$docId',
+  getParentRoute: () => AppRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/analytics': typeof AppAnalyticsRoute
   '/audit-log': typeof AppAuditLogRoute
   '/chat': typeof AppChatRoute
   '/dashboard': typeof AppDashboardRoute
+  '/review': typeof AppReviewRoute
   '/settings': typeof AppSettingsRoute
   '/team': typeof AppTeamRoute
   '/templates': typeof AppTemplatesRoute
-  '/projects/$id': typeof AppProjectsIdRouteWithChildren
+  '/projects/$id': typeof AppProjectsIdRoute
   '/projects/$id/edit/$docId': typeof AppProjectsIdEditDocIdRoute
-  '/projects/$id/mapping/$draftId': typeof AppProjectsIdMappingDraftIdRoute
+  '/projects/$id/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/analytics': typeof AppAnalyticsRoute
   '/audit-log': typeof AppAuditLogRoute
   '/chat': typeof AppChatRoute
   '/dashboard': typeof AppDashboardRoute
+  '/review': typeof AppReviewRoute
   '/settings': typeof AppSettingsRoute
   '/team': typeof AppTeamRoute
   '/templates': typeof AppTemplatesRoute
-  '/projects/$id': typeof AppProjectsIdRouteWithChildren
+  '/projects/$id': typeof AppProjectsIdRoute
   '/projects/$id/edit/$docId': typeof AppProjectsIdEditDocIdRoute
-  '/projects/$id/mapping/$draftId': typeof AppProjectsIdMappingDraftIdRoute
+  '/projects/$id/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_app': typeof AppRouteWithChildren
+  '/login': typeof LoginRoute
   '/_app/analytics': typeof AppAnalyticsRoute
   '/_app/audit-log': typeof AppAuditLogRoute
   '/_app/chat': typeof AppChatRoute
   '/_app/dashboard': typeof AppDashboardRoute
+  '/_app/review': typeof AppReviewRoute
   '/_app/settings': typeof AppSettingsRoute
   '/_app/team': typeof AppTeamRoute
   '/_app/templates': typeof AppTemplatesRoute
-  '/_app/projects/$id': typeof AppProjectsIdRouteWithChildren
-  '/_app/projects/$id/edit/$docId': typeof AppProjectsIdEditDocIdRoute
-  '/_app/projects/$id/mapping/$draftId': typeof AppProjectsIdMappingDraftIdRoute
+  '/_app/projects/$id': typeof AppProjectsIdRoute
+  '/_app/projects/$id_/edit/$docId': typeof AppProjectsIdEditDocIdRoute
+  '/_app/projects/$id_/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/login'
     | '/analytics'
     | '/audit-log'
     | '/chat'
     | '/dashboard'
+    | '/review'
     | '/settings'
     | '/team'
     | '/templates'
     | '/projects/$id'
     | '/projects/$id/edit/$docId'
-    | '/projects/$id/mapping/$draftId'
+    | '/projects/$id/studio/$templateId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/login'
     | '/analytics'
     | '/audit-log'
     | '/chat'
     | '/dashboard'
+    | '/review'
     | '/settings'
     | '/team'
     | '/templates'
     | '/projects/$id'
     | '/projects/$id/edit/$docId'
-    | '/projects/$id/mapping/$draftId'
+    | '/projects/$id/studio/$templateId'
   id:
     | '__root__'
     | '/'
     | '/_app'
+    | '/login'
     | '/_app/analytics'
     | '/_app/audit-log'
     | '/_app/chat'
     | '/_app/dashboard'
+    | '/_app/review'
     | '/_app/settings'
     | '/_app/team'
     | '/_app/templates'
     | '/_app/projects/$id'
-    | '/_app/projects/$id/edit/$docId'
-    | '/_app/projects/$id/mapping/$draftId'
+    | '/_app/projects/$id_/edit/$docId'
+    | '/_app/projects/$id_/studio/$templateId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AppRoute: typeof AppRouteWithChildren
+  LoginRoute: typeof LoginRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_app': {
       id: '/_app'
       path: ''
@@ -207,6 +239,13 @@ declare module '@tanstack/react-router' {
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof AppSettingsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/review': {
+      id: '/_app/review'
+      path: '/review'
+      fullPath: '/review'
+      preLoaderRoute: typeof AppReviewRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/dashboard': {
@@ -244,46 +283,35 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppProjectsIdRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/projects/$id/mapping/$draftId': {
-      id: '/_app/projects/$id/mapping/$draftId'
-      path: '/mapping/$draftId'
-      fullPath: '/projects/$id/mapping/$draftId'
-      preLoaderRoute: typeof AppProjectsIdMappingDraftIdRouteImport
-      parentRoute: typeof AppProjectsIdRoute
+    '/_app/projects/$id_/studio/$templateId': {
+      id: '/_app/projects/$id_/studio/$templateId'
+      path: '/projects/$id/studio/$templateId'
+      fullPath: '/projects/$id/studio/$templateId'
+      preLoaderRoute: typeof AppProjectsIdStudioTemplateIdRouteImport
+      parentRoute: typeof AppRoute
     }
-    '/_app/projects/$id/edit/$docId': {
-      id: '/_app/projects/$id/edit/$docId'
-      path: '/edit/$docId'
+    '/_app/projects/$id_/edit/$docId': {
+      id: '/_app/projects/$id_/edit/$docId'
+      path: '/projects/$id/edit/$docId'
       fullPath: '/projects/$id/edit/$docId'
       preLoaderRoute: typeof AppProjectsIdEditDocIdRouteImport
-      parentRoute: typeof AppProjectsIdRoute
+      parentRoute: typeof AppRoute
     }
   }
 }
-
-interface AppProjectsIdRouteChildren {
-  AppProjectsIdEditDocIdRoute: typeof AppProjectsIdEditDocIdRoute
-  AppProjectsIdMappingDraftIdRoute: typeof AppProjectsIdMappingDraftIdRoute
-}
-
-const AppProjectsIdRouteChildren: AppProjectsIdRouteChildren = {
-  AppProjectsIdEditDocIdRoute: AppProjectsIdEditDocIdRoute,
-  AppProjectsIdMappingDraftIdRoute: AppProjectsIdMappingDraftIdRoute,
-}
-
-const AppProjectsIdRouteWithChildren = AppProjectsIdRoute._addFileChildren(
-  AppProjectsIdRouteChildren,
-)
 
 interface AppRouteChildren {
   AppAnalyticsRoute: typeof AppAnalyticsRoute
   AppAuditLogRoute: typeof AppAuditLogRoute
   AppChatRoute: typeof AppChatRoute
   AppDashboardRoute: typeof AppDashboardRoute
+  AppReviewRoute: typeof AppReviewRoute
   AppSettingsRoute: typeof AppSettingsRoute
   AppTeamRoute: typeof AppTeamRoute
   AppTemplatesRoute: typeof AppTemplatesRoute
-  AppProjectsIdRoute: typeof AppProjectsIdRouteWithChildren
+  AppProjectsIdRoute: typeof AppProjectsIdRoute
+  AppProjectsIdEditDocIdRoute: typeof AppProjectsIdEditDocIdRoute
+  AppProjectsIdStudioTemplateIdRoute: typeof AppProjectsIdStudioTemplateIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
@@ -291,10 +319,13 @@ const AppRouteChildren: AppRouteChildren = {
   AppAuditLogRoute: AppAuditLogRoute,
   AppChatRoute: AppChatRoute,
   AppDashboardRoute: AppDashboardRoute,
+  AppReviewRoute: AppReviewRoute,
   AppSettingsRoute: AppSettingsRoute,
   AppTeamRoute: AppTeamRoute,
   AppTemplatesRoute: AppTemplatesRoute,
-  AppProjectsIdRoute: AppProjectsIdRouteWithChildren,
+  AppProjectsIdRoute: AppProjectsIdRoute,
+  AppProjectsIdEditDocIdRoute: AppProjectsIdEditDocIdRoute,
+  AppProjectsIdStudioTemplateIdRoute: AppProjectsIdStudioTemplateIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
@@ -302,7 +333,18 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AppRoute: AppRouteWithChildren,
+  LoginRoute: LoginRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
+
+import type { getRouter } from './router.tsx'
+import type { startInstance } from './start.ts'
+declare module '@tanstack/react-start' {
+  interface Register {
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
+  }
+}

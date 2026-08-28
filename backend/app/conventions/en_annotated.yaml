@@ -1,0 +1,102 @@
+# The convention family every English client master in the estate has used so
+# far: instruction runs marked red (or highlighted green), value placeholders
+# marked blue (or highlighted yellow), everything else static.
+#
+# A family is the *grammar* a set of masters share, not a template. Engine
+# behaviour is selected by family, never by template identity -- that is what
+# keeps a thousand templates on one codebase. Adding a template that follows this
+# grammar costs a profile run and a golden fixture; adding a template that does
+# not costs one new file in this directory.
+#
+# Every pattern here was previously a module constant in manifest_compiler.py.
+# They are reproduced verbatim so that extracting them changed no behaviour --
+# see tests/test_conventions.py::test_the_default_family_matches_the_legacy_grammar.
+
+id: en_annotated
+language: en
+description: English instruction prose, red/blue font colour or green/yellow highlight.
+
+# Delimiter pairs that mark a value placeholder. `kind` reaches the manifest as
+# the slot kind, so downstream code can tell an angle placeholder from a live
+# Word field.
+delimiters:
+  - {open: "<", close: ">", kind: angle}
+  # Word writes a MERGEFIELD's display text between guillemets, and authors who
+  # started from a mail-merge master keep typing them by hand long after the
+  # field itself is gone -- so `«TRF_NEW_SALARY»` arrives as ordinary blue text
+  # with no field code behind it. The prescan finds no mergefields, the bracket
+  # pass does not recognise the pair, and the placeholder is classified as
+  # static: it survives into the letter with the salary still unfilled, while
+  # the manifest reports nothing missing. Measured on a real client master:
+  # three of these, all blue, all silently dropped.
+  - {open: "«", close: "»", kind: guillemet}
+
+# `Include the following text [till X] only if the <field> is <value>:`
+# The value group is free text, not `[\w\s]+`: authors gloss their own switch
+# values -- `... is initiated with recruitment (e.g. Change Job with
+# Recruitment):` -- and a word-characters-only group cannot cross the parentheses
+# or the period inside `e.g.`. The match then fails silently, the condition never
+# compiles, and the instruction falls through to the generic red-span rule that
+# deletes the whole paragraph, taking the sentence's static text with it.
+include_pattern: 'include the following (?:text|section)(?:\s+till\s+([\w\s]+?))?\s+only if the ([\w\s]+?) is (.+?)\s*:?\s*$'
+include_groups: {till: 1, field: 2, value: 3}
+
+# The same instruction in the dialect clients write before anyone rewrites a
+# template for an assembly tool: `For Full time colleagues:`, `For transactions
+# initiated with recruitment (e.g. ...):`. The entity noun names the field --
+# "colleagues" branches on colleague_type -- so the field is derived rather than
+# hardcoded to one template's vocabulary. Both word orders occur in the same
+# document, so both are matched, entity-first first because its anchor is the
+# more specific of the two.
+entity_nouns: 'colleagues?|employees?|transactions?|contracts?|workers?|staff|candidates?'
+for_entity_first_pattern: '^\s*(?:insert\s+)?for\s+({entity_nouns})\s+(.+?)\s*:?\s*$'
+for_value_first_pattern: '^\s*(?:insert\s+)?for\s+(.+?)\s+({entity_nouns})\s*:?\s*$'
+# Where a `For ...` instruction may begin inside a longer run of scaffolding.
+# An inline zone hands the parser the previous branch's trailing instruction
+# glued to the front of the next one.
+for_start_pattern: '\b(?:insert\s+)?for\b'
+
+# `colleagues` -> `colleague_type`. Overrides are for nouns with no singular form
+# a naive de-pluralisation would find.
+entity_field_suffix: _type
+entity_field_overrides:
+  staff: staff_type
+
+# `(e.g. Change Job with Recruitment)` is the author explaining the value to a
+# human reader, not part of the value. Left in, it slugs into a condition literal
+# no source column will ever equal.
+gloss_pattern: '\s*\((?:e\.?\s*g\.?|i\.?\s*e\.?|for example|such as)[^)]*\)\s*$'
+
+# `For transactions initiated with recruitment` qualifies the entity with a
+# participle and then names the value as a prepositional phrase; the spreadsheet
+# column holds only the phrase ("With Recruitment"). Narrow by construction: the
+# participle must sit immediately before the preposition.
+leading_qualifier_pattern: '^\w+ed\s+(?=(?:with|without|under|over|on|in|at|by|via|from|for)\b)'
+
+# `Put the X from source file` -- a source hint addressed to whoever assembles
+# the letter, never content.
+put_pattern: '^\s*put\s+(.+?)\s*$'
+
+# Text this family's authors write as an aside to the assembler. Any of these
+# surviving into a letter fails the gate.
+instruction_phrases:
+  - Refer to Contact Matrix
+
+# A block's end is inferred by scanning forward; a short line with no terminal
+# punctuation is treated as the heading of the next section rather than as more
+# of the current block.
+heading_max_len: 60
+
+# Text that reads like a branch instruction in this family. Matching raises
+# W-MARKER-PARSE, blocks approval, and hands the template to a model -- it
+# compiles nothing on its own.
+#
+# Two shapes, because English-writing estates use both: a shouted imperative
+# standing above the clause it governs ("USE IF ON TEMPORARY ASSIGNMENT"), and
+# the same imperative parenthesised inside one ("(Include if part time hours)").
+# `only if` and `for ...` are the forms this family's include_pattern already
+# compiles; they stay so a near-miss on those still escalates.
+#
+# Biased towards firing. A false positive costs a reviewer one acknowledgement;
+# a false negative costs a paragraph nobody notices is gone.
+instruction_shape_pattern: 'only if|^\s*(?:insert\s+)?for\b|^\s*(?:use|include|always include|remove|delete|insert)\b|\((?:include|remove|insert|delete|use)\b'

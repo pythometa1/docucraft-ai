@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
@@ -16,7 +16,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { useStore } from "@/lib/store";
+import { api } from "@/lib/api";
 
 /* ------------------------- Token nodes ------------------------- */
 
@@ -122,20 +122,30 @@ const DEFAULT_SOURCE_FIELDS = [
 type Props = {
   templateId: string;
   templateName: string;
-  initialHtml?: string;
   onSaved?: () => void;
 };
 
-export function TemplateEditor({ templateId, templateName, initialHtml, onSaved }: Props) {
-  const stored = useStore((s) => s.templateContent[templateId]);
-  const setTemplateContent = useStore((s) => s.setTemplateContent);
+export function TemplateEditor({ templateId, templateName, onSaved }: Props) {
+  const [loadedHtml, setLoadedHtml] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const startingContent = useMemo(
-    () => stored ?? initialHtml ?? DEFAULT_TEMPLATE_HTML,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [templateId],
-  );
+  useEffect(() => {
+    setLoadedHtml(null);
+    api.getLibraryContent(templateId)
+      .then((r) => setLoadedHtml(r.content_html || DEFAULT_TEMPLATE_HTML))
+      .catch((e: any) => setLoadError(e?.message ?? String(e)));
+  }, [templateId]);
 
+  if (loadError) {
+    return <div className="flex-1 flex items-center justify-center text-sm text-destructive p-6 text-center">{loadError}</div>;
+  }
+  if (loadedHtml === null) {
+    return <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">Loading template…</div>;
+  }
+  return <TemplateEditorInner key={templateId} templateId={templateId} templateName={templateName} initialHtml={loadedHtml} onSaved={onSaved} />;
+}
+
+function TemplateEditorInner({ templateId, templateName, initialHtml, onSaved }: Props & { initialHtml: string }) {
   const [dirty, setDirty] = useState(false);
   const [selection, setSelection] = useState<null | {
     type: "source" | "prompt" | "conditional" | "repeat";
@@ -153,7 +163,7 @@ export function TemplateEditor({ templateId, templateName, initialHtml, onSaved 
       ConditionalToken,
       RepeatToken,
     ],
-    content: startingContent,
+    content: initialHtml,
     editorProps: {
       attributes: {
         class: "tpl-editor min-h-[60vh] focus:outline-none max-w-none text-foreground",
@@ -164,7 +174,7 @@ export function TemplateEditor({ templateId, templateName, initialHtml, onSaved 
       refreshSelection(e);
     },
     onSelectionUpdate: ({ editor: e }) => refreshSelection(e),
-  }, [templateId]);
+  });
 
   function refreshSelection(e: Editor) {
     const node = e.state.selection.$from.nodeAfter ?? e.state.selection.$from.parent;
@@ -200,10 +210,13 @@ export function TemplateEditor({ templateId, templateName, initialHtml, onSaved 
   };
 
   const save = () => {
-    setTemplateContent(templateId, editor.getHTML());
-    setDirty(false);
-    toast.success("Template saved");
-    onSaved?.();
+    api.saveLibraryContent(templateId, editor.getHTML())
+      .then(() => {
+        setDirty(false);
+        toast.success("Template saved");
+        onSaved?.();
+      })
+      .catch((e: any) => toast.error("Could not save", { description: e?.message ?? String(e) }));
   };
 
   const updateSelectedAttrs = (patch: Record<string, any>) => {

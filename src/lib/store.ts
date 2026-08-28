@@ -1,62 +1,80 @@
 import { create } from "zustand";
-import type { Project, ProjectStatus, FunctionKey } from "./types";
+import { api } from "./api";
+import type { FunctionKey, GeneratedDoc, Project, ProjectStatus, SourceFile, TemplateFile } from "./types";
 
-const CURRENT_USER = "Shubham Yeljale";
+const STATUS_MAP: Record<string, ProjectStatus> = {
+  pending: "Pending",
+  in_progress: "In Progress",
+  completed: "Completed",
+  failed: "Failed",
+  archived: "Completed",
+};
 
-function now() {
-  return new Date().toISOString();
+function toDisplayDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("en-US", {
+    month: "short", day: "numeric", year: "numeric",
+    hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
+  });
 }
 
-const seedProjects: Project[] = [
-  mk("simple2", "51002", "TestQuality", "Quality" as FunctionKey, "Completed", "Jul 22, 2026, 02:59:03 AM", "Jul 23, 2026, 09:35:39 PM"),
-  mk("cmc_888", "51253", "CMC Section", "Quality-CMC", "Completed", "Jul 23, 2026, 05:51:16 PM", "Jul 23, 2026, 07:54:10 PM"),
-  mk("test222", "51255", "HR Letters", "Human Resources", "Completed", "Jul 23, 2026, 07:51:06 PM", "Jul 23, 2026, 07:53:28 PM", { generated: 1 }),
-  mk("VAS_Test_07_23", "51302", "HR Letters", "Human Resources", "In Progress", "Jul 23, 2026, 06:12:00 PM", "Jul 23, 2026, 06:45:00 PM"),
-  mk("dina-test-poster-1", "51102", "Medical Poster", "Medical Affairs", "Completed", "Jul 23, 2026, 04:10:00 PM", "Jul 23, 2026, 05:22:00 PM"),
-  mk("test-prog-bar", "51252", "CMC Section", "Quality-CMC", "In Progress", "Jul 23, 2026, 03:15:00 PM", "Jul 23, 2026, 04:02:00 PM"),
-  mk("test12", "51254", "HR Letters", "Human Resources", "Pending", "Jul 23, 2026, 02:00:00 PM", "Jul 23, 2026, 02:00:00 PM"),
-  mk("EU_Q3_HR_2026", "51360", "Offer Letter", "Human Resources", "Completed", "Jul 22, 2026, 09:00:00 AM", "Jul 22, 2026, 11:30:00 AM"),
-  mk("Clinical_Study_ONCO_003", "51361", "Clinical Study Report", "Clinical", "In Progress", "Jul 21, 2026, 10:00:00 AM", "Jul 23, 2026, 08:00:00 PM"),
-  mk("Marketing_Launch_Q4", "51362", "Product Brief", "Marketing", "Pending", "Jul 20, 2026, 11:00:00 AM", "Jul 20, 2026, 11:00:00 AM"),
-];
-
-function mk(
-  name: string,
-  projectId: string,
-  documentType: string,
-  fn: FunctionKey,
-  status: ProjectStatus,
-  createdAt: string,
-  modifiedAt: string,
-  opts: { generated?: number } = {},
-): Project {
+function mapProject(p: any, existing?: Project): Project {
   return {
-    id: projectId,
-    projectId,
-    name,
-    documentType,
-    function: fn,
-    region: "Europe",
-    language: "English",
-    createdAt,
-    modifiedAt,
-    status,
-    templates: [],
-    sources: [],
-    drafts: [],
-    generated:
-      opts.generated
-        ? [
-            {
-              id: `gen-${projectId}`,
-              filename: `${name}_${projectId}_50615_en.docx`,
-              fromDraft: "test1",
-              generatedAt: "Jul 23, 2026, 07:58:00 PM",
-              size: "0.04 MB",
-              generatedBy: CURRENT_USER,
-            },
-          ]
-        : [],
+    id: p.id,
+    projectId: String(p.display_id),
+    name: p.name,
+    description: p.description ?? undefined,
+    documentType: p.document_type,
+    function: p.function as FunctionKey,
+    region: p.region,
+    language: p.language,
+    createdAt: toDisplayDateTime(p.created_at),
+    modifiedAt: toDisplayDateTime(p.updated_at),
+    status: STATUS_MAP[p.status] ?? "Pending",
+    templates: existing?.templates ?? [],
+    sources: existing?.sources ?? [],
+    generated: existing?.generated ?? [],
+    generationMethod: p.generation_settings?.method ?? existing?.generationMethod,
+  };
+}
+
+function mapTemplateFile(t: any): TemplateFile {
+  return {
+    id: t.id, name: t.name,
+    size: t.section_count != null ? `${t.section_count} sections` : "—",
+    uploadedAt: toDisplayDateTime(t.created_at),
+    uploadedBy: t.created_by_name ?? "—",
+    manifestId: t.manifest_id ?? undefined,
+    manifestStatus: t.manifest_status ?? undefined,
+    fieldCount: t.field_count ?? 0,
+    conditionCount: t.condition_count ?? 0,
+  };
+}
+
+function mapSourceFile(s: any): SourceFile {
+  return { id: s.id, name: s.name, currentVersionId: s.current_version_id ?? undefined, type: s.file_type, size: s.chunk_count != null ? `${s.chunk_count} chunks` : "—", rows: s.chunk_count ?? undefined, uploadedAt: toDisplayDateTime(s.created_at) };
+}
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function mapGeneratedDoc(g: any, projectName: string): GeneratedDoc {
+  return {
+    id: g.id,
+    filename: g.filename,
+    currentVersionId: g.current_version_id ?? undefined,
+    // "blocked" means the §19 canary QA gate stopped this document. It is not
+    // downloadable and saying so is the whole point of the gate, so the status
+    // has to survive into the row rather than being dropped here.
+    status: g.status ?? "draft",
+    generatedAt: toDisplayDateTime(g.created_at),
+    size: formatBytes(g.size_bytes),
+    generatedBy: g.created_by_name ?? "—",
   };
 }
 
@@ -70,154 +88,97 @@ interface CreateProjectInput {
 }
 
 interface Store {
+  /** Empty until loadCurrentUser() resolves -- never a placeholder name, since
+   * a fabricated identity in the header is indistinguishable from a real one. */
   currentUser: string;
+  loadCurrentUser: () => Promise<void>;
   projects: Project[];
   totalCount: number;
-  docContent: Record<string, string>;
-  docApproved: Record<string, boolean>;
-  templateContent: Record<string, string>;
-  createProject: (input: CreateProjectInput) => string;
+  loaded: boolean;
+  loadProjects: (q?: string) => Promise<void>;
+  loadProjectDetail: (id: string) => Promise<void>;
+  createProject: (input: CreateProjectInput) => Promise<string>;
   getProject: (id: string) => Project | undefined;
-  addTemplate: (projectId: string, name: string) => void;
-  addSource: (projectId: string, name: string, type: string) => void;
-  setGenerationMethod: (projectId: string, m: Project["generationMethod"]) => void;
-  addDraft: (projectId: string, name: string, description?: string) => string;
-  addGenerated: (projectId: string, filename: string, fromDraft: string) => void;
-  setDocContent: (docId: string, html: string) => void;
-  approveDoc: (docId: string, approved: boolean) => void;
-  setTemplateContent: (templateId: string, html: string) => void;
+  addTemplate: (projectId: string, file: File) => Promise<void>;
+  addSource: (projectId: string, file: File) => Promise<void>;
+  setGenerationMethod: (projectId: string, method: string, model?: string, temperature?: number) => Promise<void>;
+  refreshGenerated: (projectId: string) => Promise<void>;
 }
 
-let counter = 51363;
-
 export const useStore = create<Store>((set, get) => ({
-  currentUser: CURRENT_USER,
-  projects: seedProjects,
-  totalCount: 1250,
-  docContent: {},
-  docApproved: {},
-  templateContent: {},
-  createProject: (input) => {
-    const id = String(counter++);
-    const created: Project = {
-      id,
-      projectId: id,
-      name: input.name,
-      description: input.description,
-      documentType: input.documentType,
-      function: input.function,
-      region: input.region,
-      language: input.language,
-      createdAt: new Date().toLocaleString("en-US"),
-      modifiedAt: new Date().toLocaleString("en-US"),
-      status: "Pending",
-      templates: [],
-      sources: [],
-      drafts: [],
-      generated: [],
-    };
-    set((s) => ({ projects: [created, ...s.projects], totalCount: s.totalCount + 1 }));
-    return id;
+  currentUser: "",
+
+  loadCurrentUser: async () => {
+    const me = await api.me();
+    set({ currentUser: me.full_name });
   },
-  getProject: (id) => get().projects.find((p) => p.id === id),
-  addTemplate: (projectId, name) =>
+
+  projects: [],
+  totalCount: 0,
+  loaded: false,
+
+  loadProjects: async (q?: string) => {
+    const res = await api.listProjects(q);
     set((s) => ({
-      projects: s.projects.map((p) =>
-        p.id === projectId
-          ? {
-              ...p,
-              templates: [
-                ...p.templates,
-                {
-                  id: `tpl-${Date.now()}`,
-                  name,
-                  size: "142 KB",
-                  uploadedAt: new Date().toLocaleString(),
-                  uploadedBy: CURRENT_USER,
-                },
-              ],
-              modifiedAt: new Date().toLocaleString(),
-            }
-          : p,
-      ),
-    })),
-  addSource: (projectId, name, type) =>
-    set((s) => ({
-      projects: s.projects.map((p) =>
-        p.id === projectId
-          ? {
-              ...p,
-              sources: [
-                ...p.sources,
-                {
-                  id: `src-${Date.now()}`,
-                  name,
-                  type: (type as any) || "csv",
-                  size: "38 KB",
-                  rows: 50,
-                  uploadedAt: new Date().toLocaleString(),
-                },
-              ],
-              modifiedAt: new Date().toLocaleString(),
-            }
-          : p,
-      ),
-    })),
-  setGenerationMethod: (projectId, m) =>
-    set((s) => ({
-      projects: s.projects.map((p) => (p.id === projectId ? { ...p, generationMethod: m } : p)),
-    })),
-  addDraft: (projectId, name, description) => {
-    const draftId = `draft-${Date.now()}`;
-    set((s) => ({
-      projects: s.projects.map((p) =>
-        p.id === projectId
-          ? {
-              ...p,
-              drafts: [
-                ...p.drafts,
-                {
-                  id: draftId,
-                  name,
-                  description,
-                  createdBy: CURRENT_USER,
-                  createdAt: new Date().toLocaleString(),
-                  mappingsCount: 0,
-                },
-              ],
-            }
-          : p,
-      ),
+      projects: res.items.map((p) => mapProject(p, s.projects.find((ex) => ex.id === p.id))),
+      totalCount: res.total,
+      loaded: true,
     }));
-    return draftId;
   },
-  addGenerated: (projectId, filename, fromDraft) =>
-    set((s) => ({
-      projects: s.projects.map((p) =>
-        p.id === projectId
-          ? {
-              ...p,
-              generated: [
-                ...p.generated,
-                {
-                  id: `gen-${Date.now()}`,
-                  filename,
-                  fromDraft,
-                  generatedAt: new Date().toLocaleString(),
-                  size: "0.04 MB",
-                  generatedBy: CURRENT_USER,
-                },
-              ],
-            }
-          : p,
-      ),
-    })),
-  setDocContent: (docId, html) =>
-    set((s) => ({ docContent: { ...s.docContent, [docId]: html } })),
-  approveDoc: (docId, approved) =>
-    set((s) => ({ docApproved: { ...s.docApproved, [docId]: approved } })),
-  setTemplateContent: (templateId, html) =>
-    set((s) => ({ templateContent: { ...s.templateContent, [templateId]: html } })),
+
+  loadProjectDetail: async (id) => {
+    // No drafts call, and no drafts state: that pipeline is gone. It had no
+    // manifest, so it filled nothing -- a template of placeholders came back out
+    // of it unchanged -- and it sat in front of the flow that works. Document
+    // Mapping replaced it, and the last of its plumbing went with the wizard.
+    const [project, templates, sources, generated] = await Promise.all([
+      api.getProject(id),
+      api.listTemplates(id),
+      api.listSources(id),
+      api.listProjectDocuments(id),
+    ]);
+    set((s) => {
+      const mapped = mapProject(project);
+      mapped.templates = templates.items.map(mapTemplateFile);
+      mapped.sources = sources.items.map(mapSourceFile);
+      mapped.generated = generated.items.map((g) => mapGeneratedDoc(g, project.name));
+      const idx = s.projects.findIndex((p) => p.id === id);
+      const next = [...s.projects];
+      if (idx >= 0) next[idx] = mapped;
+      else next.unshift(mapped);
+      return { projects: next };
+    });
+  },
+
+  createProject: async (input) => {
+    const created = await api.createProject({
+      name: input.name, description: input.description, region: input.region,
+      function: input.function, document_type: input.documentType, language: input.language,
+    });
+    set((s) => ({ projects: [mapProject(created), ...s.projects], totalCount: s.totalCount + 1 }));
+    return created.id;
+  },
+
+  getProject: (id) => get().projects.find((p) => p.id === id),
+
+  addTemplate: async (projectId, file) => {
+    await api.uploadTemplate(projectId, file, file.name);
+    await get().loadProjectDetail(projectId);
+  },
+
+  addSource: async (projectId, file) => {
+    await api.uploadSource(projectId, file, file.name);
+    await get().loadProjectDetail(projectId);
+  },
+
+  setGenerationMethod: async (projectId, method, model, temperature) => {
+    await api.patchProject(projectId, { generation_settings: { method, model, temperature } });
+    await get().loadProjectDetail(projectId);
+  },
+
+  refreshGenerated: async (projectId) => {
+    await get().loadProjectDetail(projectId);
+  },
 }));
 
 export const FUNCTIONS: FunctionKey[] = [
