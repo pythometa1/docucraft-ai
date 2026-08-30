@@ -158,10 +158,23 @@ class AnthropicProvider(LLMProvider):
                 output_config={"format": {"type": "json_schema", "schema": schema}},
                 messages=[{"role": "user", "content": prompt}],
             )
+            # A refusal and a truncation are both *billed*. Returning them
+            # without their token counts -- which this did -- reports a call
+            # that cost real money as having cost nothing, and a compile that
+            # exhausts its output budget twelve rounds running is exactly the
+            # expensive case the cost figures exist to expose. Gemini and OpenAI
+            # already carry usage on every path; this is Anthropic catching up.
             if resp.stop_reason == "refusal":
-                return StructuredResult(data=None, model=model, error="Model declined the request.")
+                return StructuredResult(
+                    data=None, model=model, error="Model declined the request.",
+                    input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens,
+                )
             if resp.stop_reason == "max_tokens":
-                return StructuredResult(data=None, model=model, error="Response exceeded max_tokens; output was truncated.")
+                return StructuredResult(
+                    data=None, model=model,
+                    error="Response exceeded max_tokens; output was truncated.",
+                    input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens,
+                )
             raw = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
             return StructuredResult(
                 data=json.loads(raw), model=model,
@@ -581,6 +594,23 @@ def get_llm_provider(
         enforce_llm_policy(policy, configured_provider_boundary())
 
     generate, compile_ = _provider_names()
-    if generate == compile_:
-        return _build(generate, capability)
-    return RoutedProvider(_build(generate, capability), _build(compile_, capability))
+    inner = (
+        _build(generate, capability) if generate == compile_
+        else RoutedProvider(_build(generate, capability), _build(compile_, capability))
+    )
+
+    # Metering goes here for the same reason residency does, one paragraph up:
+    # there is no way to obtain a provider without passing through this
+    # function, and the alternative -- recording at each call site -- was tried
+    # for token counts and every one of the thirteen forgot.
+    #
+    # The wrap is outermost, so `RoutedProvider`'s choice of vendor is invisible
+    # to the meter and the recorded model is whatever actually answered.
+    meter = getattr(policy, "meter", None) if policy is not None else None
+    if meter is None:
+        # An unscoped call has no tenant to bill, and inventing one would be
+        # worse than not recording it.
+        return inner
+    from app.llm.metering import MeteredProvider
+
+    return MeteredProvider(inner, meter=meter, capability=capability)

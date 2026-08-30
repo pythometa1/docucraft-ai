@@ -6,6 +6,7 @@ import {
   MessageSquare,
   FileText,
   BarChart3,
+  Gauge,
   Users,
   Shield,
   Settings,
@@ -34,6 +35,10 @@ const NAV = [
   { to: "/templates", label: "Templates", icon: FileText },
   { to: "/review", label: "Review", icon: ClipboardCheck },
   { to: "/analytics", label: "Analytics", icon: BarChart3 },
+  // §22's numbers, which were measured continuously and shown nowhere. A
+  // role without READ_AUDIT gets a plain explanation rather than a 403 toast,
+  // so this is not hidden from the nav.
+  { to: "/quality", label: "Quality", icon: Gauge },
   { to: "/team", label: "Team", icon: Users },
   { to: "/audit-log", label: "Audit Log", icon: Shield },
   { to: "/settings", label: "Settings", icon: Settings },

@@ -33,7 +33,7 @@ from app.generation.docx_renderer import fill_template
 from app.generation.source_ingestion import extract_records
 from app.generation.renderers import OOXML_FILL
 from app.generation.resolution_engine import CyclicDependencyError, resolve_manifest
-from app.generation.value_format import resolve_locale
+from app.generation.value_format import resolve_locale, resolved_locale
 
 
 @dataclass
@@ -184,6 +184,12 @@ def run_row(
         condition_lineage=fill.condition_lineage,
         qa_passed=fill.qa_passed and not resolution.needs_review,
         qa_notes=fill.qa_notes, blob_path=out_rel, created_by=user_id,
+        # The lineage's link to its document, as a real column. Reaching it via
+        # `blob_path` was never reliable: `apply_version_text` writes a different
+        # path, so an edited document lost its lineage, and previews share paths
+        # -- which meant `retention.delete_generated_document`, which deletes by
+        # path, could destroy another document's record.
+        document_version_id=version.id,
     )
     db.add(generation)
     db.flush()
@@ -202,6 +208,10 @@ def run_row(
             manifest_id=manifest.id, unit_id=task["unit_id"], kind=task["kind"],
             question=task["question"], context=task["context"],
             proposed_value=task.get("proposed_value"),
+            # Which letter this question is about, so answering it can move the
+            # document, and so the queue can show the reader what they are
+            # deciding for. `created_by` stays null: the machine raised this one.
+            document_version_id=version.id,
         ))
 
     return RowOutcome(
@@ -245,7 +255,10 @@ def run_batch(
         project = db.get(Project, job.project_id)
         template_version = db.get(TemplateVersion, manifest.template_version_id)
         template_path = str(abs_path(template_version.blob_path))
-        locale = locale_override or resolve_locale(region=project.region)
+        locale, locale_source = (
+            (locale_override, "request") if locale_override
+            else resolved_locale(region=project.region, project_locale=project.locale)
+        )
 
         _columns, records = extract_records(str(abs_path(source_blob_path)), source_file_type, sheet)
         if row_indices is not None:
@@ -254,7 +267,16 @@ def run_batch(
 
         job.status = "running"
         job.started_at = datetime.now(timezone.utc)
-        job.progress = {"rows_total": len(records), "rows_done": 0, "generated": 0, "pending_review": 0, "failed": 0}
+        # Carried on the job so the formatting decision is visible where the
+        # documents are. Without it a reviewer reading "May 9, 2024" on an
+        # Australian letter cannot tell a configured choice from a default
+        # nobody made -- and the default is what every project got, because the
+        # region vocabulary is continental and maps to no locale.
+        job.progress = {
+            "rows_total": len(records), "rows_done": 0, "generated": 0,
+            "pending_review": 0, "failed": 0,
+            "locale": locale, "locale_source": locale_source,
+        }
         db.commit()
 
         # ---- canary set first ----
@@ -278,6 +300,10 @@ def run_batch(
                 "blocked": sum(1 for r in rows if r.status == "blocked"),
                 "failed": sum(1 for r in rows if r.status == "failed"),
                 "canary_size": len(canary),
+                # Re-stated on every publish: this dict is replaced wholesale,
+                # so anything set once at the start is lost on the first row.
+                "locale": locale,
+                "locale_source": locale_source,
                 "rows": [r.__dict__ for r in rows],
             }
             # Commit per row so progress is observable while the batch runs and

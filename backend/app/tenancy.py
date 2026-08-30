@@ -45,7 +45,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dc_field
 
 from sqlalchemy import text
 
@@ -332,6 +332,16 @@ class LLMDataPolicy:
 
     residency: str = GLOBAL
     zero_retention_required: bool = False
+    #: Where to record what this tenant's model calls cost, or None to record
+    #: nothing. Carried here rather than passed alongside because eight of the
+    #: thirteen call sites that reach a model live inside the compiler, which has
+    #: no session and no request by design -- and this policy is the only object
+    #: that already travels all the way down to them.
+    #:
+    #: `compare=False` on purpose: equality is about what the tenant *requires*,
+    #: and a meter is not one of their requirements. Two policies with the same
+    #: residency are the same policy.
+    meter: object | None = dc_field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.residency not in RESIDENCIES:
@@ -407,19 +417,43 @@ def enforce_llm_policy(policy: LLMDataPolicy, boundary: ProviderBoundary) -> Non
         )
 
 
-def llm_policy_for(db, org_id: str) -> LLMDataPolicy:
-    """The recorded requirements for one organisation.
+def llm_policy_for(
+    db,
+    org_id: str,
+    *,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    subject_type: str | None = None,
+    subject_id: str | None = None,
+    meter: bool = True,
+) -> LLMDataPolicy:
+    """The recorded requirements for one organisation, and where to bill it.
 
     No row means no recorded constraint, which is a real state rather than a
     silent default: a tenant that has never asked for regional pinning has not
     been promised it, and GLOBAL is what we would truthfully tell them.
+
+    The optional attribution arguments name what the model is being asked about
+    -- a template, a blueprint, a conversation -- so a cost can later be
+    attributed to the thing that incurred it rather than only to the tenant.
+    Every caller already has these values in scope; passing them is what makes
+    "which template cost the most" answerable.
+
+    `meter=False` is for a caller with a session it does not intend to commit.
     """
+    from app.llm.metering import UsageMeter  # local: same cycle as below
     from app.models import OrgDataPolicy  # local: app.db imports this module
 
     row = db.query(OrgDataPolicy).filter(OrgDataPolicy.org_id == org_id).one_or_none()
+    sink = UsageMeter(
+        db=db, org_id=org_id, project_id=project_id, user_id=user_id,
+        subject_type=subject_type, subject_id=subject_id,
+    ) if meter else None
+
     if row is None:
-        return LLMDataPolicy()
+        return LLMDataPolicy(meter=sink)
     return LLMDataPolicy(
         residency=(row.residency or GLOBAL).strip().upper(),
         zero_retention_required=bool(row.zero_retention_required),
+        meter=sink,
     )

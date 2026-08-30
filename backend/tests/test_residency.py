@@ -203,7 +203,12 @@ def test_the_chat_path_resolves_the_policy_rather_than_assuming_one():
     next caller."""
     source = (__import__("pathlib").Path(__file__).resolve().parent.parent
               / "app" / "routers" / "chat.py").read_text(encoding="utf-8")
-    assert "llm_policy_for(db, conv.org_id)" in source, (
+    # Matched on the prefix, not the whole call: `llm_policy_for` also takes
+    # optional attribution arguments now (which project, which conversation, so
+    # a model call's cost can be attributed to what asked for it), and pinning
+    # the exact argument list would fail every time one was added while saying
+    # nothing about the residency this test is here to protect.
+    assert "llm_policy_for(db, conv.org_id" in source, (
         "app/routers/chat.py must resolve the organisation's recorded residency and pass it "
         "to prepare_context"
     )

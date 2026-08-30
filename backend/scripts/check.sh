@@ -47,6 +47,49 @@ FLOORS = {
     "generation/resolution_engine.py": 90,
     "generation/batch_runner.py": 88,
     "manifests/validator.py": 95,
+    # Authoring. `emit_docx` writes the document a customer opens in Word, and
+    # its whole job is to be the exact inverse of `docx_prescan` -- which is why
+    # that one is at 100 and this one is beside it. `blueprint.normalise_body`
+    # is the guard that makes one segment mean one span; an untested branch
+    # there is a manifest whose slots address the span to their left for the
+    # rest of a paragraph, which is a letter with a salary in the wrong sentence
+    # and every QA gate reporting clean.
+    "templates/emit_docx.py": 90,
+    "templates/blueprint.py": 92,
+    # Reading a legacy template back. `read_docx` decides what a customer sees
+    # when they open their own document, and its self-check is the only thing
+    # standing between "off by one paragraph" and a manifest that addresses the
+    # wrong text for the rest of the file. `lift` is where one bad legacy object
+    # is kept from costing the whole template.
+    "templates/read_docx.py": 85,
+    "templates/lift.py": 90,
+    # The gate. Every branch here is a decision about whether a template ships,
+    # and the failure mode of a wrong one is not a crash: a false blocker teaches
+    # people to click past the gate, and a missing one lets a template through
+    # that will produce wrong letters.
+    "templates/blueprint_lint.py": 88,
+    # Starting from nothing, and rescuing what the old editor produced. Both
+    # write documents somebody will send.
+    "templates/kits.py": 90,
+    "templates/library_migration.py": 90,
+    # The one validated way to change a template. Every branch is a guard, and a
+    # guard that is not exercised is a guard that is not there -- the co-pilot's
+    # safety rests entirely on these refusals holding.
+    "templates/blueprint_ops.py": 90,
+    # What a model call cost. 100 on pricing because every branch of it is a
+    # number that ends up on somebody's invoice, and the failure mode of an
+    # untested one is a bill that is quietly wrong rather than an error.
+    "llm/pricing.py": 100,
+    "llm/metering.py": 95,
+    # What the estate produced and what it cost. The failure mode of an untested
+    # branch here is a number on a screen that is confidently wrong, which is
+    # worse than a blank one.
+    "analytics.py": 92,
+    # What state a document is in. Every branch is a decision about whether a
+    # letter can be signed, and the two bugs that made the module necessary were
+    # both a status written from one caller's local knowledge rather than derived
+    # -- so an untested branch here is a document approved over an open objection.
+    "generation/document_status.py": 95,
     # The two wirings that turned a library into a path: nothing wrote to the
     # embeddings table, and nothing called the overlay renderer.
     "retrieval/indexing.py": 94,

@@ -41,7 +41,18 @@ def logout(creds: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
 
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
+    """Who you are, and what this role lets you do.
+
+    `capabilities` is sent so the UI can disable a control the server would
+    refuse, rather than letting somebody type a rejection note and discover the
+    rule as a 403. It is not a security boundary and is not treated as one --
+    every capability is still checked server-side by `require()`; this is the
+    same list, sent early enough to be useful.
+    """
+    from app.authz import capabilities_of
+
     return {
+        "capabilities": sorted(capabilities_of(user.role_key)),
         "id": user.id,
         "org_id": user.org_id,
         "email": user.email,

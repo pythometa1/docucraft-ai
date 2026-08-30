@@ -666,3 +666,36 @@ def test_the_agentic_compile_verifies_its_bindings_against_the_real_workbook():
     first = result.iterations[0]
     assert first.binding_vetoes == [], first.binding_vetoes
     assert "binding_vetoes" in result.log()[0]
+
+
+def test_a_revision_may_not_delete_a_paragraph_that_carries_a_value():
+    """The agent's revision schema offers two moves -- widen or narrow a block,
+    or delete a paragraph -- and neither of them is "add the missing field". So
+    when the QA failure is an unclaimed placeholder, deleting the line it sits on
+    is the only move available, and the model takes it.
+
+    Measured on a real payroll notification: handed "leftover placeholder
+    brackets", it proposed deleting paragraphs 31, 32, 44 and 45, which were the
+    Legal Entity and Fixed Term table rows. Label and value both went. The next
+    iteration's `resolved_value_absent` gate caught it -- but by then the manifest
+    said to delete content the letter needs, and the failure had moved from a
+    visible `<Yes/No>` a reviewer would spot to a paragraph that is simply gone.
+    """
+    from app.compiler.mapping_agent import _apply_revision
+    from app.compiler.rule_compiler import CompiledManifest
+
+    manifest = CompiledManifest(
+        fields=[{"id": "legal_entity", "slots": [
+            {"paragraph_index": 31, "span_index": 0, "text": "<1G0 Hospira Australia Pty Ltd>"},
+        ]}],
+        conditions=[], blocks=[], delete_always=[],
+        mergefield_paragraphs=[], hyperlink_paragraphs=[],
+        confidence=1.0, compiled_by="test", prescan_summary={},
+    )
+
+    applied = _apply_revision(manifest, {"block_corrections": [], "delete_paragraphs": [31, 32, 44, 45]})
+
+    deleted = sorted(entry["paragraph_index"] for entry in manifest.delete_always)
+    assert 31 not in deleted, "the paragraph carrying the legal entity must survive"
+    assert deleted == [32, 44, 45], "the deletions that harm nothing still apply"
+    assert applied == 3

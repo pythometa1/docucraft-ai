@@ -78,6 +78,71 @@ def test_bootstrap_refuses_to_touch_an_existing_install():
                   full_name="Someone Else", password="a-genuinely-long-password")
 
 
+def test_a_colleague_can_be_added_to_an_organisation_that_exists():
+    """The separation-of-duties rules make a one-person organisation unable to
+    finish its own work, and until this there was no way to create the second
+    person: `bootstrap` refuses an existing org and the Team screen is read-only.
+    """
+    from app.bootstrap import add_user
+    from app.db import SessionLocal
+    from app.models import User
+    from app.security import verify_password
+
+    result = add_user(
+        org_name="Bootstrap Test Org", email="Reviewer@Example.COM",
+        full_name="Second Person", password="another-long-password",
+        role_key="approver", job_title="Head of Reward",
+    )
+
+    db = SessionLocal()
+    try:
+        user = db.get(User, result["user_id"])
+        assert user.email == "reviewer@example.com"
+        assert verify_password("another-long-password", user.password_hash)
+        assert user.role_key == "approver" and user.status == "active"
+        assert user.job_title == "Head of Reward"
+        # Same org as the administrator, or the two cannot see each other's work.
+        assert user.org_id == result["org_id"]
+        assert "review_document" in result["capabilities"]
+    finally:
+        db.close()
+
+
+def test_a_typo_in_the_role_is_refused_rather_than_created():
+    """`capabilities_of` fails closed, so an unknown role would produce an
+    account that silently cannot do anything and gives no hint why."""
+    from app.bootstrap import add_user
+
+    with pytest.raises(ValueError, match="Unknown role"):
+        add_user(org_name="Bootstrap Test Org", email="typo@example.com",
+                 full_name="X", password="another-long-password", role_key="approvor")
+
+
+def test_adding_a_colleague_twice_does_not_reset_their_password():
+    from app.bootstrap import add_user
+
+    with pytest.raises(ValueError, match="already exists"):
+        add_user(org_name="Bootstrap Test Org", email="reviewer@example.com",
+                 full_name="Someone Else", password="another-long-password",
+                 role_key="approver")
+
+
+def test_a_colleague_cannot_be_added_to_an_organisation_that_does_not_exist():
+    from app.bootstrap import add_user
+
+    with pytest.raises(ValueError, match="does not exist"):
+        add_user(org_name="No Such Org", email="nobody@example.com",
+                 full_name="X", password="another-long-password", role_key="approver")
+
+
+def test_a_colleagues_password_has_the_same_floor_as_the_administrators():
+    from app.bootstrap import add_user
+
+    with pytest.raises(ValueError, match="at least"):
+        add_user(org_name="Bootstrap Test Org", email="weak2@example.com",
+                 full_name="X", password="short", role_key="approver")
+
+
 def test_bootstrap_rejects_a_weak_password():
     from app.bootstrap import bootstrap
 

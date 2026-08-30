@@ -13,6 +13,20 @@ meaningful authentication story.
     python -m app.bootstrap --org "Acme Life Sciences" \
         --email you@example.com --name "Your Name" --password '...'
 
+Colleagues are added to an existing organisation with `add-user`:
+
+    python -m app.bootstrap add-user --org "Acme Life Sciences" \
+        --email colleague@example.com --name "Their Name" \
+        --role approver --password '...'
+
+That second command exists because the separation-of-duties rules make a
+one-person organisation unable to finish its own work. `check_manifest_approval`
+will not let the compiler sign off its own manifest and
+`check_document_review_resolution` will not let an author close the review of
+their own letter -- both correct, and both unsatisfiable until there is somebody
+else. There was no way to create that somebody: `bootstrap` refuses an org that
+already exists, and the Team screen is read-only by design.
+
 The only rows this writes besides the org and the user are the lookup taxonomy
 (functions, regions, languages, document types). Those are configuration, not
 records -- the create-project form reads them from `GET /lookups`, so an empty
@@ -27,6 +41,7 @@ import sys
 
 from sqlalchemy import select
 
+from app.authz import ROLE_CAPABILITIES
 from app.db import SessionLocal
 from app.models import LookupValue, Organization, User
 from app.security import hash_password
@@ -116,7 +131,59 @@ def bootstrap(*, org_name: str, email: str, full_name: str, password: str, regio
         db.close()
 
 
+def add_user(*, org_name: str, email: str, full_name: str, password: str,
+             role_key: str, job_title: str | None = None) -> dict:
+    """Add a colleague to an organisation that already exists.
+
+    Refuses rather than overwrites, exactly as `bootstrap` does: re-running this
+    must never quietly reset somebody's password.
+
+    The role is checked against `ROLE_CAPABILITIES` rather than free text. A
+    typo'd role is not a smaller mistake here than elsewhere -- `capabilities_of`
+    fails closed, so `--role approvor` would create an account that silently
+    cannot do anything and gives no hint why.
+    """
+    if len(password) < MIN_PASSWORD_LEN:
+        raise ValueError(f"Password must be at least {MIN_PASSWORD_LEN} characters.")
+    if role_key not in ROLE_CAPABILITIES:
+        known = ", ".join(sorted(ROLE_CAPABILITIES))
+        raise ValueError(f"Unknown role {role_key!r}. Known roles: {known}.")
+
+    email = email.strip().lower()
+    db = SessionLocal()
+    try:
+        org = db.scalar(select(Organization).where(Organization.name == org_name))
+        if org is None:
+            raise ValueError(
+                f"Organization {org_name!r} does not exist. Create it with the default command "
+                "first."
+            )
+        if db.scalar(select(User).where(User.email == email)):
+            raise ValueError(f"A user with email {email!r} already exists -- refusing to modify it.")
+
+        set_current_org(db, org.id)
+        user = User(
+            org_id=org.id, email=email, full_name=full_name,
+            password_hash=hash_password(password),
+            role_key=role_key, status="active", job_title=job_title,
+        )
+        db.add(user)
+        db.commit()
+        return {
+            "org_id": org.id, "user_id": user.id, "email": email, "role": role_key,
+            "capabilities": sorted(ROLE_CAPABILITIES[role_key]),
+        }
+    finally:
+        release_org_scope(db)
+        db.close()
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "add-user":
+        return _add_user_main(argv[1:])
+
     parser = argparse.ArgumentParser(description="Create the first organisation and administrator.")
     parser.add_argument("--org", required=True, help="Organisation name")
     parser.add_argument("--email", required=True, help="Administrator email (this is the login)")
@@ -138,6 +205,37 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Administrator: {result['email']} ({result['user_id']})")
     print(f"Lookup values: {result['lookup_values']}")
     print("\nNo projects, templates or documents were created. Sign in and upload your own.")
+    return 0
+
+
+def _add_user_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m app.bootstrap add-user",
+        description="Add a colleague to an organisation that already exists.",
+    )
+    parser.add_argument("--org", required=True, help="Existing organisation name")
+    parser.add_argument("--email", required=True, help="Their email (this is their login)")
+    parser.add_argument("--name", required=True, help="Their full name")
+    parser.add_argument("--password", required=True, help=f"Their password (min {MIN_PASSWORD_LEN} chars)")
+    parser.add_argument(
+        "--role", default="approver",
+        help="Role key: " + ", ".join(sorted(ROLE_CAPABILITIES)),
+    )
+    parser.add_argument("--job-title", default=None)
+    args = parser.parse_args(argv)
+
+    try:
+        result = add_user(
+            org_name=args.org, email=args.email, full_name=args.name,
+            password=args.password, role_key=args.role, job_title=args.job_title,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"User        : {result['email']} ({result['user_id']})")
+    print(f"Role        : {result['role']}")
+    print(f"Can         : {', '.join(result['capabilities'])}")
     return 0
 
 

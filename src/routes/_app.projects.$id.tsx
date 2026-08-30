@@ -28,6 +28,7 @@ import {
   Wand2,
   Wand2 as WandIcon,
   Loader2,
+  MessageSquare,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
@@ -51,6 +52,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { ReasonDialog, StatusChip } from "@/components/review-bar";
 
 export const Route = createFileRoute("/_app/projects/$id")({
   head: ({ params }) => ({
@@ -473,7 +475,19 @@ function Step1Template({ project }: { project: any }) {
                     data the letter needs, which is why this stage is not complete
                     without it. */}
                 <div className="mt-1 text-xs">
-                  {t.manifestId ? (
+                  {/* A failed compile wrote a manifest row so the attempt and its
+                      reason survive for the reviewer. Reading only `manifestId`
+                      rendered that as "Compiled · 0 fields, 0 conditions" in
+                      green -- which is exactly what a clean compile of a template
+                      with no placeholders looks like, and nothing like what
+                      happened. The status decides the wording. */}
+                  {t.manifestId && t.manifestStatus === "failed" ? (
+                    <span className="text-destructive">
+                      Compile failed — nothing was mapped.
+                      {t.compileError ? ` ${t.compileError}` : ""}
+                      {" "}Open it in Studio to see every round and re-compile.
+                    </span>
+                  ) : t.manifestId ? (
                     <span className="text-emerald-500">
                       Compiled · {t.fieldCount} fields, {t.conditionCount} conditions
                       {t.manifestStatus === "approved" ? " · approved" : ""}
@@ -483,8 +497,8 @@ function Step1Template({ project }: { project: any }) {
                   )}
                 </div>
               </div>
-              {t.manifestId && <TemplateDataButton manifestId={t.manifestId} />}
-              {!t.manifestId && <CompileTemplateButton templateId={t.id} projectId={project.id} />}
+              {t.manifestId && t.manifestStatus !== "failed" && <TemplateDataButton manifestId={t.manifestId} />}
+              {(!t.manifestId || t.manifestStatus === "failed") && <CompileTemplateButton templateId={t.id} projectId={project.id} />}
               <Link
                 to="/projects/$id/studio/$templateId"
                 params={{ id: project.id, templateId: t.id }}
@@ -602,14 +616,10 @@ function Step2Source({ project }: { project: any }) {
 
 /* ------------------ Step 4: generated documents ------------------ */
 
-/* The download endpoint is /document-versions/{id}/download, but a row here
-   carries the *document* id -- the store drops current_version_id when it maps
-   the API response -- so resolve the current version before asking for a file. */
-async function downloadDocument(documentId: string, filename: string) {
-  const doc = await api.getDocument(documentId);
-  const versionId = doc?.current_version_id;
-  if (!versionId) throw new Error("This document has no saved version to download yet.");
-  const url = await api.authedDownloadUrl(versionId);
+/* A row here carries the *document* id -- the store drops current_version_id
+   when it maps the API response -- so resolve the current version before asking
+   for a file. */
+async function saveBlob(url: string, filename: string) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
@@ -618,26 +628,104 @@ async function downloadDocument(documentId: string, filename: string) {
 }
 
 function DownloadDocButton({ documentId, filename }: { documentId: string; filename: string }) {
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<null | "docx" | "pdf">(null);
+  const [open, setOpen] = useState(false);
+
+  async function go(format: "docx" | "pdf") {
+    setBusy(format);
+    setOpen(false);
+    try {
+      const doc = await api.getDocument(documentId);
+      const versionId = doc?.current_version_id;
+      if (!versionId) throw new Error("This document has no saved version to download yet.");
+      const url = await api.downloadVersion(versionId, format);
+      await saveBlob(url, filename.replace(/\.docx?$/i, "") + "." + format);
+    } catch (e: any) {
+      // The server's own message, not a generic one: "LibreOffice is not
+      // installed on this host" is something the reader can act on.
+      toast.error("Download failed", { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
-    <button
-      onClick={async () => {
-        setBusy(true);
-        try {
-          await downloadDocument(documentId, filename);
-        } catch (e: any) {
-          toast.error("Download failed", { description: e?.message ?? String(e) });
-        } finally {
-          setBusy(false);
-        }
-      }}
-      disabled={busy}
-      className="p-1.5 rounded hover:bg-accent text-muted-foreground disabled:opacity-40 disabled:cursor-not-allowed"
-      title="Download"
-      aria-label="Download"
-    >
-      <Download className="h-4 w-4" />
-    </button>
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        disabled={busy !== null}
+        className="p-1.5 rounded hover:bg-accent text-muted-foreground disabled:opacity-40"
+        title="Download"
+        aria-label="Download"
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <Download className="h-4 w-4" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
+          <div role="menu" className="absolute right-0 z-20 mt-1 w-40 overflow-hidden rounded-md border border-border bg-popover shadow-md">
+            <button role="menuitem" onClick={() => go("docx")} className="block w-full px-3 py-2 text-left text-sm hover:bg-accent">
+              Download .docx
+            </button>
+            <button role="menuitem" onClick={() => go("pdf")} className="block w-full px-3 py-2 text-left text-sm hover:bg-accent">
+              Download .pdf
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function DownloadAllButton({ documents }: { documents: any[] }) {
+  const [busy, setBusy] = useState<null | "docx" | "pdf">(null);
+  const [open, setOpen] = useState(false);
+
+  async function go(format: "docx" | "pdf") {
+    setBusy(format);
+    setOpen(false);
+    try {
+      const url = await api.downloadDocuments(documents.map((d) => d.id), format);
+      await saveBlob(url, `documents_${format}.zip`);
+      toast.success(`${documents.length} document(s) prepared`, {
+        description: "Any that could not be converted are listed in _FAILED.txt inside the archive.",
+      });
+    } catch (e: any) {
+      toast.error("Download failed", { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!documents.length) return null;
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        disabled={busy !== null}
+        className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-40"
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <Download className="h-3.5 w-3.5" />
+        {busy ? `Preparing ${busy}…` : `Download all (${documents.length})`}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
+          <div role="menu" className="absolute right-0 z-20 mt-1 w-48 overflow-hidden rounded-md border border-border bg-popover shadow-md">
+            <button role="menuitem" onClick={() => go("docx")} className="block w-full px-3 py-2 text-left text-sm hover:bg-accent">
+              All as .docx
+            </button>
+            <button role="menuitem" onClick={() => go("pdf")} className="block w-full px-3 py-2 text-left text-sm hover:bg-accent">
+              All as .pdf
+            </button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -663,15 +751,38 @@ function StageDocuments({ project }: { project: any }) {
         />
       ) : (
         <div className="space-y-2">
+          <div className="flex items-center justify-between pb-1">
+            <p className="text-xs text-muted-foreground">
+              Open one to edit its wording; the template's layout is preserved either way.
+            </p>
+            <DownloadAllButton documents={project.generated} />
+          </div>
           {project.generated.map((g: any) => (
             <div key={g.id} className="flex items-center gap-3 rounded-lg border border-border bg-background/40 p-3">
               <FileText className="h-5 w-5 text-brand" />
               <div className="flex-1 min-w-0">
-                <div className="font-medium text-sm truncate">{g.filename}</div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className="font-medium text-sm truncate">{g.filename}</div>
+                  {/* `g.status` was read here only to disable the delete button,
+                      so a QA-blocked letter and a disputed one looked exactly
+                      like a clean one in this list. */}
+                  <StatusChip status={g.status} reason={g.statusReason} />
+                </div>
                 <div className="text-xs text-muted-foreground">
                   {g.generatedAt} · {g.size} · by {g.generatedBy}
                 </div>
               </div>
+              {/* The affordance on a row of a list is "this one is wrong", and
+                  making somebody navigate into the document to say so is how
+                  objections stop being raised. */}
+              {g.currentVersionId && g.status !== "approved" && (
+                <RequestChangesButton
+                  versionId={g.currentVersionId}
+                  filename={g.filename}
+                  hasOpenReview={Boolean(g.openReviewId)}
+                  onDone={() => loadProjectDetail(project.id)}
+                />
+              )}
               <DownloadDocButton documentId={g.id} filename={g.filename} />
               <Link
                 to="/projects/$id/edit/$docId"
@@ -712,6 +823,51 @@ function StageDocuments({ project }: { project: any }) {
     </StepCard>
   );
 }
+
+function RequestChangesButton({ versionId, filename, hasOpenReview, onDone }: {
+  versionId: string; filename: string; hasOpenReview: boolean; onDone: () => void | Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+
+  if (hasOpenReview) {
+    return (
+      <Link
+        to="/review"
+        className="p-1.5 rounded hover:bg-accent text-purple"
+        title="Somebody has asked for changes to this document. Open the review queue."
+      >
+        <MessageSquare className="h-4 w-4" />
+      </Link>
+    );
+  }
+
+  return (
+    <>
+      <button
+        onClick={() => { setReason(""); setOpen(true); }}
+        className="p-1.5 rounded hover:bg-accent text-muted-foreground"
+        title="Request changes"
+      >
+        <MessageSquare className="h-4 w-4" />
+      </button>
+      <ReasonDialog
+        open={open} onOpenChange={setOpen}
+        title={`What is wrong with ${filename}?`}
+        description="This goes to whoever fixes the document, and it stops the letter being signed in the meantime."
+        placeholder="e.g. the base salary is from the 2025 band, it should be the 2026 one"
+        confirmLabel="Request changes"
+        value={reason} onValueChange={setReason}
+        onConfirm={() => {
+          api.requestChanges(versionId, { reason })
+            .then(async () => { setOpen(false); toast.success("Changes requested"); await onDone(); })
+            .catch((e: any) => toast.error("Could not request changes", { description: e?.message ?? String(e) }));
+        }}
+      />
+    </>
+  );
+}
+
 
 /* ------------------ Shared ------------------ */
 function ConfirmDialog({

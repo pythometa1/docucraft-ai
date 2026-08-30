@@ -59,22 +59,42 @@ _TOKEN_PATTERNS = {
 }
 
 
-def resolve_locale(field: dict | None = None, manifest_locale: str | None = None, region: str | None = None) -> str:
-    for candidate in (
-        (field or {}).get("locale"),
-        manifest_locale,
-        REGION_LOCALES.get(region or ""),
-        DEFAULT_LOCALE,
+def resolve_locale(field: dict | None = None, manifest_locale: str | None = None, region: str | None = None,
+                   project_locale: str | None = None) -> str:
+    """The locale to write this value in, most specific source first."""
+    return resolved_locale(field, manifest_locale, region, project_locale)[0]
+
+
+def resolved_locale(field: dict | None = None, manifest_locale: str | None = None, region: str | None = None,
+                    project_locale: str | None = None) -> tuple[str, str]:
+    """`(locale, where_it_came_from)`.
+
+    The second half is the point. Formatting silently fell back to
+    `DEFAULT_LOCALE` for every project -- `REGION_LOCALES` is empty because the
+    region vocabulary is continental -- so an Australian letter was written in
+    American date style and nothing anywhere said a choice had been made. A
+    reviewer could read the document, see "May 9, 2024", and have no way to tell
+    a configured decision from a default nobody made.
+
+    Naming the source makes it auditable without failing a generation that has
+    always worked. `"default"` is a real answer and it is recorded as one.
+    """
+    for candidate, source in (
+        ((field or {}).get("locale"), "field"),
+        (manifest_locale, "manifest"),
+        (project_locale, "project"),
+        (REGION_LOCALES.get(region or ""), "region"),
+        (DEFAULT_LOCALE, "default"),
     ):
         if not candidate:
             continue
         normalised = str(candidate).replace("-", "_")
         try:
             Locale.parse(normalised)
-            return normalised
+            return normalised, source
         except (UnknownLocaleError, ValueError):
             continue
-    return DEFAULT_LOCALE
+    return DEFAULT_LOCALE, "default"
 
 
 def parse_date(value) -> date | None:

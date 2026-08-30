@@ -22,7 +22,16 @@ dist-ssr
 
 # Backend (FastAPI)
 backend/.venv
+# The dev SQLite database and every backup of it. `backend/documind.db` was the
+# only spelling here, and the file the app actually opens is `documind_ui.db` --
+# so an 8 MB database holding real uploaded documents was one `git add -A` away
+# from the history. The glob covers the timestamped backups a migration leaves.
 backend/documind.db
+backend/documind_ui.db
+backend/*.db
+backend/*.db-shm
+backend/*.db-wal
+backend/*.db.backup-*
 backend/storage/
 backend/__pycache__/
 backend/**/__pycache__/
@@ -33,6 +42,10 @@ backend/.env
 .env
 .env.*
 !.env.example
+
+# Scratch space for probing a running instance -- logs, dumped parts, one-off
+# scripts. Nothing here is an input to anything.
+.tmp_probe/
 
 # Editor directories and files
 .vscode/*

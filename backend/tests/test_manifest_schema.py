@@ -250,19 +250,97 @@ def test_a_section_and_a_table_row_survive_sharing_the_blocks_column():
     assert [o.object_type for o in back.objects] == [ObjectType.SECTION, ObjectType.TABLE_ROW]
 
 
+def _signature(object_id="sig_1"):
+    return ManifestObject(object_id, ObjectType.SIGNATURE, {
+        "anchor": {}, "signer_source_ref": "source.signatory_name",
+        "image_policy": "none", "esign_ref": None,
+    })
+
+
 def test_an_object_type_the_table_has_no_column_for_is_named_not_dropped():
     """A STATIC or SIGNATURE object written into a row that cannot hold it is
     approved manifest content thrown away silently. The mapping reports it so a
-    caller cannot miss it."""
-    envelope = _envelope(objects=(_field(), ManifestObject(
-        "sig_1", ObjectType.SIGNATURE,
-        {"anchor": {}, "signer_source_ref": "source.signatory_name",
-         "image_policy": "none", "esign_ref": None},
-    )))
+    caller cannot miss it.
+
+    This is the three-legacy-list projection, which is still what a caller gets
+    unless it asks for the `objects` column -- so a writer that has not been
+    taught to emit that column keeps being told what its write would discard.
+    """
+    envelope = _envelope(objects=(_field(), _signature()))
     mapping = to_row_values(envelope)
     assert mapping.unmapped == ("sig_1",)
     assert not mapping.is_complete()
     assert ObjectType.SIGNATURE in unstorable_object_types()
+
+
+def test_the_objects_column_holds_every_type_the_three_lists_cannot():
+    """Opting in leaves nothing unmapped, because nothing is lost.
+
+    Five of §6's ten types -- STATIC, NARRATIVE, HEADER, FOOTER, SIGNATURE --
+    have no legacy list. A real offer letter has a signature block, so this was
+    the common case rather than the edge one, and it is what made inheriting an
+    approved manifest refuse outright rather than carry it across.
+    """
+    envelope = _envelope(objects=(_field(), _signature()))
+    mapping = to_row_values(envelope, objects_column=True)
+
+    assert mapping.unmapped == ()
+    assert mapping.is_complete()
+    assert [o["object_id"] for o in mapping.columns["objects"]] == ["full_name", "sig_1"]
+    assert unstorable_object_types(objects_column=True) == ()
+
+
+def test_both_projections_are_written_together_never_one_without_the_other():
+    """`fill_template`, `validate_manifest`, the source resolver and the data
+    template builder all read `fields`/`conditions`/`blocks`. A write that
+    filled only `objects` would leave every one of them reading an empty
+    manifest -- a template that compiles, approves, and fills in nothing."""
+    envelope = _envelope(objects=(_field(), _condition(), _section(), _signature()))
+    columns = to_row_values(envelope, objects_column=True).columns
+    legacy = to_legacy_objects(envelope)
+
+    assert columns["fields"] == legacy["fields"]
+    assert columns["conditions"] == legacy["conditions"]
+    assert columns["blocks"] == legacy["blocks"]
+    assert [o["object_id"] for o in columns["objects"]] == [
+        "full_name", "c1", "b1", "sig_1"]
+
+
+def test_a_row_written_with_the_objects_column_round_trips_every_type():
+    """The point of the column: what goes in comes back out, signature included.
+    Through the legacy lists alone `sig_1` does not survive the trip at all."""
+    envelope = _envelope(objects=(_field(), _condition(), _section(), _signature()))
+    columns = to_row_values(envelope, objects_column=True).columns
+    row = types.SimpleNamespace(**{**vars(_row()), **columns})
+
+    back = envelope_from_row(row, template_family_id=envelope.template_family_id)
+    assert back.objects == envelope.objects
+    assert ObjectType.SIGNATURE in {o.object_type for o in back.objects}
+
+
+def test_a_row_that_predates_the_objects_column_reads_exactly_as_it_did_before():
+    """Introducing the column changed the envelope of no existing row. An empty
+    `objects` means "written before the column existed, or by a caller that did
+    not opt in", and the three lists are read instead."""
+    legacy_only = _row()                    # no `objects` attribute at all
+    empty_column = _row(objects=[])         # the column, defaulted
+
+    assert envelope_from_row(empty_column).objects == envelope_from_row(legacy_only).objects
+    assert [o.object_id for o in envelope_from_row(empty_column).objects] == [
+        "full_name", "c1", "b1"]
+
+
+def test_the_objects_column_wins_over_the_legacy_lists_rather_than_merging():
+    """A row carries both projections of the same envelope, so merging them
+    would list every FIELD twice -- and `ManifestEnvelope` refuses duplicate
+    object ids, which turns the merge into an unreadable manifest rather than a
+    subtle one."""
+    envelope = _envelope(objects=(_field(), _condition(), _section()))
+    row = types.SimpleNamespace(
+        **{**vars(_row()), **to_row_values(envelope, objects_column=True).columns})
+
+    back = envelope_from_row(row)
+    assert [o.object_id for o in back.objects] == ["full_name", "c1", "b1"]
 
 
 def test_writing_an_envelope_back_never_touches_delete_always():

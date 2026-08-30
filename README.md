@@ -156,7 +156,7 @@ flowchart TB
 
 | Component | Responsibility | Technology |
 |---|---|---|
-| Frontend | Project pipeline UI, Document Mapping, Template Studio, token editor, review queue, dashboard, analytics | React 19, TanStack Start/Router, Tailwind CSS v4, Zustand, TipTap |
+| Frontend | Project pipeline UI, Document Mapping, Template Studio, review inbox, document review, dashboard, analytics and quality | React 19, TanStack Start/Router, Tailwind CSS v4, Zustand, TipTap, Recharts |
 | Core API | Auth, CRUD, validation, orchestration | FastAPI, SQLAlchemy 2.x, Alembic |
 | Database | System of record — every entity in the product, plus embeddings | PostgreSQL 17 + pgvector, row-level security |
 | Cache / rate limiting | Token-bucket rate limiting, JWT revocation on logout, short-lived download grants | Redis 7 |
@@ -222,12 +222,23 @@ erDiagram
 
 ### 8.1 Two kinds of "template," on purpose
 
-| | Template file (`template_files`) | Template library (`template_library`) |
-|---|---|---|
-| Scope | One project | Org-wide, reusable |
-| Authored in | Microsoft Word (uploaded) | DocuMind's own token editor |
-| Understood via | Heading tree / jinja variables / colour-run manifest | Inline colour-coded tokens (source/prompt/conditional/repeat) authored directly |
-| Used by | Document Mapping and Template Studio, via a compiled manifest | The Templates page's token editor |
+| | Template file (`template_files`) | Blueprint (`template_blueprints`) | ~~Template library~~ |
+|---|---|---|---|
+| Scope | One project | One project | Org-wide |
+| Authored in | Microsoft Word (uploaded) | The Template Studio, or Word, or both | ~~DocuMind's token editor~~ |
+| Understood via | Heading tree / jinja variables / colour-run manifest | The same colour-run manifest — a blueprint emits a real `.docx` | ~~Inline coloured tokens~~ |
+| Used by | Document Mapping and Template Studio, via a compiled manifest | Publishes *into* the left-hand column: a template version and its manifest | ~~The Templates page~~ |
+
+The third column is **retired**. Its editor produced HTML with `<span data-token>`
+markers, and the fill engine works on OOXML runs addressed by position — so a
+template authored that way could never fill a document, and `generateFromLibrary`
+was never called by any screen. The rows are kept and readable, and
+`POST /template-blueprints:from-library` migrates one into an editable template.
+
+A **blueprint** is the answer to "I want to change this template", which the
+product previously had no answer to. A legacy `.docx` is read into an editable
+body, corrected, and published as a template version plus the manifest that fills
+it — so authoring and the deterministic engine are the same path rather than two.
 
 ### 8.2 Core tables at a glance
 
@@ -237,6 +248,7 @@ erDiagram
 | `projects` | The unit of work — region, function, document type, pipeline status |
 | `template_files` / `template_versions` / `template_sections` | Uploaded DOCX templates and their parsed structure |
 | `template_manifests` | Compiled field/condition/block rules for colour-coded templates ([§4.2](#42-template-compiler--universal-fill-engine-deterministic)) |
+| `template_blueprints` / `template_blueprint_versions` | Templates being *written*: the editable body, the semantic objects over it, the findings against it, and where each version came from. Never mutated, so any earlier state can be forked back to |
 | `template_clusters` / `template_cluster_members` | Bulk-onboarding template families ([§4.3](#43-bulk-onboarding)) |
 | `source_files` / `source_versions` / `source_chunks` | Uploaded data files, chunked and indexed for retrieval |
 | `manifest_bindings` | Which source column feeds which manifest field, for one (manifest × source version) pairing, plus the `value_map` that reconciles vocabulary ("FT" → "Full time") |
@@ -384,6 +396,13 @@ pip install -r requirements.txt
 cp .env.example .env                    # set DATABASE_URL (documind_app), JWT_SECRET, CORS_ORIGINS
 DATABASE_URL=postgresql+psycopg://documind_owner:...@localhost:5432/documind alembic upgrade head
 python -m app.bootstrap --org "…" --email … --name "…" --password '…'
+
+# Add at least one colleague. The separation-of-duties rules are unsatisfiable
+# with a single account: the compiler may not sign off its own manifest, and an
+# author may not close the review of their own letter.
+python -m app.bootstrap add-user --org "…" --email … --name "…" \
+  --role approver --password '…'
+
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -449,11 +468,11 @@ There is no offline stub. Without a usable key those endpoints answer `503 LLM_N
 
 ## 13. Current Status & Roadmap
 
-**Working today**: the full frontend — sign-in, dashboard, the four-stage project pipeline with **Document Mapping** as its centre, Template Studio, the document editor, the token template editor, the human review queue, chat, analytics, team and audit log — wired to a real backend running on PostgreSQL 17 + pgvector and Redis, with row-level security enforced by a non-bypassing application role. The deterministic compile → approve → bind → generate path is complete end to end, including plain-English condition review, confidence-banded binding suggestions, batch generation with a canary gate, and QA gates that block a document rather than shipping one with a placeholder still in it.
+**Working today**: the full frontend — sign-in, dashboard, the four-stage project pipeline with **Document Mapping** as its centre, Template Studio, the document editor, a unified review inbox (documents somebody objected to alongside the values the engine parked), chat, analytics with real token and USD figures, a quality screen carrying §22's metrics and §18's timing targets, team and audit log — wired to a real backend running on PostgreSQL 17 + pgvector and Redis, with row-level security enforced by a non-bypassing application role. The deterministic compile → approve → bind → generate path is complete end to end, including plain-English condition review, confidence-banded binding suggestions, batch generation with a canary gate, and QA gates that block a document rather than shipping one with a placeholder still in it.
 
 **Removed, deliberately**: the earlier "draft + mapping wizard" pipeline and the section-mapping RAG generator behind it. It had no manifest, so it filled nothing, and it stood in front of the path that works. Every `/drafts/…` endpoint went with it.
 
-**Known simplifications** (see `docs/BACKEND_SPEC.md`'s "Implementation status" table for the full list): batch generation runs on an in-process background task rather than a durable job queue, so there is no retry, cancellation or survival across a restart; RBAC is enforced on approval, user management and audit reads but not yet across every endpoint; auth is JWT-only rather than enterprise SSO/OIDC. Each is a documented, deliberate scoping choice with a clear upgrade path, not an oversight.
+**Known simplifications** (see `docs/BACKEND_SPEC.md`'s "Implementation status" table for the full list): batch generation runs on an in-process background task rather than a durable job queue, so there is no retry, cancellation or survival across a restart; RBAC is enforced on manifest approval, document approval and review, user management and audit reads but not yet across every endpoint; there is no endpoint that creates a user, so colleagues are added from the command line; auth is JWT-only rather than enterprise SSO/OIDC. Each is a documented, deliberate scoping choice with a clear upgrade path, not an oversight.
 
 **Natural next steps**: a background job queue for generation at higher volume; screens for the pieces that are built but still API-only (bulk onboarding and clustering, manifest inheritance, manifest diff, the admin data-policy and deletion-certificate surfaces); and OIDC/SSO for enterprise auth.
 

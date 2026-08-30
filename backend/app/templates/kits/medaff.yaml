@@ -1,0 +1,26 @@
+name: Medical information response
+description: A response to an unsolicited medical enquiry.
+fields: [enquirer_name, product_name, enquiry_date, response_summary, reference_number]
+blocks:
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "Medical Information Response"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Dear "}
+      - {role: placeholder, text: "<Enquirer Name>"}
+      - {role: static, text: ","}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Thank you for your enquiry of "}
+      - {role: placeholder, text: "<Enquiry Date>"}
+      - {role: static, text: " regarding "}
+      - {role: placeholder, text: "<Product Name>"}
+      - {role: static, text: "."}
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Response Summary>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Reference: "}
+      - {role: placeholder, text: "<Reference Number>"}

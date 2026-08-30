@@ -1,0 +1,37 @@
+name: Services agreement
+description: Parties, term and fees, with a governing-law clause.
+fields: [client_name, supplier_name, effective_date, term_months, fee_amount, governing_law]
+blocks:
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "Master Services Agreement"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "This agreement is made on "}
+      - {role: placeholder, text: "<Effective Date>"}
+      - {role: static, text: " between "}
+      - {role: placeholder, text: "<Client Name>"}
+      - {role: static, text: " and "}
+      - {role: placeholder, text: "<Supplier Name>"}
+      - {role: static, text: "."}
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "Term"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "This agreement runs for "}
+      - {role: placeholder, text: "<Term Months>"}
+      - {role: static, text: " months from the date above."}
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "Fees"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "The supplier shall invoice "}
+      - {role: placeholder, text: "<Fee Amount>"}
+      - {role: static, text: " monthly."}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "This agreement is governed by the law of "}
+      - {role: placeholder, text: "<Governing Law>"}
+      - {role: static, text: "."}

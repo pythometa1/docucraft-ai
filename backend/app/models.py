@@ -75,6 +75,20 @@ class Project(Base):
     function: Mapped[str] = mapped_column(String)
     document_type: Mapped[str] = mapped_column(String)
     language: Mapped[str] = mapped_column(String, default="English")
+    # How this project's dates and amounts are written. `region` cannot answer
+    # it: the vocabulary is continental -- "Asia Pacific" spans Australia, Japan
+    # and India -- so it maps to no single locale and `REGION_LOCALES` is empty
+    # for exactly that reason.
+    #
+    # Without this every document ever generated was formatted `en_US`, whatever
+    # the project. An Australian offer letter rendered "May 9, 2024" for a date
+    # its own source wrote 09/05/2024. The date was right; the way it was written
+    # was American, and nothing recorded that a choice had been made.
+    #
+    # Nullable, because guessing is what produced "$82.000,00" from a project
+    # tagged "Europe". Absent, the default still applies -- but the resolved
+    # locale and where it came from are now recorded on every document.
+    locale: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")
     generation_settings: Mapped[dict] = mapped_column(JSON, default=dict)
     created_by: Mapped[str] = mapped_column(String)
@@ -307,9 +321,26 @@ class DocumentVersion(Base):
     # editor's HTML and destroying the letterhead, tables and headers with it.
     renderer: Mapped[str | None] = mapped_column(String, nullable=True)
     change_summary: Mapped[str | None] = mapped_column(String, nullable=True)
+    #: draft | pending_review | changes_requested | blocked | approved.
+    #:
+    #: `pending_review` means the *engine* has an outstanding question;
+    #: `changes_requested` means a *person* does. They are two axes rather than
+    #: one -- a document can fail QA and carry three open comment threads at the
+    #: same time -- so the review's own lifecycle lives on `document_reviews`
+    #: and only its effect on the document is mirrored here.
     status: Mapped[str] = mapped_column(String, default="draft")
+    #: Why the version is where it is, in a sentence a person wrote. Without it
+    #: a rejection is "rejected, no idea why", which is the failure a reject
+    #: button produces when nothing makes the reason mandatory.
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String, nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: Signed off for good. Deliberately *not* a `status` value: `metrics`
+    #: computes the escaped-error rate over versions whose status is "approved",
+    #: so moving finalised documents to a different status would quietly drop
+    #: the most-signed-off ones out of that denominator. Final is a property of
+    #: an approved document, not a phase after it.
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_by: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
@@ -344,6 +375,222 @@ class TemplateLibraryVersion(Base):
     source_fields: Mapped[list] = mapped_column(JSON, default=list)
     created_by: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class TemplateBlueprint(Base):
+    """A template being written, as opposed to one being read.
+
+    The product could compile a legacy `.docx` into a manifest and it could
+    author coloured tokens into HTML, and neither was a template somebody could
+    *edit*: the first offered only a JSON reading to argue with, the second
+    produced markup no manifest can be compiled from. This is the row that makes
+    "put a legacy template in, get an editable one back" a thing the schema can
+    express.
+
+    The emitted `.docx` is a `TemplateFile` / `TemplateVersion` like any other.
+    That is deliberate -- `compile-manifest`, `manifest_preview`, `fill_template`
+    and the Studio all address templates that way, and a blueprint that
+    published to some new kind of template row would need every one of them
+    changed to see it.
+    """
+
+    __tablename__ = "template_blueprints"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, index=True)
+    project_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    name: Mapped[str] = mapped_column(String)
+    #: Where it came from: "legacy" (a compiled upload), "inherited", "kit",
+    #: "library" or "blank". Not cosmetic -- a legacy blueprint publishes by
+    #: mutating its source file in place, and a from-scratch one builds a fresh
+    #: package, so this decides which of the two is correct.
+    kind: Mapped[str] = mapped_column(String, default="blank")
+    status: Mapped[str] = mapped_column(String, default="draft")  # draft|published|archived
+    current_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    #: The uploaded template this was read from, kept for the life of the
+    #: blueprint. It is what "revert it back" means: the original bytes are
+    #: still there however far the editing has gone.
+    source_template_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    #: The emitted template, once there is one.
+    template_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_by: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class TemplateBlueprintVersion(Base):
+    """One saved state of a blueprint. Never mutated, like every other version
+    row in this schema -- which is what lets `revert-to` fork from any earlier
+    one instead of apologising."""
+
+    __tablename__ = "template_blueprint_versions"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    blueprint_id: Mapped[str] = mapped_column(String, ForeignKey("template_blueprints.id"))
+    # Derived from the parent on write, never supplied by a caller, which would
+    # make it forgeable.
+    org_id: Mapped[str] = mapped_column(String, index=True)
+    version_no: Mapped[int] = mapped_column(Integer, default=1)
+    #: The document: paragraphs, segments and tables, in the shape
+    #: `app.templates.blueprint` defines and `emit_docx` writes.
+    body: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: The §6 semantic objects over that body, in `ManifestEnvelope` shape.
+    objects: Mapped[list] = mapped_column(JSON, default=list)
+    #: What the lift and the linter had to say about this state, so a reviewer
+    #: reads findings recorded against the version they are looking at rather
+    #: than recomputed against a later one.
+    findings: Mapped[list] = mapped_column(JSON, default=list)
+    #: How this version came about: the compile it was lifted from, the manifest
+    #: it inherited, the operations applied and who or what proposed them.
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict)
+    emitted_template_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    manifest_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    parent_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    change_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class DocumentReview(Base):
+    """A person's objection to a finished document, and the conversation about it.
+
+    Distinct from `ReviewTask`, which is the *engine* saying it could not decide
+    something. Both belong in one queue and neither fits in the other's row: a
+    task is a question about a manifest unit with a single scalar answer, and
+    this is a thread about a letter somebody read and did not accept.
+
+    It hangs off a **version**, not a document. Approving v1 says nothing about
+    v2, and `apply_version_text` mints a new version precisely so that a
+    signature cannot silently move to text nobody signed.
+    """
+
+    __tablename__ = "document_reviews"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, index=True)
+    document_id: Mapped[str] = mapped_column(String, ForeignKey("generated_documents.id"), index=True)
+    document_version_id: Mapped[str] = mapped_column(String, ForeignKey("document_versions.id"), index=True)
+    #: open | approved | rejected | withdrawn
+    state: Mapped[str] = mapped_column(String, default="open", index=True)
+    title: Mapped[str | None] = mapped_column(String, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_by: Mapped[str] = mapped_column(String)
+    assigned_to: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    #: Copied from the version at open time rather than read at resolve time, so
+    #: that editing a document cannot launder its authorship and let the author
+    #: close their own review.
+    authored_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class ReviewComment(Base):
+    """One remark on a review, optionally pinned to a run of the document.
+
+    `(paragraph_index, span_index)` is the coordinate the compiler, the fill
+    engine, the QA gates and the text editor all already speak, so a comment, a
+    manifest slot and a QA finding point at the same run with no translation to
+    get wrong.
+
+    `quoted_text` records what that run said when the remark was written. A
+    comment reading "this figure is wrong" is worthless once somebody has
+    changed the figure and nothing remembers what it was.
+    """
+
+    __tablename__ = "review_comments"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, index=True)
+    review_id: Mapped[str] = mapped_column(String, ForeignKey("document_reviews.id"), index=True)
+    #: One level of nesting. A reply to a reply becomes a sibling, because a
+    #: tree nobody can render is a tree nobody reads.
+    parent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    author_id: Mapped[str] = mapped_column(String)
+    body: Mapped[str] = mapped_column(Text)
+    paragraph_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    span_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quoted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class LlmCall(Base):
+    """One model call: what it cost, and the rate that was in force when it ran.
+
+    Every provider already returns `input_tokens` and `output_tokens` -- and a
+    comment in `llm/provider.py` says Gemini folds its thinking tokens into the
+    output count "so the cost figures on the analytics page compare like with
+    like". There was no such figure, because all thirteen call sites discarded
+    the numbers and `generation_jobs.token_usage`, the column the analytics page
+    read, was never written by anything. This is where they land instead.
+
+    No customer content: ids, a model name, a capability label and integers. Like
+    `qa_failure_logs` it therefore survives a per-document deletion -- destroying
+    it would quietly reduce a bill every time somebody tidied up a document --
+    and it leaves on offboarding with the rest of the org. That is also why it
+    carries no foreign keys.
+    """
+
+    __tablename__ = "llm_calls"
+    #: An integer key, not a UUID: there will be many of these relative to every
+    #: other table, and the index is a quarter the size.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[str] = mapped_column(String, index=True)
+    project_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    #: The `get_llm_provider(capability=...)` string, verbatim -- "Chat",
+    #: "Editing a template". Free attribution: every call site already passes it.
+    capability: Mapped[str] = mapped_column(String)
+    #: compile | authoring | generate | edit | chat | other. A coarse bucket the
+    #: analytics groups on so it never has to match on prose.
+    operation: Mapped[str] = mapped_column(String, index=True)
+    #: Which model slot answered -- compile or generate. `RoutedProvider` picks
+    #: its vendor from this, so it is part of what the cost depends on.
+    purpose: Mapped[str] = mapped_column(String, default="generate")
+    subject_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    subject_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    #: What actually answered, from the provider's own response -- never the
+    #: configured provider, because compile and generate can be different vendors
+    #: in one deployment.
+    model: Mapped[str] = mapped_column(String, index=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    #: ok | refused | truncated | error
+    outcome: Mapped[str] = mapped_column(String, default="ok")
+    #: Integer micro-dollars per thousand tokens, and the cost they produced.
+    #: Integers rather than Numeric because Numeric round-trips through float on
+    #: SQLite, which is what the test suite runs on, and a money column that does
+    #: not sum exactly is worse than none.
+    input_rate_micro_usd_per_ktok: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_rate_micro_usd_per_ktok: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: NULL when the model has no rate -- never 0. An unpriced call reports
+    #: "cost unavailable", because a call that looks free is worse than one that
+    #: admits it does not know.
+    cost_micro_usd: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: "default:<date>" or "org:<row id>" -- which rate table produced the cost,
+    #: so a figure can be explained a year later.
+    rate_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+
+class OrgModelRate(Base):
+    """What one organisation is billed per million tokens for one model.
+
+    Overrides the shipped defaults. A tenant on a negotiated rate, or on a model
+    this build has never priced, should see their own numbers rather than ours.
+    """
+
+    __tablename__ = "org_model_rates"
+    __table_args__ = (UniqueConstraint("org_id", "model", name="uq_org_model_rate"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, index=True)
+    model: Mapped[str] = mapped_column(String)
+    input_micro_usd_per_ktok: Mapped[int] = mapped_column(Integer)
+    output_micro_usd_per_ktok: Mapped[int] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
 class AuditLog(Base):
@@ -403,11 +650,31 @@ class TemplateManifest(Base):
     template_file_id: Mapped[str | None] = mapped_column(String, nullable=True)
     template_version_id: Mapped[str] = mapped_column(String)
     version_no: Mapped[int] = mapped_column(Integer, default=1)
-    status: Mapped[str] = mapped_column(String, default="draft")  # draft|in_review|approved|deprecated
+    # `failed` is a real, persisted outcome, not an error state to be cleaned up.
+    # A compile that could not read the template used to return the rule-based
+    # manifest instead, which carried fields and a confidence and was
+    # indistinguishable from a compile that worked. Recording the attempt keeps
+    # the reason visible to a reviewer while `validate_manifest` refuses to
+    # approve it, so nothing can ever generate from it.
+    status: Mapped[str] = mapped_column(String, default="draft")  # draft|in_review|approved|deprecated|failed
     fields: Mapped[list] = mapped_column(JSON, default=list)
     conditions: Mapped[list] = mapped_column(JSON, default=list)
     blocks: Mapped[list] = mapped_column(JSON, default=list)
     delete_always: Mapped[list] = mapped_column(JSON, default=list)
+    # The lossless §6 envelope: every semantic object, whatever its type. The
+    # three lists above are a projection of this one -- FIELD and CALCULATION
+    # into `fields`, CONDITION into `conditions`, SECTION and TABLE_ROW into
+    # `blocks` -- and they stay because the fill engine, the validator, the
+    # source resolver and the data-template builder all read them. What they
+    # cannot express is the other half of §6: STATIC, NARRATIVE, HEADER, FOOTER
+    # and SIGNATURE, which had nowhere to go at all, so inheriting an approved
+    # manifest that carried a signature block was refused rather than performed.
+    #
+    # Empty on a row written before the column existed, and on any writer that
+    # has not opted in. `envelope_from_row` reads this first and falls back to
+    # the three lists when it is empty, so an old row and a new row produce the
+    # same envelope.
+    objects: Mapped[list] = mapped_column(JSON, default=list)
     # What the compiler wants a human to look at before this is approved, from
     # `manifest_compiler.WARNING_CATALOG`. The compiler's own contract says any
     # warning blocks auto-approval and needs an explicit disposition -- which it
@@ -416,6 +683,13 @@ class TemplateManifest(Base):
     # warning code -> {"resolved_by", "resolved_at", "note"}. A warning leaves
     # the way of approval by being answered, not by being ignored.
     warning_dispositions: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # One entry per stage and per review round of the agentic compile: how many
+    # chunks the template was read in, what the document objected to each round,
+    # what the reviewer changed, and why the loop stopped. This is the only
+    # record of *how* a manifest came to say what it says, and it is what a
+    # reviewer reads when the answer is `failed`.
+    compile_transcript: Mapped[list] = mapped_column(JSON, default=list)
 
     # ---- §6 manifest envelope ----
     # What makes a generated document reproducible from the record alone: a
@@ -496,6 +770,13 @@ class ManifestGeneration(Base):
     source_record: Mapped[dict] = mapped_column(JSON, default=dict)
     field_lineage: Mapped[list] = mapped_column(JSON, default=list)
     condition_lineage: Mapped[list] = mapped_column(JSON, default=list)
+    #: The version this generation produced. Added because the only link was a
+    #: shared `blob_path` string, and that link is wrong three ways: it breaks
+    #: the moment a document is edited (`apply_version_text` writes a different
+    #: path), it is not unique across previews of the same row, and
+    #: `retention.delete_generated_document` deletes by it -- so two documents
+    #: sharing a path means deleting one destroys the other's lineage.
+    document_version_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     qa_passed: Mapped[bool] = mapped_column(Boolean, default=False)
     qa_notes: Mapped[list] = mapped_column(JSON, default=list)
     blob_path: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -576,6 +857,14 @@ class ReviewTask(Base):
     resolved_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String, default="open", index=True)  # open|resolved|dismissed
     assigned_to: Mapped[str | None] = mapped_column(String, nullable=True)
+    #: Which document this question is about. The task always had a
+    #: `generation_id`, but reaching the document from it meant joining on a
+    #: string path -- and a task whose generation record was later swept lost
+    #: its document entirely.
+    document_version_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    #: Who raised it. Null for the machine, which is every row written before a
+    #: person could open one.
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)
     resolved_by: Mapped[str | None] = mapped_column(String, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)

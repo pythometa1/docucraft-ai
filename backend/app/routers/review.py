@@ -20,14 +20,24 @@ from sqlalchemy.orm import Session
 
 from app.audit.service import log_audit
 from app.db import get_db
-from app.models import ManifestGeneration, ReviewTask, TemplateManifest, User
+from app.generation.document_status import refresh_status
+from app.models import (
+    DocumentVersion, GeneratedDocument, ManifestGeneration, ReviewTask, TemplateManifest, User,
+)
 from app.ownership import owned_manifest
 from app.security import error, get_current_user
 
 router = APIRouter(tags=["review"])
 
 
-def _task_out(task: ReviewTask) -> dict:
+def _resolver_name(db: Session, user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    row = db.get(User, user_id)
+    return row.full_name if row else None
+
+
+def _task_out(task: ReviewTask, db: Session | None = None) -> dict:
     return {
         "id": task.id,
         "project_id": task.project_id,
@@ -44,12 +54,22 @@ def _task_out(task: ReviewTask) -> dict:
         "rationale": task.rationale,
         "created_at": task.created_at,
         "resolved_at": task.resolved_at,
+        # Who decided, not just what was decided. `_manifest_out` and `_doc_out`
+        # both resolve a name for the same reason.
+        "resolved_by": task.resolved_by,
+        "resolved_by_name": _resolver_name(db, task.resolved_by) if db is not None else None,
+        "document_version_id": getattr(task, "document_version_id", None),
     }
 
 
 @router.get("/review-tasks")
 def list_review_tasks(
-    status_: str | None = None,
+    # `status`, not `status_`. The client has always sent `?status=open`
+    # (`src/lib/api.ts`), and a trailing underscore made FastAPI look for
+    # `?status_=` instead -- so the filter silently did nothing and the queue's
+    # "open" and "resolved" tabs rendered the same unfiltered list. Nothing in
+    # this module imports `status`, so there is no shadowing to avoid.
+    status: str | None = None,
     project_id: str | None = None,
     kind: str | None = None,
     limit: int = 100,
@@ -57,14 +77,14 @@ def list_review_tasks(
     user: User = Depends(get_current_user),
 ):
     stmt = select(ReviewTask).where(ReviewTask.org_id == user.org_id)
-    if status_:
-        stmt = stmt.where(ReviewTask.status == status_)
+    if status:
+        stmt = stmt.where(ReviewTask.status == status)
     if project_id:
         stmt = stmt.where(ReviewTask.project_id == project_id)
     if kind:
         stmt = stmt.where(ReviewTask.kind == kind)
     rows = db.scalars(stmt.order_by(ReviewTask.created_at.desc()).limit(limit)).all()
-    return {"items": [_task_out(t) for t in rows]}
+    return {"items": [_task_out(t, db) for t in rows]}
 
 
 @router.get("/review-tasks/summary")
@@ -88,7 +108,7 @@ def get_review_task(task_id: str, db: Session = Depends(get_db), user: User = De
     task = db.get(ReviewTask, task_id)
     if not task or task.org_id != user.org_id:
         raise error("TASK_NOT_FOUND", "Review task not found", 404)
-    return _task_out(task)
+    return _task_out(task, db)
 
 
 class ResolveRequest(BaseModel):
@@ -135,6 +155,34 @@ def resolve_review_task(
                     "rationale": body.rationale,
                 },
             ]
+    _settle_generation(db, task)
+
+    promoted = None
+    if body.promote_to_manifest and task.manifest_id:
+        promoted = _promote(db, user, task, body)
+
+    log_audit(db, user, "Resolved review task", "review_task", task.id, task.project_id, "success", task.unit_id)
+    db.commit()
+    db.refresh(task)
+    return {**_task_out(task, db), "promoted": promoted}
+
+
+def _settle_generation(db: Session, task: ReviewTask) -> None:
+    """Recompute what is still outstanding after this task stops being open.
+
+    Called by both `:resolve` and `:dismiss`, because both settle a question and
+    the two used to disagree: dismissing left `qa_passed` false forever, so the
+    document it belonged to could never leave `pending_review`.
+
+    Flipping `qa_passed` was never enough on its own, though. Nothing read it
+    back to move the *document*, so answering the last question left the letter
+    sitting in the queue regardless. The status refresh below is that missing
+    half: the document goes back to whatever is now true of it, which is `draft`
+    if this was the last thing outstanding and unchanged if it was not.
+    """
+    if task.generation_id:
+        generation = db.get(ManifestGeneration, task.generation_id)
+        if generation is not None:
             remaining = db.scalars(
                 select(ReviewTask).where(
                     ReviewTask.generation_id == task.generation_id,
@@ -144,14 +192,18 @@ def resolve_review_task(
             ).all()
             generation.qa_passed = not remaining
 
-    promoted = None
-    if body.promote_to_manifest and task.manifest_id:
-        promoted = _promote(db, user, task, body)
-
-    log_audit(db, user, "Resolved review task", "review_task", task.id, task.project_id, "success", task.unit_id)
-    db.commit()
-    db.refresh(task)
-    return {**_task_out(task), "promoted": promoted}
+    if not task.document_version_id:
+        # Tasks written before the column existed have no document to move. The
+        # generation's `qa_passed` above is still corrected for them.
+        return
+    version = db.get(DocumentVersion, task.document_version_id)
+    if version is None:
+        return
+    document = db.get(GeneratedDocument, version.document_id)
+    # `derive_status` counts open tasks itself, and this one is not open any more
+    # in the session -- so the flush is what makes it see the change.
+    db.flush()
+    refresh_status(db, version=version, document=document)
 
 
 def _promote(db: Session, user: User, task: ReviewTask, body: ResolveRequest) -> dict | None:
@@ -189,13 +241,47 @@ def _promote(db: Session, user: User, task: ReviewTask, body: ResolveRequest) ->
     return {"applied": False, "reason": f"Nothing to promote for mode '{mode}'."}
 
 
+class DismissRequest(BaseModel):
+    rationale: str
+
+
 @router.post("/review-tasks/{task_id}:dismiss")
-def dismiss_review_task(task_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def dismiss_review_task(
+    task_id: str,
+    body: DismissRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Decide that this question does not need answering, and say why.
+
+    This used to be three defects in nine lines. It had no `status != "open"`
+    guard, so an already-resolved task could be silently overwritten to
+    dismissed and its recorded decision lost. It wrote no audit row, unlike
+    `:resolve`. And -- the one that stranded documents -- it never recomputed
+    `ManifestGeneration.qa_passed`, so dismissing the last open task on a
+    generation left it `qa_passed=False` and its document `pending_review`
+    forever, with nothing left in the queue that could ever clear it.
+    """
     task = db.get(ReviewTask, task_id)
     if not task or task.org_id != user.org_id:
         raise error("TASK_NOT_FOUND", "Review task not found", 404)
+    if task.status != "open":
+        raise error("TASK_ALREADY_RESOLVED", f"This task is already {task.status}.", 409)
+    if not body.rationale.strip():
+        # Dismissing is a decision, and a regulated document records why a
+        # question was set aside as surely as why it was answered.
+        raise error("RATIONALE_REQUIRED",
+                    "Explain why this does not need answering -- it becomes part of the "
+                    "audit record.", 400)
+
     task.status = "dismissed"
+    task.rationale = body.rationale.strip()
     task.resolved_by = user.id
     task.resolved_at = datetime.now(timezone.utc)
+
+    _settle_generation(db, task)
+    log_audit(db, user, "Dismissed review task", "review_task", task.id, task.project_id,
+              "warning", task.unit_id)
     db.commit()
-    return {"status": "dismissed"}
+    db.refresh(task)
+    return _task_out(task, db)

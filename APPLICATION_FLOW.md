@@ -638,6 +638,67 @@ There is a server-side parity endpoint, `POST /template-library:convert`, that r
 
 ---
 
+## 9.5 Flow D — the Template Authoring Studio
+
+The loop the product was missing: **a legacy `.docx` in, an editable template
+out, and a manifest that fills it.** Before this, a template could be read and it
+could be filled, and it could not be *changed* — a compile that got a block
+boundary wrong could only be argued with through `PATCH /template-manifests/{id}`
+and raw JSON.
+
+```
+upload -> compile -> read into a body -> edit -> lint -> publish
+                                          ^                  |
+                                          +---- download ----+
+```
+
+**The body** ([app/templates/blueprint.py](backend/app/templates/blueprint.py)) is
+paragraphs of *segments*, each carrying a role: `static`, `placeholder`,
+`instruction`, `mergefield`, `hyperlink`. Those roles are the pre-scanner's own
+three colours, which is the whole design: the emitter writes `w:color 0000FF` for
+a placeholder and `FF0000` for an instruction, so **a template this codebase
+writes is one it can read**, and it re-enters the existing pipeline with no
+special case anywhere.
+
+The invariant is asserted on every emit, not only in a test:
+
+```
+blueprint -> emit -> prescan -> compile -> blueprint'     and     blueprint' == blueprint
+```
+
+**The four ways in.** `POST /template-blueprints:from-template` (compile an
+upload), `POST /template-blueprints` with a `kit` (start from scratch — five
+server-side kits, each a document rather than a field list),
+`POST /template-blueprints:from-library` (migrate a token-library entry), and the
+manifest-inheritance path in §11.
+
+**Publishing** writes the document *first*, re-addresses the objects against it
+([`reslot_against`](backend/app/templates/lift.py)), and only then checks —
+because an emptied instruction is invisible to the pre-scanner, so its neighbours
+merge and spans renumber. A manifest carrying the old numbering would fill the
+span to the left of every slot for the rest of its paragraph.
+
+**The gate** ([blueprint_lint.py](backend/app/templates/blueprint_lint.py)) calls
+`validate_manifest`, `lock_blockers`, `assertions.collect_with_warnings` and the
+`qa/` gates rather than restating them, and adds `duplicate_slug`,
+`block_boundary_guessed` and `condition_needs_a_source_column`. Only `blocking`
+stops a publish; conflating that with `warning` trains people to ignore both.
+
+**Legacy templates are edited, never rebuilt.** `emit_from_base` copies the
+package entry for entry and replaces only `word/document.xml`. Measured on a
+client compensation letter, a python-docx round trip silently drops
+`word/_rels/{comments,endnotes,fontTable,footnotes}.xml.rels` — Word opens the
+result anyway, which is what makes it dangerous.
+
+**The co-pilot** ([blueprint_agent.py](backend/app/compiler/blueprint_agent.py))
+returns typed *operations*, never prose. Every one goes through
+`apply_operations`, the same guards a hand edit meets, and nothing is applied
+until a person sees the diff. Mode is explicit — `author` or `explain` — because
+guessing between "explain this condition" and "change this condition" edits a
+legal template by accident.
+
+---
+
 ## 10. Flow C — Template Compiler + Universal Fill Engine
 
 The deterministic engine, built and verified against a real Hospira Australia / Pfizer HR offer letter: 207 paragraphs, 27 blue placeholder runs, 30 red instruction runs, 7 `MERGEFIELD` codes across two remuneration tables, one hyperlink, zero content controls. **This is now the product's main path and it has a full frontend** — [Document Mapping](src/components/document-mapping.tsx) as stage 3 of every project, and [Template Studio](src/routes/_app.projects.$id_.studio.$templateId.tsx) per template. (Earlier revisions of this file said "no frontend exists for this path — it is driven entirely through the API." That is now exactly backwards.) The parts that remain API-only are bulk onboarding, clustering, manifest inheritance and manifest diff.
@@ -904,8 +965,9 @@ The domain constants `FUNCTIONS`, `DOCUMENT_TYPES`, `REGIONS`, `FUNCTION_COLORS`
 | GET | `/projects/{id}/documents` | |
 | GET/**DELETE** | `/documents/{id}` | **DELETE is a hard delete with blob cascade; `409 DOCUMENT_APPROVED` on an approved document** |
 | GET | `/documents/{id}/versions` | |
-| GET/PATCH | `/document-versions/{id}` | GET returns `renderer` + `html_editable`. PATCH refuses `409 DOCUMENT_NOT_HTML_EDITABLE` for template-derived documents |
-| POST | `/document-versions/{id}:approve` / `:revoke` | `:approve` refuses `409 DOCUMENT_BLOCKED` on a QA-blocked version |
+| GET/PATCH | `/document-versions/{id}` | GET returns `renderer`, `html_editable`, `status_reason` and `open_review_id`. PATCH refuses `409 DOCUMENT_NOT_HTML_EDITABLE` for template-derived documents |
+| POST | `/document-versions/{id}:approve` | `APPROVE_DOCUMENT`. Recomputes the status first, then refuses `409` on `blocked`, `changes_requested` or `pending_review` |
+| POST | `/document-versions/{id}:revoke` | `APPROVE_DOCUMENT`. `{reason}` **required**; writes an audit row and calls `refresh_status` rather than hardcoding `"draft"` |
 | POST | `/document-versions/{id}/download-url` | Mints a short-lived single-use grant; the *request* is the audited event |
 | GET | `/document-versions/{id}/download` | Auth-header required |
 | GET | `/document-versions/{id}/citations` | (unused by the UI) |
@@ -920,18 +982,37 @@ The domain constants `FUNCTIONS`, `DOCUMENT_TYPES`, `REGIONS`, `FUNCTION_COLORS`
 |---|---|---|
 | GET | `/review-tasks?status=&project_id=&kind=` · `/review-tasks/summary` · `/review-tasks/{id}` | `kind` ∈ calculation \| condition \| binding \| narrative |
 | POST | `/review-tasks/{id}:resolve` | `{resolved_value, rationale, promote_to_manifest?, promote_as?}` — the decision can be written back into the manifest |
-| POST | `/review-tasks/{id}:dismiss` | |
+| POST | `/review-tasks/{id}:dismiss` | `{rationale}` **required**. Recomputes `qa_passed` and the document's status, which is what used to strand a letter in `pending_review` forever |
+
+### Document review — [routers/reviews.py](backend/app/routers/reviews.py)
+A person objecting to a finished letter, as opposed to the engine asking a
+question it could not answer. Both appear in one ranked queue.
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/document-versions/{id}/reviews` | `{reason, title?, assigned_to?}`. Anyone may open one; `409` if one is already open. `authored_by` is frozen at open time so an edit cannot launder authorship |
+| GET | `/document-versions/{id}/reviews` | |
+| POST | `/document-versions/{id}:request-changes` | The row-level shortcut from the documents list. Calls the endpoint above |
+| GET | `/reviews` · `/reviews/{id}` | The detail carries `can_resolve` + `cannot_resolve_reason`, so a disabled button explains itself instead of 403-ing |
+| POST | `/reviews/{id}/comments` | Optionally anchored on `(paragraph_index, span_index)` — the coordinate the compiler, the fill engine and the text editor all speak — with `quoted_text` recording what the run said at the time |
+| POST | `/reviews/{id}/comments/{comment_id}:resolve` | |
+| POST | `/reviews/{id}:approve` / `:reject` | `REVIEW_DOCUMENT`. `:reject` requires a note. Both refuse the author of the version under review (`check_document_review_resolution`) |
+| POST | `/reviews/{id}:withdraw` | Only the person who raised it |
+| POST | `/reviews/{id}:assign` | `REVIEW_DOCUMENT` |
+| GET | `/review-queue?state=&assigned_to=me&project_id=` | The unified inbox. Server-ranked: a review on a QA-blocked document first, then anything assigned to you, then unit tasks by kind (calculation → condition → binding → narrative) |
 
 ### Metrics — [routers/metrics.py](backend/app/routers/metrics.py)
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/metrics` · `/metrics/calibration-log` | §22 metrics, §18 SLOs, human-touch rate, and how far the §13 confidence weights are from a fit. `READ_AUDIT`-gated |
+| GET | `/metrics` · `/metrics/calibration-log` | §22 metrics, §18 SLOs, human-touch rate, and how far the §13 confidence weights are from a fit. `READ_AUDIT`-gated. **Now rendered by `/quality`** — nothing in `src/` read it before |
 | POST | `/metrics/escaped-errors` | Record that a wrong value was found in an **already-approved** document |
 
 ### Admin, analytics, team, audit & chat — [routers/admin.py](backend/app/routers/admin.py), [routers/chat.py](backend/app/routers/chat.py)
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/analytics/kpis` · `/analytics/trend` · `/analytics/by-function` · `/analytics/top-templates` | **All four now called by `/analytics`** |
+| GET | `/analytics/kpis` · `/analytics/trend` · `/analytics/by-function` · `/analytics/top-templates` | **All four now called by `/analytics`**, and all four honour `?range=7d\|30d\|90d\|1y` (it used to be accepted and ignored). `top-templates` joins `TemplateFile → TemplateManifest → ManifestGeneration` rather than fanning out per project |
+| GET | `/analytics/cost` · `/analytics/compiles` | Spend by model, by operation and by template, from `llm_calls`; compiles counted ok/failed with the §18 duration beside them. An unpriced model reports `null`, never `$0.00` |
+| GET/PUT | `/admin/model-rates` · POST `/admin/model-rates:reset` | Per-org USD rates over the shipped defaults. `MANAGE_USERS`. Cost is frozen onto each `llm_calls` row at write time, so changing a rate never rewrites history |
 | GET | `/team/members` · `/team/roles-summary` | **Called by `/team`** |
 | GET | `/audit-logs` | **Called by `/audit-log`** |
 | GET/PUT | `/admin/data-policy` | What this org told us to keep, and where it may be processed (retention days, residency, zero-retention) |
@@ -974,24 +1055,29 @@ This is the section most likely to prevent wrong assumptions. It has changed mor
 | Batch job polling / progress / canary rows | ✅ | ✅ | **Fully live** — `202` + `GET /jobs/{id}` on a 1.2 s poll, with failure tolerance |
 | Batch ZIP download | ✅ | ✅ | **Fully live** |
 | Document download | ✅ | ✅ | **Fully live** — `authedDownloadUrl` is called from the project page and the editor |
-| Document editor: load / save / approve / revoke | ✅ | ✅ | **Fully live**, with the `html_editable` guard |
+| Document editor: load / save / approve / revoke | ✅ | ✅ | **Fully live**, with the `html_editable` guard. The approve/revoke controls are now [components/review-bar.tsx](src/components/review-bar.tsx), rendered on **both** editor branches — the `ooxml_fill` branch every manifest-generated letter opens on had none |
 | Document delete | ✅ | ⚠️ | Live, but the confirm dialog promises it removes "any approved one" — the API refuses an approved document with `409`. See [§17](#17-sharp-edges-bugs-and-gaps) |
-| Review queue | ✅ | ✅ | **Fully live** — `/review` |
+| Review queue | ✅ | ✅ | **Fully live** — `/review` is one inbox over both queues (documents somebody objected to, and values the engine parked), server-ranked |
+| **Document review** (object, comment, resolve) | ✅ | ✅ | **Fully live** — Request changes from the documents list or the editor; comments anchor on `(paragraph_index, span_index)`; `REVIEW_DOCUMENT` + the four-eyes rule on closing |
 | Chat | ✅ RAG-backed | ✅ | **Fully live** — conversations + messages |
-| Analytics | ✅ 4 endpoints | ✅ | **Fully live** — all four called |
+| Analytics | ✅ 6 endpoints | ✅ | **Fully live** — recharts through [ui/chart.tsx](src/components/ui/chart.tsx), working range buttons, real token and USD figures from `llm_calls`. A metric with no data renders a dash, never `0` |
 | Team | ✅ 2 endpoints | ✅ | **Fully live** |
 | Audit log | ✅ + real rows | ✅ | **Fully live** |
-| Token template library + editor | ✅ | ✅ | **Fully live** (authoring and versioning) |
-| Legacy conversion wizard | ✅ (parity endpoint) | ✅ (client-side) | Live, but runs in-browser; the server endpoint stays unused |
-| Flow B generation | ✅ | ❌ | **API-only** — no UI calls `generateFromLibrary` |
+| **Template authoring studio** | ✅ | ✅ | **Fully live. Legacy `.docx` in, mappable template out** — [/templates](src/routes/_app.templates.tsx) + [studio](src/routes/_app.templates.$blueprintId.tsx). Read, edit, lint, download, publish |
+| Template kits (start from scratch) | ✅ | ✅ | **Fully live** — five server-side kits, each a document rather than a field list |
+| Template co-pilot (author / explain) | ✅ | ✅ | **Fully live** — the model proposes typed operations; `apply_operations` refuses what does not address the document |
+| ~~Token template library + editor~~ | ◐ read-only | ◐ migrate only | **Retired.** The TipTap editor and the client-side conversion wizard are deleted; `template_library` rows are kept and readable, and `POST /template-blueprints:from-library` migrates one into an editable template |
+| ~~Legacy conversion wizard~~ | ❌ | ❌ | **Removed.** It ran `mammoth.extractRawText()`, which discards run colour, MERGEFIELDs and table structure — the three things the pre-scanner exists to read — so it could only guess. Replaced by `POST /template-blueprints:from-template`, which runs the real pre-scan and compile |
+| Flow B generation | ✅ | ❌ | **API-only, and superseded** — a library entry is migrated into a blueprint rather than generated from |
 | Settings | ⚠️ | ◐ | Reads `GET /me`; nothing else persists |
 | Bulk onboarding / clustering / manifest inheritance | ✅ | ❌ | **API-only** — no screen calls `:bulk-onboard`, `/template-clusters` or `/inherit-manifest` |
 | Manifest diff | ✅ | ❌ | **API-only** |
 | Admin data policy / retention sweep / offboarding / deletion certificates | ✅ | ❌ | **API-only** |
-| Metrics & calibration log | ✅ | ❌ | **API-only** |
+| Metrics & calibration log | ✅ | ✅ | **Fully live** — [/quality](src/routes/_app.quality.tsx). §22's metrics in §22's own ranking, §18's targets in a column separate from what was measured, and an `unmeasured` row that never inherits its target |
+| Model usage & cost metering | ✅ | ✅ | **Fully live** — every model call is recorded by `MeteredProvider`, wrapped in `get_llm_provider` so no call site opts in. A handler that saves nothing (chat, suggest-edit) has its rows harvested by `get_db` at request teardown |
 | Citations, chunk preview, field dictionary, lookups | ✅ | ❌ | Built and unused by the UI |
 | Row-level security | ✅ | n/a | Live on PostgreSQL; inert no-ops on SQLite, which is why the test suite can still run on it |
-| RBAC | ◐ | ❌ | Real permission checks exist ([authz.py](backend/app/authz.py)) on approval, `MANAGE_USERS` and `READ_AUDIT`; most endpoints still only require authentication |
+| RBAC | ◐ | ✅ reads it | Real permission checks on manifest approval, **document approval and review**, `MANAGE_USERS` and `READ_AUDIT`; most other endpoints still only require authentication. `GET /me` now returns `capabilities`, which the UI reads to disable rather than 403 |
 | ~~Drafts + mapping wizard~~ | ❌ | ❌ | **Removed.** Every `/drafts/…` endpoint and the wizard route are deleted |
 | ~~Section-Mapping RAG generation~~ | ❌ | ❌ | **Removed** as a whole-document path. Survives only as components (chat, `prompt` tokens, `narrative` units → review tasks) |
 | ~~Generation method (ai/chat/manual/hybrid + model + temperature)~~ | ◐ persisted | ❌ | **Removed from the UI.** `generation_settings` is still a column and `PATCH /projects/{id}` still merges into it; nothing sets it and nothing reads it |
@@ -1021,9 +1107,40 @@ Ordered roughly by how likely they are to bite.
 
 9. **Unused imports left behind by the removal.** `Slider` and `Select` in `_app.projects.$id.tsx`, `Mapping` in `routers/generation.py`. Cosmetic, but they are the trail of what was taken out.
 
-10. **RBAC is partial.** `authz.py` enforces manifest-approval separation of duties, `MANAGE_USERS` on offboarding/certificates and `READ_AUDIT` on metrics. Most other endpoints still only require authentication, so `role_key` is stored and displayed more than it is checked.
+10. **RBAC is partial.** `authz.py` enforces manifest-approval separation of duties, `REVIEW_DOCUMENT` and `APPROVE_DOCUMENT` on the document path, `MANAGE_USERS` on offboarding/certificates and `READ_AUDIT` on metrics and `/quality`. Most other endpoints still only require authentication, so `role_key` is stored and displayed more than it is checked.
+
+10a. **A one-person organisation cannot finish its own work, by design.** Both
+    separation-of-duties rules are unsatisfiable with one account: the compiler
+    may not sign off its own manifest, and an author may not close the review of
+    their own letter. Adding the second person is
+    `python -m app.bootstrap add-user --org "..." --email ... --role approver`;
+    there is deliberately no endpoint for it, because minting a credential stays
+    an explicit audited act rather than a button.
+
+10b. **A rejected review is cleared by editing, not by un-rejecting it.**
+    `derive_status` reads the *latest* review on a version, and `apply_version_text`
+    mints a new version that starts from its own facts — so fix-and-resubmit is
+    the path. A reviewer who rejected in error opens a second review and closes
+    it as "no change needed"; the rejection stays in the record rather than being
+    erased, which is the honest outcome but is two clicks where one would do.
 
 11. **Documented-by-design simplifications** (not bugs — each is called out in code comments with a spec reference): no OCR for scanned PDFs, no PPTX ingestion, no SDT/content-control parsing, per-run formatting lost on jinja substitution in the legacy assembler, JWT instead of OIDC/SSO, no S3/object-store abstraction.
+
+12. **A published template's manifest is compiled from the published bytes, not
+    carried over.** That is correct and it costs a re-address on every publish
+    (`reslot_against`). A field whose only placeholder sat inside an author
+    instruction that was removed is reported as `slot_not_in_published_template`
+    and blocks — which is right, but it means "clean the instructions" and "keep
+    every field" are occasionally in tension, and the author has to choose.
+
+13. **Anchors can be lifted that cannot be resolved.** `lift_slot_to_anchor`
+    numbers an occurrence within its paragraph; `resolve` searches the whole
+    document and disambiguates by a ±60-character context hash. Boilerplate
+    repeated verbatim defeats that — measured on a real offer letter, two fields
+    at paragraphs 179 and 202. Reported as a **warning**, not a blocker, because
+    the fill engine fills through `slots` rather than anchors, so those letters
+    are correct; what is lost is drift detection, and there is no edit an author
+    could make.
 
 ### Fixed since the previous revision
 
@@ -1044,14 +1161,30 @@ Listed because a reader who remembers this section will look for them.
 | Constant "0.04 MB" and a constant author on every generated document | Measured from the blob and resolved from `created_by` |
 | Model selection is cosmetic | The stage that offered it was removed. Model choice is `LLM_MODEL` / `LLM_COMPILE_MODEL`, per vendor |
 | No test suite anywhere in the repo | 47 test modules under `backend/tests/`, including golden-DOCX fixtures per template family, RLS tests, and a production-config guard |
+| A template could be read and filled, but never changed | The Template Studio: a legacy `.docx` is read into an editable body, corrected by hand or by asking, and published as a template version plus the manifest that fills it |
+| `template_manifests` could hold five of §6's ten object types, so inheriting a manifest with a signature block was refused outright | An `objects` column carries the lossless envelope beside the three legacy lists |
+| `assertions` reported three kinds of fault no correction could clear — a whole-line instruction naming its span, a red run a field fills, a red run inside a hyperlink — each of which burns every compile round and reports `llm_unconverged` for a template that was read correctly | Each check now agrees with what `docx_renderer` actually does |
 | No pgvector | `embeddings` table with a `vector` column; hybrid lexical + vector retrieval |
 | Type coercion in conditions: `salary > 50000` silently `False` | The expression language coerces — a spreadsheet cell arrives as text and `scheduled_weekly_hours >= 38` compares correctly — and the type checker is deliberately no stricter than the evaluator |
+| Nobody could say "this letter is wrong". The only ways to express dissatisfaction were to leave a document unapproved, silently, or to delete it | `document_reviews` + `review_comments`, one ranked inbox at `/review`, and a **Request changes** control on the documents list and both editor branches |
+| `?status=` on the review queue was declared `status_`, so the filter was a no-op and the "open" and "resolved" tabs rendered the same list | One character. The tabs now differ |
+| `:dismiss` had no `status != "open"` guard, no audit row, no required rationale, and never recomputed `qa_passed` — so dismissing the last task stranded its document in `pending_review` forever | All four. `_settle_generation` is shared with `:resolve`, and it now moves the document too |
+| `:revoke` hardcoded `status = "draft"`, laundering a QA-blocked or disputed document clean — after which `:approve` waved it through, because the only thing it refused was the string the revoke had overwritten | `generation/document_status.py`. `derive_status` establishes the status from every fact; `refresh_status` writes it. `approved` is never derived and never withdrawn by a recomputation |
+| `APPROVE_DOCUMENT` was declared in `authz.py` and enforced nowhere — any authenticated member of an org could approve any document in it | `require(APPROVE_DOCUMENT)` on `:approve` and `:revoke`. A live behaviour change: a `generator` who could approve yesterday gets a 403 |
+| The `ooxml_fill` editor branch — the one every manifest-generated letter opens on — had no approve control and no way to object. Both lived only on the TipTap branch those documents never reach | One [review-bar.tsx](src/components/review-bar.tsx) rendered on both, which is the only arrangement in which they cannot drift again |
+| `ai_tokens_consumed` summed `generation_jobs.token_usage`, a column with **zero writes in the entire repository** — so the figure was structurally always `0`, while all three providers returned token counts correctly and all thirteen call sites discarded them | `MeteredProvider`, wrapped inside `get_llm_provider` so no call site opts in, and `llm_calls` with the cost frozen at write time from a rate table read off the vendors' own pricing pages |
+| A model call made by a handler that saves nothing — chat, suggest-edit — left its usage row in `Session.new` and lost it when the request ended: billed by the vendor, recorded as never having happened | `get_db` harvests what is still unwritten and puts it down on a session of its own after the caller's closes. Because the harvest runs *before* the close, it also catches a handler that raised — a compile that dies on its ninth model call still records the eight it paid for |
+| `/analytics/top-templates` was a cartesian fan-out: a project with 3 templates and 10 documents reported 10 uses for **each** | Joined `TemplateFile → TemplateManifest → ManifestGeneration`, with `covered/total` so the UI can say what share it ranked over |
+| The `7d/30d/90d/1y` buttons had no `onClick`, and `range` was accepted and ignored server-side | Real windows on all six analytics endpoints; an unknown range is a `400`, not a silently different answer |
+| `metrics.py` (1,458 lines) was populated by the live compile, parse and render paths, and `grep -rn "metrics" src/` returned zero matches | [/quality](src/routes/_app.quality.tsx) |
+| `manifest_generations` reached its document through `blob_path` — which breaks the moment a document is edited, is not unique across previews, and meant `retention.delete_generated_document` could destroy another document's lineage | A real `document_version_id` column, backfilled inside `tenancy.maintenance_bypass` so row-level security cannot make the migration silently update nothing |
+| The app's own `--chart-1..5` palette failed colourblind validation — blue and purple sat ΔE 0.4 apart under deuteranopia and 11.7 for normal vision, against a hard floor of 15 | A validated six-slot palette in both modes. Nothing had rendered a chart yet, so nothing had ever surfaced it |
 
 ---
 
 ## 18. Cheat sheet
 
-**Credentials** — created by `python -m app.bootstrap`; there are no default or demo accounts.
+**Credentials** — created by `python -m app.bootstrap`; there are no default or demo accounts. A colleague is added to an organisation that already exists with `python -m app.bootstrap add-user --org "..." --email ... --name "..." --role approver --password '...'`, which you will need at least once: the separation-of-duties rules make a one-person organisation unable to approve its own manifests or close its own document reviews.
 
 **Trace a request end to end:**
 `src/lib/api.ts` → router in `backend/app/routers/` → the module tree under `backend/app/` (see the mapping at the end of [§3](#3-repository-map) if you are following an old `app/services/…` link) → model in `backend/app/models.py`.

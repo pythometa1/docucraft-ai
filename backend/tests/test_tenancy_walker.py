@@ -50,9 +50,11 @@ def org_a_resources(app_client, two_orgs):
     """
     from app.db import SessionLocal
     from app.models import (
-        Conversation, DocumentVersion, DraftDocument, GeneratedDocument, GenerationJob,
-        Mapping, Project, ReviewTask, SourceFile, SourceVersion, TemplateFile,
-        TemplateLibrary, TemplateLibraryVersion, TemplateManifest, TemplateVersion, User,
+        Conversation, DocumentReview, DocumentVersion, DraftDocument, GeneratedDocument,
+        GenerationJob, Mapping, Project, ReviewComment, ReviewTask, SourceFile, SourceVersion,
+        TemplateBlueprint,
+        TemplateBlueprintVersion, TemplateFile, TemplateLibrary, TemplateLibraryVersion,
+        TemplateManifest, TemplateVersion, User,
     )
 
     token_a, project_a, token_b, _ = two_orgs
@@ -96,7 +98,27 @@ def org_a_resources(app_client, two_orgs):
 
         task = ReviewTask(org_id=org, project_id=project_a, manifest_id=manifest.id, unit_id="u",
                           kind="condition", question="?", context={}, status="open")
-        db.add(task)
+        blueprint = TemplateBlueprint(org_id=org, project_id=project_a, name="bp", kind="legacy",
+                                      status="draft", source_template_version_id=tv.id,
+                                      template_file_id=tf.id, created_by=user.id)
+        db.add_all([task, blueprint])
+        db.flush()
+
+        bp_version = TemplateBlueprintVersion(
+            blueprint_id=blueprint.id, org_id=org, version_no=1,
+            body={"blocks": [], "sect_pr_from": None}, objects=[], findings=[],
+            provenance={}, created_by=user.id)
+        db.add(bp_version)
+        db.flush()
+        blueprint.current_version_id = bp_version.id
+
+        review = DocumentReview(org_id=org, document_id=gd.id, document_version_id=dv.id,
+                                state="open", reason="not right", requested_by=user.id,
+                                authored_by=user.id)
+        db.add(review)
+        db.flush()
+        comment = ReviewComment(org_id=org, review_id=review.id, author_id=user.id, body="here")
+        db.add(comment)
         db.flush()
 
         ids = {
@@ -106,6 +128,8 @@ def org_a_resources(app_client, two_orgs):
             "mapping_id": mapping.id, "manifest_id": manifest.id, "task_id": task.id,
             "generation_id": "no-such-generation", "version_id": dv.id,
             "source_version_id": sv.id, "template_version_id": tv.id,
+            "blueprint_id": blueprint.id,
+            "review_id": review.id, "comment_id": comment.id,
         }
         db.commit()
     finally:
@@ -141,6 +165,26 @@ ROUTES: list[dict] = [
     {"method": "POST", "path": "/templates/{template_file_id}/inherit-manifest", "body": {}},
     {"method": "GET", "path": "/template-versions/{version_id}/sections", "ids": {"version_id": "template_version_id"}},
 
+    # Template authoring. Every one of these reaches a customer's own document --
+    # `:emit` reads the uploaded original off disk and writes a new template
+    # version from it -- so a blueprint belonging to another organisation has to
+    # be a 404 before any file is opened, not after.
+    {"method": "GET", "path": "/template-blueprints/{blueprint_id}"},
+    {"method": "DELETE", "path": "/template-blueprints/{blueprint_id}"},
+    {"method": "GET", "path": "/template-blueprints/{blueprint_id}/versions"},
+    {"method": "POST", "path": "/template-blueprints/{blueprint_id}/versions",
+     "body": {"body": {"blocks": [], "sect_pr_from": None}}},
+    {"method": "POST", "path": "/template-blueprints/{blueprint_id}:revert-to",
+     "body": {"version_no": 1}},
+    {"method": "POST", "path": "/template-blueprints/{blueprint_id}:emit"},
+    {"method": "GET", "path": "/template-blueprints/{blueprint_id}/lint"},
+    {"method": "GET", "path": "/template-blueprints/{blueprint_id}/docx"},
+    {"method": "POST", "path": "/template-blueprints/{blueprint_id}:publish", "body": {}},
+    {"method": "POST", "path": "/template-blueprints/{blueprint_id}/copilot",
+     "body": {"message": "rename the salary field"}},
+    {"method": "POST", "path": "/template-blueprints/{blueprint_id}/operations",
+     "body": {"ops": []}},
+
     {"method": "GET", "path": "/sources/{source_id}"},
     {"method": "GET", "path": "/sources/{source_id}/fields"},
     {"method": "DELETE", "path": "/sources/{source_id}"},
@@ -156,7 +200,17 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/document-versions/{version_id}/download"},
     {"method": "PATCH", "path": "/document-versions/{version_id}", "body": {"html_content": "<p>x</p>"}},
     {"method": "POST", "path": "/document-versions/{version_id}:approve"},
-    {"method": "POST", "path": "/document-versions/{version_id}:revoke"},
+    # The text editor. Every one goes through `owned_document_version`, so a
+    # version belonging to another organisation is a 404 before any file is
+    # opened -- which matters more here than elsewhere, because two of these
+    # read the document off disk and the third writes a new one.
+    {"method": "GET", "path": "/document-versions/{version_id}/text"},
+    {"method": "POST", "path": "/document-versions/{version_id}/text",
+     "body": {"edits": [{"paragraph_index": 0, "span_index": 0, "text": "x"}]}},
+    {"method": "POST", "path": "/document-versions/{version_id}/suggest-edit",
+     "body": {"selection": "x", "instruction": "y"}},
+    {"method": "POST", "path": "/document-versions/{version_id}:revoke",
+     "body": {"reason": "changed my mind"}},
 
     {"method": "GET", "path": "/conversations/{conversation_id}/messages"},
     {"method": "POST", "path": "/conversations/{conversation_id}/messages", "body": {"text": "hi"}},
@@ -164,6 +218,19 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/review-tasks/{task_id}"},
     {"method": "POST", "path": "/review-tasks/{task_id}:resolve", "body": {"resolved_value": "x", "rationale": "y"}},
     {"method": "POST", "path": "/review-tasks/{task_id}:dismiss", "body": {"rationale": "y"}},
+
+    # Document reviews -- a person objecting, as opposed to the engine asking.
+    {"method": "POST", "path": "/document-versions/{version_id}/reviews", "body": {"reason": "no"}},
+    {"method": "GET", "path": "/document-versions/{version_id}/reviews"},
+    {"method": "POST", "path": "/document-versions/{version_id}:request-changes",
+     "body": {"reason": "no"}},
+    {"method": "GET", "path": "/reviews/{review_id}"},
+    {"method": "POST", "path": "/reviews/{review_id}/comments", "body": {"body": "x"}},
+    {"method": "POST", "path": "/reviews/{review_id}/comments/{comment_id}:resolve"},
+    {"method": "POST", "path": "/reviews/{review_id}:approve", "body": {}},
+    {"method": "POST", "path": "/reviews/{review_id}:reject", "body": {"note": "fix it"}},
+    {"method": "POST", "path": "/reviews/{review_id}:withdraw"},
+    {"method": "POST", "path": "/reviews/{review_id}:assign", "body": {"user_id": None}},
 
     {"method": "GET", "path": "/template-manifests/{manifest_id}"},
     {"method": "PATCH", "path": "/template-manifests/{manifest_id}", "body": {"fields": []}},

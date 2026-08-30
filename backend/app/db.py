@@ -64,10 +64,30 @@ def get_db():
     that never reached a handler, and a connection that goes back to the pool
     still carrying `app.current_org` hands the next request the previous
     request's tenant. See `app/tenancy.py`.
+
+    It is also where a model call that nobody saved gets written down. A handler
+    that reads -- `suggest_edit`, chat -- makes a model call and then commits
+    nothing, because it has nothing to save; the usage row sat in `Session.new`
+    and was discarded with the session, so the vendor billed for the call and we
+    recorded that it had never happened. The rows are harvested here and written
+    after this session closes, on one of their own. See `llm/metering.py`.
+
+    The harvest runs *before* the close, which is what makes it also catch a
+    handler that raised: the exception is on its way out, nothing has rolled back
+    yet, and the calls that handler already paid for are still recorded. Only
+    `LlmCall` rows are taken, so a handler's own unsaved work stays unsaved.
     """
     db = SessionLocal()
+    pending: list[dict] = []
     try:
         yield db
     finally:
+        from app.llm.metering import drain_pending, write_pending
+
+        pending = drain_pending(db)
         release_org_scope(db)
         db.close()
+        # After the close, deliberately: on SQLite a second connection cannot
+        # write while this one still holds the transaction, and the caller's
+        # session is the one thing that could be holding it.
+        write_pending(pending)

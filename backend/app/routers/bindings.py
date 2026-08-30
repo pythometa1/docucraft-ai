@@ -547,7 +547,7 @@ def preview_row(
     outcome = run_row(
         db, manifest=manifest, template_path=str(abs_path(template_version.blob_path)),
         project=project, record=record, field_bindings=bindings, value_map=value_map,
-        locale=body.locale or resolve_locale(region=project.region),
+        locale=body.locale or resolve_locale(region=project.region, project_locale=project.locale),
         language="en", user_id=user.id, persist=False,
     )
     db.rollback()  # preview must leave no trace
@@ -613,6 +613,37 @@ def generate_batch(
     project = owned_project(db, template_file.project_id, user)
 
     bindings, value_map = _resolve_binding_inputs(db, manifest_id, body.source_version_id, body.field_bindings, body.value_map)
+
+    # A batch over a source with no rows is not a batch that succeeded with
+    # nothing in it -- it is a batch that should never have started. Without this
+    # the job runs, finds nothing, and finishes `completed - 0 of 0` beside a
+    # "Download all" button, which reads exactly like a run that worked.
+    #
+    # The case that produces it is the ordinary one: the reviewer downloads the
+    # workbook this manifest generates, uploads it back, and has not typed
+    # anything into it yet. `build_workbook` pre-formats 500 rows so the
+    # dropdowns are there to use, so the sheet is not empty -- it has headers and
+    # 500 blank rows -- and nothing before this point could tell the difference.
+    if source.file_type in RECORD_FILE_TYPES:
+        try:
+            _columns, available = extract_records(str(abs_path(version.blob_path)), source.file_type, body.sheet)
+        except Exception:  # noqa: BLE001 - an unreadable source is reported by the job, not here
+            available = None
+        if available is not None:
+            selected = (
+                [r for i, r in enumerate(available) if i in set(body.row_indices)]
+                if body.row_indices else available
+            )
+            if not selected:
+                raise error(
+                    "SOURCE_HAS_NO_ROWS",
+                    f"{source.name!r} has {len(_columns)} column(s) but no data rows"
+                    + (f" on sheet {body.sheet!r}" if body.sheet else "")
+                    + ". Fill in one row per document you want generated, then upload it again."
+                    if not body.row_indices else
+                    f"None of the selected rows exist in {source.name!r}.",
+                    422,
+                )
 
     job = GenerationJob(
         org_id=user.org_id, project_id=project.id, status="queued",

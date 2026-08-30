@@ -1,0 +1,10 @@
+name: Blank
+description: An empty document. Everything is yours to write.
+blocks:
+  - kind: paragraph
+    style: Heading 1
+    segments:
+      - {role: static, text: "Untitled template"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Start writing. Wrap a value in angle brackets to make it a placeholder."}

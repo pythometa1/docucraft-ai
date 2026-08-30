@@ -257,6 +257,16 @@ def compile_agentic(
     return result
 
 
+def _paragraphs_carrying_a_field(manifest: CompiledManifest) -> set[int]:
+    """Every paragraph some field has a slot in."""
+    return {
+        slot.get("paragraph_index")
+        for f in manifest.fields
+        for slot in (f.get("slots") or [])
+        if isinstance(slot.get("paragraph_index"), int)
+    }
+
+
 def _apply_revision(manifest: CompiledManifest, revision: dict) -> int:
     applied = 0
     by_id = {b["id"]: b for b in manifest.blocks}
@@ -267,8 +277,27 @@ def _apply_revision(manifest: CompiledManifest, revision: dict) -> int:
             block["boundary_method"] = "agent_revised"
             applied += 1
 
+    # A deletion may not remove a paragraph that carries a field.
+    #
+    # This schema offers exactly two moves -- widen or narrow a block, or delete
+    # a paragraph -- and neither of them is "add the field that is missing". So
+    # when the QA failure is a placeholder nobody claimed, the only move
+    # available is deleting the line it sits on, and the model takes it. On a
+    # real payroll notification that removed the Legal Entity and Fixed Term rows
+    # from the letter outright, label and value together, to clear a warning
+    # about a bracket. The gate caught it one iteration later as
+    # `resolved_value_absent` -- but by then the manifest said to delete content
+    # a document needs, and the failure had moved from a visible `<Yes/No>` a
+    # reviewer would spot to a paragraph that is simply not there.
+    #
+    # Refusing here rather than catching it afterwards keeps the loop honest: an
+    # unclaimed placeholder stays unclaimed, stays visible, and stays a fault
+    # somebody has to answer.
+    protected = _paragraphs_carrying_a_field(manifest)
     existing = {(d["paragraph_index"], d.get("span_index")) for d in manifest.delete_always}
     for paragraph_index in revision.get("delete_paragraphs", []):
+        if paragraph_index in protected:
+            continue
         if (paragraph_index, None) not in existing:
             manifest.delete_always.append({"paragraph_index": paragraph_index, "span_index": None})
             applied += 1

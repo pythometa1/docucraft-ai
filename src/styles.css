@@ -59,6 +59,7 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
 
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
@@ -115,11 +116,21 @@
   --input: oklch(0.26 0.02 270);
   --ring: oklch(0.66 0.19 268);
 
-  --chart-1: oklch(0.66 0.19 268);
-  --chart-2: oklch(0.65 0.22 300);
-  --chart-3: oklch(0.72 0.17 160);
-  --chart-4: oklch(0.78 0.16 75);
-  --chart-5: oklch(0.7 0.17 15);
+  /* Categorical series, in fixed slot order -- slot 1 is always slot 1, so a
+     filter that drops a series never repaints the survivors.
+
+     These replace a set that did not survive checking. The previous
+     --chart-1 (blue) and --chart-2 (purple) sat 0.4 apart under deuteranopia
+     and 11.7 apart for normal vision, which is below the 15 floor: a red-green
+     colourblind reader could not separate two adjacent series at all, and
+     neither could anyone else at a glance. Nothing rendered a chart yet, so
+     nothing regressed by fixing them. */
+  --chart-1: #3987e5;  /* blue    */
+  --chart-2: #d95926;  /* orange  */
+  --chart-3: #199e70;  /* aqua    */
+  --chart-4: #c98500;  /* yellow  */
+  --chart-5: #d55181;  /* magenta */
+  --chart-6: #008300;  /* green   */
 
   --sidebar: oklch(0.15 0.02 270);
   --sidebar-foreground: oklch(0.97 0.005 260);
@@ -174,11 +185,16 @@
   --input: oklch(0.92 0.008 260);
   --ring: oklch(0.55 0.2 268);
 
-  --chart-1: oklch(0.55 0.2 268);
-  --chart-2: oklch(0.55 0.22 300);
-  --chart-3: oklch(0.55 0.15 160);
-  --chart-4: oklch(0.6 0.14 60);
-  --chart-5: oklch(0.55 0.18 15);
+  /* The light steps of the same six hues -- chosen against the light surface,
+     not derived from the dark ones. Three of them sit under 3:1 on white, which
+     is why every chart here carries a labelled legend rather than relying on
+     the fill alone to identify a series. */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
 
   --sidebar: oklch(0.985 0.004 260);
   --sidebar-foreground: oklch(0.22 0.02 270);

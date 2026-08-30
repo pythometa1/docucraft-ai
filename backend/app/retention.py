@@ -60,7 +60,8 @@ from app.config import settings
 from app.db import Base
 from app.models import (
     DeletionCertificate, DocumentVersion, GeneratedDocument, ManifestBinding,
-    ManifestGeneration, Organization, OrgDataPolicy, SourceChunk, SourceFile,
+    DocumentReview, ManifestGeneration, Organization, OrgDataPolicy, ReviewComment,
+    ReviewTask, SourceChunk, SourceFile,
     SourceVersion, User,
 )
 from app.storage import abs_path
@@ -701,6 +702,53 @@ def sweep_expired_sources(
     return manifest
 
 
+def _delete_review_trail(db: Session, manifest: DeletionManifest, *, org_id: str,
+                         version_ids) -> None:
+    """Remove everything a person or the engine said about these documents.
+
+    Three tables, and all three hold the customer's payload rather than a
+    measurement of it.
+
+    A review comment quotes a line of the letter back -- `quoted_text` holds the
+    run verbatim -- so it is a copy of the document's contents living in another
+    table. Deleting the letter and leaving the remark that reproduces it leaves
+    exactly what the deletion was for.
+
+    A `ReviewTask` is worse, and was being missed entirely. `resolution_engine`
+    fills `context["available"]` with the resolved values from the source record
+    -- salary, identifiers, computed amounts -- and `proposed_value` with the
+    figure that was written into the letter. So a deletion destroyed the
+    document, its versions, its blob and its lineage row, and left a row holding
+    the same salary behind, pointing at a `document_version_id` that no longer
+    existed, absent from the manifest, with the certificate reporting the
+    deletion as complete. `qa_failure_logs` is deliberately kept because those
+    are a measurement of the system; this is not that.
+
+    Comments before reviews because the foreign key says so, and by review id
+    rather than by version id, so a comment whose review row is somehow already
+    gone is not stranded by the ordering.
+    """
+    version_ids = list(version_ids)
+    if not version_ids:
+        return
+
+    review_ids = list(db.scalars(
+        select(DocumentReview.id).where(
+            DocumentReview.org_id == org_id,
+            DocumentReview.document_version_id.in_(version_ids),
+        )
+    ))
+    if review_ids:
+        _delete_rows(db, ReviewComment.__table__, ReviewComment.review_id.in_(review_ids), manifest)
+        _delete_rows(db, DocumentReview.__table__, DocumentReview.id.in_(review_ids), manifest)
+
+    _delete_rows(
+        db, ReviewTask.__table__,
+        (ReviewTask.org_id == org_id) & ReviewTask.document_version_id.in_(version_ids),
+        manifest,
+    )
+
+
 def sweep_expired_documents(db: Session, *, org_id: str, now: datetime | None = None) -> DeletionManifest:
     """Delete generated documents past the period the CUSTOMER stated.
 
@@ -727,6 +775,9 @@ def sweep_expired_documents(db: Session, *, org_id: str, now: datetime | None = 
     if not expired:
         return manifest
 
+    # The reviews hang off the versions, so they go before them.
+    _delete_review_trail(db, manifest, org_id=org_id, version_ids=db.scalars(
+        select(DocumentVersion.id).where(DocumentVersion.document_id.in_(expired))))
     # Versions first: they carry the rendered DOCX on disk, and the parent row
     # is what makes them findable.
     _delete_rows(db, DocumentVersion.__table__, DocumentVersion.document_id.in_(expired), manifest)
@@ -785,21 +836,40 @@ def delete_generated_document(
             f"generated document {document_id!r} is not in organisation {org_id!r}."
         )
 
-    # `manifest_generations` has no document_id. The link is the blob: the
-    # generate handler writes one rendered path and stores it on both the
-    # version and the generation record, so the paths are the join. Read them
-    # before the versions are deleted, or there is nothing left to match on.
+    # Read both links to the lineage before the versions are deleted, or there is
+    # nothing left to match on.
+    #
+    # `document_version_id` is the real one. The blob path is the old join and is
+    # kept for one release, for rows written before the column existed -- but it
+    # was never safe on its own: `apply_version_text` writes a *different* path,
+    # so an edited document's lineage was unreachable, and previews share a path,
+    # so deleting one document could destroy another's record. The version-id
+    # predicate is exact; the path predicate is the fallback for rows that have
+    # no version id at all.
+    version_ids = list(db.scalars(
+        select(DocumentVersion.id).where(DocumentVersion.document_id == document_id)
+    ))
     blob_paths = [
         path for path in db.scalars(
             select(DocumentVersion.blob_path).where(DocumentVersion.document_id == document_id)
         ) if path
     ]
 
+    _delete_review_trail(db, manifest, org_id=org_id, version_ids=version_ids)
     _delete_rows(db, DocumentVersion.__table__, DocumentVersion.document_id == document_id, manifest)
+    if version_ids:
+        _delete_rows(
+            db, ManifestGeneration.__table__,
+            (ManifestGeneration.org_id == org_id)
+            & (ManifestGeneration.document_version_id.in_(version_ids)),
+            manifest,
+        )
     if blob_paths:
         _delete_rows(
             db, ManifestGeneration.__table__,
-            (ManifestGeneration.org_id == org_id) & (ManifestGeneration.blob_path.in_(blob_paths)),
+            (ManifestGeneration.org_id == org_id)
+            & (ManifestGeneration.document_version_id.is_(None))
+            & (ManifestGeneration.blob_path.in_(blob_paths)),
             manifest,
         )
     _delete_rows(db, GeneratedDocument.__table__, GeneratedDocument.id == document_id, manifest)

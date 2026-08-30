@@ -719,11 +719,21 @@ def test_a_template_cannot_inherit_from_its_own_template_version(app_client, org
     assert res.json()["detail"]["error"]["code"] == "PARENT_IS_SELF"
 
 
-def test_object_types_the_table_cannot_store_refuse_the_inheritance(app_client, org_a):
-    """`template_manifests` holds three object lists and §6 defines ten types.
-    Writing the row anyway would drop the approved SIGNATURE object on the floor
-    and report a successful inheritance -- a letter that inherits everything
-    except the part that makes it binding."""
+def test_a_signature_object_is_carried_across_rather_than_refusing_the_inheritance(
+        app_client, org_a):
+    """This used to answer 422 MANIFEST_OBJECTS_UNSTORABLE.
+
+    `template_manifests` held three object lists and §6 defines ten types, so an
+    approved SIGNATURE object had nowhere to go. Writing the row anyway would
+    have dropped it on the floor and reported a successful inheritance -- a
+    letter that inherits everything except the part that makes it binding -- so
+    refusing was the honest answer available at the time.
+
+    The row now carries an `objects` column and the write is lossless, which
+    matters because a real offer letter has a signature block: the refusal was
+    the common case, not the edge one. The object comes back PROPOSED, as every
+    inherited object does -- an approval given to one document is not an
+    approval of another."""
     from app.db import SessionLocal
     from app.models import TemplateManifest
 
@@ -755,10 +765,25 @@ def test_object_types_the_table_cannot_store_refuse_the_inheritance(app_client, 
         json={"parent_manifest_id": parent_manifest_id},
     )
 
-    assert res.status_code == 422
-    body = res.json()["detail"]["error"]
-    assert body["code"] == "MANIFEST_OBJECTS_UNSTORABLE"
-    assert "signature" in body["message"]
+    assert res.status_code == 201, res.text
+    body = res.json()
+
+    from app.db import SessionLocal as _Session
+    from app.models import TemplateManifest as _Manifest
+
+    db = _Session()
+    try:
+        row = db.get(_Manifest, body["manifest"]["id"])
+        stored = {o["object_id"]: o for o in row.objects}
+    finally:
+        db.close()
+
+    assert "signature" in stored, "the SIGNATURE object was dropped, not carried"
+    assert stored["signature"]["object_type"] == "SIGNATURE"
+    assert stored["signature"]["signer_source_ref"] == "source.signer"
+    # Inherited, therefore proposed: the approval on the parent was given to a
+    # different document.
+    assert stored["signature"]["status"] == "PROPOSED"
 
 
 def test_a_family_whose_stored_fingerprint_cannot_be_read_fails_loudly(app_client, org_a):

@@ -1,0 +1,35 @@
+name: Offer letter
+description: Salutation, role and remuneration, with a conditional probation clause.
+fields: [colleague_first_name, colleague_last_name, position_title, new_reporting_to, start_date, annual_salary]
+blocks:
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "Offer of Employment"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Dear "}
+      - {role: placeholder, text: "<Colleague First Name>"}
+      - {role: static, text: ","}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "We are pleased to offer you the position of "}
+      - {role: placeholder, text: "<Position Title>"}
+      - {role: static, text: ", reporting to "}
+      - {role: placeholder, text: "<New Reporting To>"}
+      - {role: static, text: ". Your start date will be "}
+      - {role: placeholder, text: "<Start Date>"}
+      - {role: static, text: "."}
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "Remuneration"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Your annual salary will be "}
+      - {role: placeholder, text: "<Annual Salary>"}
+      - {role: static, text: " per annum, paid monthly in arrears."}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Yours sincerely,"}
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Signatory>"}

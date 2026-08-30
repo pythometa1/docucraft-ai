@@ -188,3 +188,28 @@ def test_canary_never_exceeds_the_batch():
         assert len(positions) <= min(count, 3)
         assert all(0 <= p < count for p in positions)
         assert len(set(positions)) == len(positions)
+
+
+def test_a_batch_over_a_source_with_no_rows_is_refused(app_client, two_orgs, tmp_path):
+    """`completed - 0 of 0` beside a "Download all" button reads exactly like a
+    run that worked. It is the ordinary case, too: the reviewer downloads the
+    workbook the manifest generates, uploads it back, and has not typed anything
+    into it yet. `build_workbook` pre-formats 500 rows so the dropdowns are
+    usable, so the sheet is not empty -- headers plus 500 blank rows -- and
+    nothing before the batch could tell the difference.
+    """
+    import openpyxl
+    from app.generation.source_ingestion import extract_records
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "SourceData"
+    sheet.append(["colleague_first_name", "colleague_last_name"])
+    for _ in range(500):
+        sheet.append([None, None])
+    path = tmp_path / "empty.xlsx"
+    workbook.save(str(path))
+
+    columns, records = extract_records(str(path), "xlsx")
+    assert columns == ["colleague_first_name", "colleague_last_name"]
+    assert records == [], "500 formatted-but-blank rows are still no rows"

@@ -87,10 +87,20 @@ def _manifest_summary(db: Session, template_file_id: str) -> dict:
         .order_by(TemplateManifest.version_no.desc())
     ).first()
     if m is None:
-        return {"manifest_id": None, "manifest_status": None, "field_count": 0, "condition_count": 0}
+        return {"manifest_id": None, "manifest_status": None, "field_count": 0,
+                "condition_count": 0, "compile_error": None}
+    # A failed compile has to say why on the same payload that says it happened.
+    # Without this the screen shows "Compiled -- 0 fields", which is what a
+    # successful compile of a template with no placeholders looks like, and the
+    # two are not remotely the same thing to act on.
+    compile_error = None
+    if m.status == "failed":
+        notes = (m.prescan_summary or {}).get("notes") or []
+        compile_error = notes[0] if notes else "The compile did not produce a reading of this template."
     return {
         "manifest_id": m.id,
         "manifest_status": m.status,
+        "compile_error": compile_error,
         "field_count": len(m.fields or []),
         "condition_count": len(m.conditions or []),
     }

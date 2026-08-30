@@ -306,3 +306,50 @@ def test_a_confirm_band_suggestion_does_not_block_approval(app_client, two_orgs,
     assert app_client.post(
         f"/api/v1/template-manifests/{manifest_id}:approve", headers=_auth(token_a)
     ).status_code == 200
+
+
+def test_a_failed_compile_cannot_be_approved(app_client, two_orgs, template_with_manifests):
+    """A compile that could not read the template is the absence of a manifest,
+    recorded -- not a manifest with problems. Approving it would let documents be
+    generated from a reading that does not exist.
+
+    This slipped through once in the running app: `validate_manifest` had the
+    rule, but both call sites built its input as `{"fields", "conditions",
+    "blocks"}` and dropped `status`, so the check had nothing to read.
+    """
+    token_a, *_ = two_orgs
+    manifest_id = template_with_manifests(status="failed")
+
+    validation = app_client.get(
+        f"/api/v1/template-manifests/{manifest_id}/validation", headers=_auth(token_a)
+    )
+    assert validation.status_code == 200, validation.text
+    body = validation.json()
+    assert body["can_approve"] is False
+    assert "compile_failed" in [f["rule"] for f in body["failures"]]
+
+    res = app_client.post(f"/api/v1/template-manifests/{manifest_id}:approve", headers=_auth(token_a))
+    assert res.status_code == 409, res.text
+    assert res.json()["detail"]["error"]["code"] == "MANIFEST_INVALID"
+    assert _status(manifest_id) == "failed", "a refused approval must not change the status"
+
+
+def test_the_validator_is_handed_delete_always_so_orphans_can_be_seen():
+    """`orphaned_fields` reads `delete_always`. The approval call sites omitted
+    the key, so the one check whose whole job is "this field sits only in
+    paragraphs the compile deletes" saw nothing deleted and could never fire --
+    at the exact moment it exists for."""
+    from app.manifests.validator import validate_manifest
+    from app.routers.manifests import _validatable
+
+    class _Row:
+        fields = [{"id": "x", "slots": [{"paragraph_index": 3, "span_index": 0, "text": "<X>"}]}]
+        conditions: list = []
+        blocks: list = []
+        delete_always = [{"paragraph_index": 3, "span_index": None}]
+        status = "draft"
+
+    shape = _validatable(_Row())
+    assert shape["delete_always"] == _Row.delete_always
+    assert shape["status"] == "draft"
+    assert "orphaned_field" in [f.rule for f in validate_manifest(shape)]

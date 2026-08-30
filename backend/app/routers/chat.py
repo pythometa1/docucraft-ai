@@ -65,7 +65,9 @@ def send_message(conversation_id: str, body: MessageCreate, db: Session = Depend
 
     chunks = db.scalars(select(SourceChunk).where(SourceChunk.project_id == conv.project_id)).all() if conv.project_id else []
     ranked = retrieve(chunks, body.text, k=6)
-    policy = llm_policy_for(db, conv.org_id)
+    policy = llm_policy_for(db, conv.org_id, project_id=conv.project_id,
+                            user_id=user.id, subject_type="conversation",
+                            subject_id=conv.id)
     llm = get_llm_provider("Chat", policy=policy)
 
     # §16 data minimisation. A source chunk is a flattened spreadsheet row --

@@ -5,13 +5,14 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app import retention
+from app import analytics, retention
+from app.llm import pricing
 from app.audit.service import log_audit
 from app.authz import MANAGE_USERS, require
 from app.db import get_db
 from app.models import (
     AuditLog, DeletionCertificate, DocumentVersion, GeneratedDocument, GenerationJob,
-    OrgDataPolicy, Project, TemplateFile, User,
+    OrgDataPolicy, OrgModelRate, Project, TemplateFile, User,
 )
 from app.security import error, get_current_user
 from app.tenancy import GLOBAL
@@ -20,60 +21,165 @@ router = APIRouter(tags=["admin"])
 
 
 # --------------------------------------------------------------------------- analytics
+#
+# The queries live in `app/analytics.py`, the way §22's live in `app/metrics.py`.
+# What is here is the HTTP shape and one decision: an unknown `range` is a 400
+# rather than a silent fall back to the default. The page has always shown four
+# range buttons; the endpoints have always ignored them, so somebody reading
+# "7d" was reading thirty days of data, or all of it.
+
+
+def _window(range_: str):
+    try:
+        return analytics.window(range_)
+    except analytics.InvalidRange as exc:
+        raise error("INVALID_RANGE", str(exc), 400)
+
+
 @router.get("/analytics/kpis")
-def analytics_kpis(range: str = "30d", db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    docs_count = db.scalar(select(func.count()).select_from(GeneratedDocument).where(GeneratedDocument.org_id == user.org_id)) or 0
-    jobs = db.scalars(select(GenerationJob).where(GenerationJob.org_id == user.org_id, GenerationJob.finished_at.is_not(None))).all()
-    total_tokens = sum((j.token_usage or {}).get("input_tokens", 0) + (j.token_usage or {}).get("output_tokens", 0) for j in jobs)
-    avg_seconds = 0.0
-    if jobs:
-        durations = [(j.finished_at - j.started_at).total_seconds() for j in jobs if j.started_at and j.finished_at]
-        avg_seconds = round(sum(durations) / len(durations), 1) if durations else 0.0
-    approved = db.scalar(select(func.count()).select_from(DocumentVersion).join(GeneratedDocument, DocumentVersion.document_id == GeneratedDocument.id).where(GeneratedDocument.org_id == user.org_id, DocumentVersion.status == "approved")) or 0
-    total_versions = db.scalar(select(func.count()).select_from(DocumentVersion).join(GeneratedDocument, DocumentVersion.document_id == GeneratedDocument.id).where(GeneratedDocument.org_id == user.org_id)) or 0
-    approval_rate = round(100 * approved / total_versions, 1) if total_versions else 0.0
-    return {
-        "documents_generated": docs_count,
-        "ai_tokens_consumed": total_tokens,
-        "avg_time_to_draft_seconds": avg_seconds,
-        "approval_rate_pct": approval_rate,
-    }
+def analytics_kpis(range: str = analytics.DEFAULT_RANGE, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    since, until, days = _window(range)
+    return analytics.kpis(db, org_id=user.org_id, since=since, until=until, days=days)
 
 
 @router.get("/analytics/trend")
-def analytics_trend(range: str = "14d", db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    since = datetime.now(timezone.utc) - timedelta(days=14)
-    rows = db.scalars(select(GeneratedDocument).where(GeneratedDocument.org_id == user.org_id, GeneratedDocument.created_at >= since)).all()
-    buckets: dict[str, int] = {}
-    for r in rows:
-        day = r.created_at.strftime("%Y-%m-%d")
-        buckets[day] = buckets.get(day, 0) + 1
-    return {"items": [{"day": d, "count": c} for d, c in sorted(buckets.items())]}
+def analytics_trend(range: str = analytics.DEFAULT_RANGE, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    since, until, days = _window(range)
+    return analytics.documents_trend(db, org_id=user.org_id, since=since, until=until, days=days)
 
 
 @router.get("/analytics/by-function")
-def analytics_by_function(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    rows = db.execute(
-        select(Project.function, func.count(GeneratedDocument.id))
-        .join(GeneratedDocument, GeneratedDocument.project_id == Project.id)
-        .where(Project.org_id == user.org_id)
-        .group_by(Project.function)
-    ).all()
-    return {"items": [{"function": f, "count": c} for f, c in rows]}
+def analytics_by_function(range: str = analytics.DEFAULT_RANGE, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    since, until, _days = _window(range)
+    return {"items": analytics.documents_by_function(
+        db, org_id=user.org_id, since=since, until=until)}
 
 
 @router.get("/analytics/top-templates")
-def analytics_top_templates(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    rows = db.execute(
-        select(TemplateFile.name, func.count(GeneratedDocument.id))
-        .join(Project, Project.id == TemplateFile.project_id)
-        .join(GeneratedDocument, GeneratedDocument.project_id == Project.id)
-        .where(TemplateFile.org_id == user.org_id)
-        .group_by(TemplateFile.name)
-        .order_by(func.count(GeneratedDocument.id).desc())
-        .limit(5)
-    ).all()
-    return {"items": [{"name": n, "uses": c} for n, c in rows]}
+def analytics_top_templates(range: str = analytics.DEFAULT_RANGE, limit: int = 5,
+                            db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    since, until, _days = _window(range)
+    return analytics.top_templates(
+        db, org_id=user.org_id, since=since, until=until, limit=max(1, min(limit, 50)))
+
+
+@router.get("/analytics/cost")
+def analytics_cost(range: str = analytics.DEFAULT_RANGE, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """Spend, and what it was spent on.
+
+    Ungated, unlike `/metrics`: knowing what a batch cost is ordinary
+    information for anyone who runs one. *Changing* the rate it is billed at is
+    `MANAGE_USERS`, below.
+    """
+    since, until, days = _window(range)
+    return {
+        "summary": analytics.cost_summary(db, org_id=user.org_id, since=since, until=until),
+        "trend": analytics.cost_trend(
+            db, org_id=user.org_id, since=since, until=until, days=days),
+        "by_model": analytics.cost_by_model(db, org_id=user.org_id, since=since, until=until),
+        "by_operation": analytics.cost_by_operation(
+            db, org_id=user.org_id, since=since, until=until),
+        "by_template": analytics.cost_by_template(
+            db, org_id=user.org_id, since=since, until=until),
+    }
+
+
+@router.get("/analytics/compiles")
+def analytics_compiles(range: str = analytics.DEFAULT_RANGE, db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    since, until, days = _window(range)
+    return analytics.compile_summary(
+        db, org_id=user.org_id, since=since, until=until, days=days)
+
+
+# ------------------------------------------------------------------- model rates
+
+
+class ModelRateUpsert(BaseModel):
+    model: str
+    input_usd_per_mtok: float
+    output_usd_per_mtok: float
+    note: str | None = None
+
+
+class ModelRateReset(BaseModel):
+    model: str
+
+
+@router.get("/admin/model-rates")
+def list_model_rates(db: Session = Depends(get_db),
+                     user: User = Depends(require(MANAGE_USERS))):
+    """Every rate in force for this organisation, and where each came from."""
+    overrides = {
+        row.model: row for row in db.scalars(
+            select(OrgModelRate).where(OrgModelRate.org_id == user.org_id)).all()
+    }
+    items = []
+    for model in sorted(set(pricing.DEFAULT_RATES) | set(overrides)):
+        rate = pricing.rate_for(db, org_id=user.org_id, model=model)
+        if rate is None:
+            continue
+        items.append({**rate.as_dict(),
+                      "origin": "org" if model in overrides else "default"})
+    return {"items": items, "read_on": pricing.RATES_READ_ON}
+
+
+@router.put("/admin/model-rates")
+def upsert_model_rate(body: ModelRateUpsert, db: Session = Depends(get_db),
+                      user: User = Depends(require(MANAGE_USERS))):
+    """Set this organisation's own rate for one model.
+
+    Deliberately without a path parameter. A `{model}` segment is not a
+    tenant-owned row id, so it would fail `test_tenancy_walker`'s
+    wrong-tenant-404 assertion for the wrong reason and teach the next person to
+    add an exemption.
+
+    Changing a rate never restates history: `cost_micro_usd` is frozen onto each
+    `llm_calls` row when the call is made.
+    """
+    model = pricing.canonical_model(body.model)
+    if not model:
+        raise error("MODEL_REQUIRED", "Name the model this rate applies to.", 400)
+    if body.input_usd_per_mtok < 0 or body.output_usd_per_mtok < 0:
+        raise error("RATE_NEGATIVE", "A rate cannot be negative.", 400)
+
+    row = db.scalar(select(OrgModelRate).where(
+        OrgModelRate.org_id == user.org_id, OrgModelRate.model == model))
+    if row is None:
+        row = OrgModelRate(org_id=user.org_id, model=model, input_micro_usd_per_ktok=0,
+                           output_micro_usd_per_ktok=0, updated_by=user.id)
+        db.add(row)
+    row.input_micro_usd_per_ktok = round(body.input_usd_per_mtok * 1000)
+    row.output_micro_usd_per_ktok = round(body.output_usd_per_mtok * 1000)
+    row.note = body.note
+    row.updated_by = user.id
+
+    log_audit(db, user, "Changed a model rate", "org_model_rate", model, None, "warning",
+              f"{body.input_usd_per_mtok}/{body.output_usd_per_mtok} per MTok")
+    db.commit()
+    return {"model": model, "input_usd_per_mtok": body.input_usd_per_mtok,
+            "output_usd_per_mtok": body.output_usd_per_mtok, "origin": "org"}
+
+
+@router.post("/admin/model-rates:reset")
+def reset_model_rate(body: ModelRateReset, db: Session = Depends(get_db),
+                     user: User = Depends(require(MANAGE_USERS))):
+    """Drop an override and fall back to the shipped rate."""
+    model = pricing.canonical_model(body.model)
+    row = db.scalar(select(OrgModelRate).where(
+        OrgModelRate.org_id == user.org_id, OrgModelRate.model == model))
+    if row is None:
+        raise error("RATE_NOT_FOUND", f"This organisation has no override for {model!r}.", 404)
+    db.delete(row)
+    log_audit(db, user, "Reset a model rate to the default", "org_model_rate", model,
+              None, "warning", model)
+    db.commit()
+    return {"model": model, "origin": "default"}
 
 
 # --------------------------------------------------------------------------- team

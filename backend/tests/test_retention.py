@@ -36,9 +36,10 @@ def _on_postgres() -> bool:
 from app import retention
 from app.db import SessionLocal
 from app.models import (
-    Conversation, DeletionCertificate, DocumentVersion, GeneratedDocument, LookupValue,
-    ManifestBinding, Organization, OrgDataPolicy, Project, SourceChunk, SourceFile,
-    SourceVersion, TemplateFile, TemplateManifest, TemplateVersion, User,
+    Conversation, DeletionCertificate, DocumentReview, DocumentVersion, GeneratedDocument,
+    LookupValue, ManifestBinding, Organization, OrgDataPolicy, Project, ReviewComment,
+    ReviewTask, SourceChunk, SourceFile, SourceVersion, TemplateFile, TemplateManifest,
+    TemplateVersion, User,
 )
 from app.security import hash_password
 from app.storage import abs_path
@@ -1174,6 +1175,240 @@ def test_deleting_a_document_from_another_org_raises_rather_than_no_ops():
     try:
         with pytest.raises(LookupError, match="is not in organisation"):
             delete_generated_document(db, org_id="org-that-owns-nothing", document_id="no-such-document")
+    finally:
+        db.close()
+
+
+def _document_with_a_review(db, *, org_id, user_id, project_id, display_id, created_at=None):
+    """A letter somebody objected to, and the remark quoting a line of it back."""
+    document = GeneratedDocument(
+        org_id=org_id, project_id=project_id, display_id=display_id, language="en",
+        status="changes_requested",
+        **({"created_at": created_at} if created_at is not None else {}),
+    )
+    db.add(document)
+    db.flush()
+    version = DocumentVersion(
+        document_id=document.id, org_id=org_id, version_no=1,
+        blob_path=_write_blob(f"documents/{project_id}/{display_id}.docx"),
+        status="changes_requested", created_by=user_id,
+    )
+    db.add(version)
+    db.flush()
+    review = DocumentReview(
+        org_id=org_id, document_id=document.id, document_version_id=version.id,
+        state="open", reason="the salary is wrong", requested_by=user_id,
+        authored_by=user_id,
+    )
+    db.add(review)
+    db.flush()
+    comment = ReviewComment(
+        org_id=org_id, review_id=review.id, author_id=user_id,
+        body="this figure", paragraph_index=12, span_index=3,
+        quoted_text="a base salary of GBP 48,000",
+    )
+    db.add(comment)
+    # The engine's own parked question, which holds the source values verbatim.
+    db.add(ReviewTask(
+        org_id=org_id, project_id=project_id, unit_id="pro_rata", kind="calculation",
+        question="What is the pro-rata bonus?", status="open",
+        document_version_id=version.id, proposed_value="82000",
+        context={"available": {"salary": "82000", "employee_id": "E-99123"}},
+    ))
+    db.flush()
+    return document, version, review, comment
+
+
+def test_deleting_a_document_takes_the_conversation_about_it(app_client, throwaway_org):
+    """A comment quotes the letter back verbatim.
+
+    `quoted_text` holds the run as it read when somebody remarked on it, so a
+    review comment is a copy of the document's contents living in another table.
+    Deleting the letter and leaving the remark that reproduces it would leave
+    behind exactly the payload the deletion was for.
+    """
+    org_id, user_id, project_id = throwaway_org("reviewdel", 91130)
+    db = SessionLocal()
+    try:
+        document, _version, review, comment = _document_with_a_review(
+            db, org_id=org_id, user_id=user_id, project_id=project_id, display_id=91130)
+        db.commit()
+        document_id, review_id, comment_id = document.id, review.id, comment.id
+
+        manifest = retention.delete_generated_document(
+            db, org_id=org_id, document_id=document_id)
+        db.commit()
+
+        assert db.get(DocumentReview, review_id) is None
+        assert db.get(ReviewComment, comment_id) is None
+        assert manifest.counts["review_comments"] == 1
+        assert manifest.counts["document_reviews"] == 1
+    finally:
+        db.close()
+
+
+def test_the_document_sweep_takes_the_conversation_too(app_client, throwaway_org):
+    """The scheduled cascade and the by-hand one agree, which is the point of
+    both calling the same helper."""
+    org_id, user_id, project_id = throwaway_org("reviewsweep", 91131)
+    db = SessionLocal()
+    try:
+        retention.set_policy(db, org_id, generated_document_retention_days=365)
+        old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400)
+        _document, _version, review, comment = _document_with_a_review(
+            db, org_id=org_id, user_id=user_id, project_id=project_id, display_id=91132,
+            created_at=old)
+        db.commit()
+        review_id, comment_id = review.id, comment.id
+
+        retention.sweep_expired_documents(db, org_id=org_id)
+        db.commit()
+
+        assert db.get(DocumentReview, review_id) is None
+        assert db.get(ReviewComment, comment_id) is None
+    finally:
+        db.close()
+
+
+def test_deleting_a_document_nobody_objected_to_leaves_other_reviews_alone(
+        app_client, throwaway_org):
+    """The predicate is the version, not the org.
+
+    Deleting one letter must not take the conversation about another -- which is
+    the same class of mistake as the `blob_path` join that could destroy a second
+    document's lineage.
+    """
+    org_id, user_id, project_id = throwaway_org("reviewscope", 91133)
+    db = SessionLocal()
+    try:
+        doomed, _v1, _r1, _c1 = _document_with_a_review(
+            db, org_id=org_id, user_id=user_id, project_id=project_id, display_id=91134)
+        _kept, _v2, kept_review, kept_comment = _document_with_a_review(
+            db, org_id=org_id, user_id=user_id, project_id=project_id, display_id=91135)
+        db.commit()
+        kept_ids = (kept_review.id, kept_comment.id)
+
+        retention.delete_generated_document(db, org_id=org_id, document_id=doomed.id)
+        db.commit()
+
+        assert db.get(DocumentReview, kept_ids[0]) is not None
+        assert db.get(ReviewComment, kept_ids[1]) is not None
+    finally:
+        db.close()
+
+
+def test_deleting_a_document_takes_the_engines_parked_questions_too(
+        app_client, throwaway_org):
+    """A `ReviewTask` holds the source record, not a measurement of it.
+
+    `resolution_engine` fills `context["available"]` with the resolved values --
+    salary, identifiers -- and `proposed_value` with the figure written into the
+    letter. Leaving those behind destroyed the document, its versions, its blob
+    and its lineage row while the salary stayed in the database, on a row
+    pointing at a `document_version_id` that no longer existed and absent from
+    the manifest the certificate is issued against.
+    """
+    org_id, user_id, project_id = throwaway_org("taskdel", 91138)
+    db = SessionLocal()
+    try:
+        document, version, _r, _c = _document_with_a_review(
+            db, org_id=org_id, user_id=user_id, project_id=project_id, display_id=91138)
+        db.commit()
+        document_id, version_id = document.id, version.id
+
+        manifest = retention.delete_generated_document(
+            db, org_id=org_id, document_id=document_id)
+        db.commit()
+
+        left = db.query(ReviewTask).filter(
+            ReviewTask.document_version_id == version_id).all()
+        assert left == [], "a parked question kept the salary after the document was destroyed"
+        assert manifest.counts["review_tasks"] == 1
+    finally:
+        db.close()
+
+
+def test_the_sweep_takes_the_parked_questions_as_well(app_client, throwaway_org):
+    """The scheduled cascade and the by-hand one agree, because both call the
+    same helper -- which is the reason they share one."""
+    org_id, user_id, project_id = throwaway_org("tasksweep", 91139)
+    db = SessionLocal()
+    try:
+        retention.set_policy(db, org_id, generated_document_retention_days=365)
+        old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=400)
+        _d, version, _r, _c = _document_with_a_review(
+            db, org_id=org_id, user_id=user_id, project_id=project_id, display_id=91140,
+            created_at=old)
+        db.commit()
+        version_id = version.id
+
+        retention.sweep_expired_documents(db, org_id=org_id)
+        db.commit()
+
+        assert db.query(ReviewTask).filter(
+            ReviewTask.document_version_id == version_id).all() == []
+    finally:
+        db.close()
+
+
+def test_a_document_with_no_versions_still_deletes(app_client, throwaway_org):
+    """The empty case: nothing to look reviews up by, and no query to run."""
+    org_id, _user_id, project_id = throwaway_org("noversions", 91136)
+    db = SessionLocal()
+    try:
+        document = GeneratedDocument(org_id=org_id, project_id=project_id,
+                                     display_id=91136, language="en", status="draft")
+        db.add(document)
+        db.commit()
+        document_id = document.id
+
+        manifest = retention.delete_generated_document(db, org_id=org_id,
+                                                       document_id=document_id)
+        db.commit()
+
+        assert db.get(GeneratedDocument, document_id) is None
+        assert "document_reviews" not in manifest.counts
+    finally:
+        db.close()
+
+
+def test_the_lineage_is_found_by_version_id_not_by_the_path_it_was_written_to(
+        app_client, throwaway_org):
+    """The `blob_path` join was already wrong before this feature touched it.
+
+    `apply_version_text` writes a *different* path for an edited document, so its
+    generation record was unreachable through the path and survived the deletion
+    -- taking the resolved field lineage, which is a copy of the source row, with
+    it.
+    """
+    from app.models import ManifestGeneration
+
+    org_id, user_id, project_id = throwaway_org("lineagelink", 91137)
+    db = SessionLocal()
+    try:
+        document = GeneratedDocument(org_id=org_id, project_id=project_id,
+                                     display_id=91137, language="en", status="draft")
+        db.add(document)
+        db.flush()
+        version = DocumentVersion(
+            document_id=document.id, org_id=org_id, version_no=2,
+            blob_path="documents/edited-v2.docx", status="draft", created_by=user_id)
+        db.add(version)
+        db.flush()
+        generation = ManifestGeneration(
+            org_id=org_id, manifest_id="m1", source_record={"salary": "48000"},
+            field_lineage=[], condition_lineage=[], qa_passed=True, qa_notes=[],
+            # What v1 was rendered to. The edit wrote somewhere else.
+            blob_path="documents/original-v1.docx",
+            document_version_id=version.id, created_by=user_id)
+        db.add(generation)
+        db.commit()
+        generation_id = generation.id
+
+        retention.delete_generated_document(db, org_id=org_id, document_id=document.id)
+        db.commit()
+
+        assert db.get(ManifestGeneration, generation_id) is None
     finally:
         db.close()
 

@@ -17,8 +17,8 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     Conversation, DocumentVersion, DraftDocument, GeneratedDocument, Project,
-    SourceFile, SourceVersion, TemplateFile, TemplateLibrary, TemplateManifest,
-    TemplateVersion, User,
+    SourceFile, SourceVersion, TemplateBlueprint, TemplateBlueprintVersion, TemplateFile,
+    TemplateLibrary, TemplateManifest, TemplateVersion, User,
 )
 from app.security import error
 
@@ -100,3 +100,18 @@ def owned_template_library(db: Session, library_id: str, user: User) -> Template
     if not library or library.org_id != user.org_id or library.deleted_at:
         raise error("TEMPLATE_NOT_FOUND", "Template not found", 404)
     return library
+
+
+def owned_blueprint(db: Session, blueprint_id: str, user: User) -> TemplateBlueprint:
+    blueprint = db.get(TemplateBlueprint, blueprint_id)
+    if not blueprint or blueprint.org_id != user.org_id or blueprint.deleted_at:
+        raise error("BLUEPRINT_NOT_FOUND", "Template blueprint not found", 404)
+    return blueprint
+
+
+def owned_blueprint_version(db: Session, version_id: str, user: User) -> TemplateBlueprintVersion:
+    version = db.get(TemplateBlueprintVersion, version_id)
+    if version is None:
+        raise error("BLUEPRINT_NOT_FOUND", "Template blueprint version not found", 404)
+    owned_blueprint(db, version.blueprint_id, user)  # org lives on the parent
+    return version

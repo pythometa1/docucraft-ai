@@ -47,6 +47,7 @@ function mapTemplateFile(t: any): TemplateFile {
     uploadedBy: t.created_by_name ?? "—",
     manifestId: t.manifest_id ?? undefined,
     manifestStatus: t.manifest_status ?? undefined,
+    compileError: t.compile_error ?? undefined,
     fieldCount: t.field_count ?? 0,
     conditionCount: t.condition_count ?? 0,
   };
@@ -72,6 +73,12 @@ function mapGeneratedDoc(g: any, projectName: string): GeneratedDoc {
     // downloadable and saying so is the whole point of the gate, so the status
     // has to survive into the row rather than being dropped here.
     status: g.status ?? "draft",
+    statusReason: g.status_reason ?? undefined,
+    // A fact from the server, not inferred from the status. `derive_status` is
+    // worst-first, so a blocked document that also has an open review reports
+    // `blocked` -- and a row inferring "already objected to" from the status
+    // offered a button that could only 409.
+    openReviewId: g.open_review_id ?? undefined,
     generatedAt: toDisplayDateTime(g.created_at),
     size: formatBytes(g.size_bytes),
     generatedBy: g.created_by_name ?? "—",
@@ -96,6 +103,8 @@ interface Store {
   totalCount: number;
   loaded: boolean;
   loadProjects: (q?: string) => Promise<void>;
+  currentUserId: string;
+  capabilities: string[];
   loadProjectDetail: (id: string) => Promise<void>;
   createProject: (input: CreateProjectInput) => Promise<string>;
   getProject: (id: string) => Project | undefined;
@@ -107,10 +116,19 @@ interface Store {
 
 export const useStore = create<Store>((set, get) => ({
   currentUser: "",
+  currentUserId: "",
+  // What this role is allowed to do. Read by the review bar so a control the
+  // server would refuse is disabled rather than 403-ing after somebody has
+  // typed a rejection note. Never a substitute for the server's own check.
+  capabilities: [],
 
   loadCurrentUser: async () => {
     const me = await api.me();
-    set({ currentUser: me.full_name });
+    set({
+      currentUser: me.full_name,
+      currentUserId: me.id,
+      capabilities: me.capabilities ?? [],
+    });
   },
 
   projects: [],

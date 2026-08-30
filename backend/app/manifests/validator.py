@@ -55,6 +55,19 @@ def validate_manifest(manifest: dict, *, warnings=None, dispositions=None) -> li
     blocks = manifest.get("blocks") or []
 
     failures: list[ValidationFailure] = []
+
+    # A compile that could not read the template is not a manifest with problems
+    # -- it is the absence of a manifest, recorded. The row exists so a reviewer
+    # can read the transcript and retry, and the one thing it must never do is
+    # become approvable by having its warnings dispositioned away.
+    if str(manifest.get("status") or "").strip().lower() == "failed":
+        failures.append(ValidationFailure(
+            "compile_failed",
+            "This compile did not produce a reading of the template, so there is nothing to "
+            "approve. See compile_transcript for the round it stopped on, and re-compile.",
+            None,
+        ))
+
     # A field whose every slot sits in a paragraph the compile deletes is the
     # same defect as a field with no slot at all, one step later: the compiler
     # found a name, placed it, and then guaranteed the placement could never

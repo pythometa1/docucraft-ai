@@ -508,11 +508,18 @@ def supersede(envelope: ManifestEnvelope, *, manifest_id: str) -> Supersession:
     )
 
 
-def unstorable_object_types() -> tuple:
-    """Object types §6 defines that the current table has no column for.
+def unstorable_object_types(*, objects_column: bool = False) -> tuple:
+    """Object types §6 defines that the chosen storage has no column for.
 
     Named here so a caller can check before it writes rather than discovering
     the loss afterwards. `to_row_values` reports the affected object ids; this
     is the same fact stated once, in terms of types.
+
+    The keyword mirrors `to_row_values`: against the three legacy lists five of
+    the ten types have nowhere to go, and against the `objects` column none do.
+    A caller asks about the storage it is actually going to write, because the
+    answer is a property of that choice and not of §6.
     """
+    if objects_column:
+        return ()
     return tuple(t for t in ObjectType if t not in LEGACY_COLUMN_BY_OBJECT_TYPE)

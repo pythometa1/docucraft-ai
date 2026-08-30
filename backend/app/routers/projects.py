@@ -6,6 +6,7 @@ from sqlalchemy import String, cast, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.generation.value_format import resolved_locale
 from app.models import (
     Counter, DraftDocument, GeneratedDocument, LookupValue, Project, SourceFile,
     TemplateFile, User,
@@ -32,6 +33,10 @@ class ProjectCreate(BaseModel):
     function: str
     document_type: str
     language: str = "English"
+    # How dates and amounts are written -- `en_AU`, `en_GB`, `de_DE`. Separate
+    # from `region`, which is continental and answers a different question:
+    # "Asia Pacific" contains Australia, Japan and India and is not a locale.
+    locale: str | None = None
 
 
 def _next_display_id(db: Session, counter_name: str, start: int) -> int:
@@ -52,6 +57,8 @@ def _project_out(db: Session, p: Project) -> dict:
     return {
         "id": p.id, "display_id": p.display_id, "name": p.name, "description": p.description,
         "region": p.region, "function": p.function, "document_type": p.document_type, "language": p.language,
+        "locale": p.locale, "effective_locale": resolved_locale(region=p.region, project_locale=p.locale)[0],
+        "locale_source": resolved_locale(region=p.region, project_locale=p.locale)[1],
         "status": p.status, "generation_settings": p.generation_settings,
         "created_at": p.created_at, "updated_at": p.updated_at,
         "has_templates": has_templates, "has_sources": has_sources,
@@ -105,7 +112,8 @@ def create_project(body: ProjectCreate, db: Session = Depends(get_db), user: Use
     project = Project(
         org_id=user.org_id, display_id=display_id, name=body.name, description=body.description,
         region=body.region, function=body.function, document_type=body.document_type,
-        language=body.language, status="pending", created_by=user.id,
+        language=body.language, locale=(body.locale or "").strip().replace("-", "_") or None,
+        status="pending", created_by=user.id,
     )
     db.add(project)
     db.flush()
@@ -128,6 +136,7 @@ class ProjectPatch(BaseModel):
     description: str | None = None
     status: str | None = None
     generation_settings: dict | None = None
+    locale: str | None = None
 
 
 @router.patch("/projects/{project_id}")
@@ -143,6 +152,24 @@ def patch_project(project_id: str, body: ProjectPatch, db: Session = Depends(get
         p.status = body.status
     if body.generation_settings is not None:
         p.generation_settings = {**p.generation_settings, **body.generation_settings}
+    if body.locale is not None:
+        # Rejected here rather than at render time. A locale babel cannot parse
+        # falls back silently during generation, which is the failure this whole
+        # field exists to remove.
+        from babel import Locale, UnknownLocaleError
+
+        candidate = body.locale.strip().replace("-", "_")
+        if candidate:
+            try:
+                Locale.parse(candidate)
+            except (UnknownLocaleError, ValueError):
+                raise error(
+                    "UNKNOWN_LOCALE",
+                    f"{body.locale!r} is not a locale this system can format with. "
+                    f"Use a code like 'en_AU', 'en_GB' or 'de_DE'.",
+                    422,
+                )
+        p.locale = candidate or None
     db.commit()
     db.refresh(p)
     return _project_out(db, p)

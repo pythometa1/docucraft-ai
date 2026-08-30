@@ -56,6 +56,30 @@ class Settings(BaseSettings):
     openai_max_output_tokens: int = 16384
     openai_compile_max_output_tokens: int = 65536
 
+    # --- agentic compile -----------------------------------------------------
+    #
+    # Every template is read by a model now, so a template longer than one call
+    # can hold has to be split rather than cut. The previous single-call path
+    # built its prompt as `"\n".join(paragraphs)[:60000]`, which silently
+    # discarded everything past the cut: a 200-paragraph contract compiled from
+    # its first half and reported the result as complete.
+    #
+    # The budget is per chunk and deliberately below that old ceiling, because a
+    # chunk now carries a document outline in front of it as well as its own
+    # paragraphs.
+    compile_chunk_budget_chars: int = 40000
+
+    # Chunks overlap because a conditional block straddles boundaries: the
+    # instruction that opens it can sit in one chunk and the clause it governs in
+    # the next, and a writer that sees only the clause has no reason to make it
+    # conditional at all.
+    compile_chunk_overlap_paragraphs: int = 8
+
+    # A runaway ceiling, not a budget. The loop is meant to stop when its
+    # assertion count stops falling; this only bounds the case where corrections
+    # keep being applied without ever converging.
+    compile_max_rounds: int = 12
+
     # --- §16 retention, residency and the model boundary ---------------------
     #
     # Source uploads are, in §16's words, "the most sensitive artefact and the

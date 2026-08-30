@@ -9,6 +9,11 @@
  * the router sends the user back to the sign-in screen.
  */
 
+import type {
+  AnalyticsKpis, AnalyticsRange, Blueprint, BlueprintBody, BlueprintVersion, CompileReport,
+  CostReport, LintReport, QualityReport, TopTemplates, TrendSeries,
+} from "@/lib/types";
+
 const API_URL = (import.meta as any).env?.VITE_API_URL ?? "http://localhost:8000/api/v1";
 const TOKEN_KEY = "dm.api.token";
 
@@ -124,6 +129,23 @@ async function request<T>(method: string, path: string, opts: { json?: unknown; 
   return data as T;
 }
 
+/** The server's own message, when it sent one. A download failure is usually
+ *  something the user can act on -- "LibreOffice is not installed on this host"
+ *  -- and replacing it with "Could not download" throws that away. */
+async function downloadError(res: Response, format: string): Promise<ApiError> {
+  let message = `Could not download this document as ${format}.`;
+  let code = "DOWNLOAD_FAILED";
+  try {
+    const body = await res.json();
+    const err = body?.detail?.error ?? body?.detail;
+    if (err?.message) message = err.message;
+    if (err?.code) code = err.code;
+  } catch {
+    /* not JSON; the default message stands */
+  }
+  return new ApiError(res.status, code, message);
+}
+
 export const api = {
   login,
   isAuthenticated: () => getToken() != null,
@@ -152,7 +174,13 @@ export const api = {
     return URL.createObjectURL(await res.blob());
   },
 
-  me: () => request<{ id: string; full_name: string; email: string }>("GET", "/me"),
+  me: () => request<{
+    id: string; full_name: string; email: string; org_id: string; role: string;
+    job_title: string | null; timezone: string | null; function: string | null;
+    /** What this role may do. Sent so the UI can disable what the server would
+     *  refuse -- not a boundary; `require()` still checks every one. */
+    capabilities: string[];
+  }>("GET", "/me"),
   lookups: (kind: string, parent?: string) => request<{ items: string[] }>("GET", "/lookups", { query: { kind, parent } }),
 
   listProjects: (q?: string, opts: { status?: string; limit?: number; offset?: number } = {}) =>
@@ -191,10 +219,78 @@ export const api = {
   listProjectDocuments: (projectId: string) => request<{ items: any[] }>("GET", `/projects/${projectId}/documents`),
   getDocument: (documentId: string) => request<any>("GET", `/documents/${documentId}`),
   deleteDocument: (documentId: string) => request<any>("DELETE", `/documents/${documentId}`),
-  getDocumentVersion: (versionId: string) => request<{ id: string; html_content: string; status: string; version_no: number; renderer: string | null; html_editable: boolean }>("GET", `/document-versions/${versionId}`),
+  getDocumentVersion: (versionId: string) =>
+    request<{
+      id: string; html_content: string; status: string;
+      /** Why it is in that state -- a chip with no words sends the reader looking. */
+      status_reason: string | null;
+      version_no: number; renderer: string | null; html_editable: boolean;
+      document_id: string; approved_by: string | null; approved_at: string | null;
+      open_review_id: string | null;
+    }>("GET", `/document-versions/${versionId}`),
   saveDocumentVersion: (versionId: string, html: string) => request<any>("PATCH", `/document-versions/${versionId}`, { json: { html_content: html } }),
+
+  // --- downloads ----------------------------------------------------------
+  //
+  // `format=pdf` needs LibreOffice on the API host. When it is absent the server
+  // answers 503 naming the package, which is a configuration fact rather than a
+  // failure of the letter -- so the caller keeps .docx available and says why
+  // PDF is not on offer.
+  //
+  // The `res.ok` check is not ceremony: without it a 404 or a 503 becomes a blob
+  // URL of the error JSON, handed to the browser as a download. The user gets a
+  // file named like their letter containing `{"detail":"Not Found"}` and nothing
+  // anywhere reports a failure.
+  async downloadVersion(versionId: string, format: "docx" | "pdf" = "docx"): Promise<string> {
+    const token = ensureAuth();
+    const res = await fetch(`${API_URL}/document-versions/${versionId}/download?format=${format}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw await downloadError(res, format);
+    return URL.createObjectURL(await res.blob());
+  },
+
+  async downloadDocuments(documentIds: string[], format: "docx" | "pdf" = "docx"): Promise<string> {
+    const token = ensureAuth();
+    const res = await fetch(`${API_URL}/documents:download`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ document_ids: documentIds, format }),
+    });
+    if (!res.ok) throw await downloadError(res, format);
+    return URL.createObjectURL(await res.blob());
+  },
+
+  // --- text editing -------------------------------------------------------
+  //
+  // A letter produced by filling a Word template cannot be rebuilt from HTML
+  // without losing everything HTML has no word for -- section breaks, headers,
+  // numbering, cell borders -- so `saveDocumentVersion` refuses it. These three
+  // are what editing means instead: read the runs, ask a model to rewrite one,
+  // write the words back into that same run and touch nothing else.
+  documentText: (versionId: string) =>
+    request<{
+      version_id: string; document_id: string; version_no: number; status: string;
+      renderer: string | null; text_editable: boolean; html_editable: boolean;
+      paragraphs: { paragraph_index: number; in_table: boolean; text: string;
+        spans: { paragraph_index: number; span_index: number; text: string; in_table: boolean; role: string }[] }[];
+    }>("GET", `/document-versions/${versionId}/text`),
+
+  // Returns replacement text, never a saved change. A person always accepts.
+  suggestEdit: (versionId: string, body: { selection: string; instruction: string; paragraph_index?: number }) =>
+    request<{ replacement: string; note: string; model: string }>(
+      "POST", `/document-versions/${versionId}/suggest-edit`, { json: body }),
+
+  // Writes a NEW version. An approved letter that changes under the same id is
+  // not auditable.
+  applyTextEdits: (versionId: string, edits: { paragraph_index: number; span_index: number; text: string }[], changeSummary?: string) =>
+    request<{ version_id: string; version_no: number; change_summary: string;
+      applied: { paragraph_index: number; span_index: number; before: string; after: string }[] }>(
+      "POST", `/document-versions/${versionId}/text`, { json: { edits, change_summary: changeSummary } }),
   approveDocumentVersion: (versionId: string) => request<any>("POST", `/document-versions/${versionId}:approve`),
-  revokeDocumentVersion: (versionId: string) => request<any>("POST", `/document-versions/${versionId}:revoke`),
+  revokeDocumentVersion: (versionId: string, body: { reason: string }) =>
+    request<{ status: string; status_reason: string | null }>(
+      "POST", `/document-versions/${versionId}:revoke`, { json: body }),
 
   listLibrary: (category?: string, q?: string) => request<{ items: any[] }>("GET", "/template-library", { query: { category, q } }),
   createLibraryEntry: (body: { name: string; category: string; content_html?: string }) => request<any>("POST", "/template-library", { json: body }),
@@ -203,10 +299,21 @@ export const api = {
   convertLegacyText: (text: string) => request<{ candidates: any[] }>("POST", "/template-library:convert", { json: { text } }),
   generateFromLibrary: (libraryId: string, projectId: string) => request<any>("POST", `/template-library/${libraryId}/generate`, { json: { project_id: projectId } }),
 
-  analyticsKpis: () => request<any>("GET", "/analytics/kpis"),
-  analyticsTrend: () => request<{ items: { day: string; count: number }[] }>("GET", "/analytics/trend"),
-  analyticsByFunction: () => request<{ items: { function: string; count: number }[] }>("GET", "/analytics/by-function"),
-  analyticsTopTemplates: () => request<{ items: { name: string; uses: number }[] }>("GET", "/analytics/top-templates"),
+  // Every one takes a range now. They always accepted the parameter and always
+  // ignored it, so the page's four range buttons changed nothing.
+  analyticsKpis: (range: AnalyticsRange = "30d") =>
+    request<AnalyticsKpis>("GET", "/analytics/kpis", { query: { range } }),
+  analyticsTrend: (range: AnalyticsRange = "30d") =>
+    request<TrendSeries>("GET", "/analytics/trend", { query: { range } }),
+  analyticsByFunction: (range: AnalyticsRange = "30d") =>
+    request<{ items: { function: string; count: number }[] }>(
+      "GET", "/analytics/by-function", { query: { range } }),
+  analyticsTopTemplates: (range: AnalyticsRange = "30d") =>
+    request<TopTemplates>("GET", "/analytics/top-templates", { query: { range } }),
+  analyticsCost: (range: AnalyticsRange = "30d") =>
+    request<CostReport>("GET", "/analytics/cost", { query: { range } }),
+  analyticsCompiles: (range: AnalyticsRange = "30d") =>
+    request<CompileReport>("GET", "/analytics/compiles", { query: { range } }),
 
   teamMembers: () => request<{ items: any[] }>("GET", "/team/members"),
   teamRolesSummary: () => request<{ items: { role: string; count: number }[] }>("GET", "/team/roles-summary"),
@@ -235,6 +342,53 @@ export const api = {
   patchManifest: (manifestId: string, body: { fields?: any[]; conditions?: any[]; blocks?: any[] }) =>
     request<any>("PATCH", `/template-manifests/${manifestId}`, { json: body }),
   approveManifest: (manifestId: string) => request<any>("POST", `/template-manifests/${manifestId}:approve`),
+
+  /* ---- Template authoring ----
+   * Put a legacy .docx in, get an editable template back, hand-edit it, publish
+   * it as something the fill engine can execute. */
+  listBlueprints: (projectId?: string) =>
+    request<{ items: Blueprint[] }>("GET", "/template-blueprints", { query: { project_id: projectId } }),
+  getBlueprint: (id: string) => request<Blueprint>("GET", `/template-blueprints/${id}`),
+  listBlueprintVersions: (id: string) =>
+    request<{ items: { id: string; version_no: number; change_summary: string | null; created_at: string; finding_count: number; manifest_id: string | null }[] }>(
+      "GET", `/template-blueprints/${id}/versions`),
+  blueprintFromTemplate: (body: { template_file_id: string; name?: string; progress_token?: string }) =>
+    request<Blueprint>("POST", "/template-blueprints:from-template", { json: body }),
+  saveBlueprint: (id: string, body: { body: BlueprintBody; objects?: any[]; change_summary?: string; expected_version_no?: number }) =>
+    request<BlueprintVersion>("POST", `/template-blueprints/${id}/versions`, { json: body }),
+  revertBlueprint: (id: string, versionNo: number) =>
+    request<BlueprintVersion>("POST", `/template-blueprints/${id}:revert-to`, { json: { version_no: versionNo } }),
+  lintBlueprint: (id: string) => request<LintReport>("GET", `/template-blueprints/${id}/lint`),
+  publishBlueprint: (id: string, dispositions: string[] = []) =>
+    request<{ blueprint_id: string; template_version_id: string; manifest_id: string; lint: LintReport }>(
+      "POST", `/template-blueprints/${id}:publish`, { json: { dispositions } }),
+  deleteBlueprint: (id: string) => request<{ status: string }>("DELETE", `/template-blueprints/${id}`),
+  blueprintKits: () =>
+    request<{ items: { id: string; name: string; description: string; field_count: number; paragraph_count: number }[] }>(
+      "GET", "/template-blueprint-kits"),
+  createBlueprint: (body: { name: string; kit?: string; project_id?: string }) =>
+    request<Blueprint>("POST", "/template-blueprints", { json: body }),
+  blueprintFromLibrary: (body: { library_id: string; project_id?: string }) =>
+    request<Blueprint>("POST", "/template-blueprints:from-library", { json: body }),
+  blueprintCopilot: (id: string, body: { message: string; mode: "author" | "explain" }) =>
+    request<any>("POST", `/template-blueprints/${id}/copilot`, { json: body }),
+  applyBlueprintOperations: (id: string, body: { ops: any[]; expected_version_no?: number; change_summary?: string }) =>
+    request<any>("POST", `/template-blueprints/${id}/operations`, { json: body }),
+  emitBlueprint: (id: string) =>
+    request<{ blueprint_id: string; template_version_id: string; template_file_id: string }>(
+      "POST", `/template-blueprints/${id}:emit`),
+
+  /** The template as a file. Emitted fresh, so what downloads is what you see. */
+  async blueprintDocxUrl(id: string): Promise<string> {
+    const token = ensureAuth();
+    const res = await fetch(`${API_URL}/template-blueprints/${id}/docx`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    // Same reason as `authedDownloadUrl`: without this the browser is handed a
+    // blob of the error JSON named like a Word file, and nothing reports it.
+    if (!res.ok) throw new ApiError(res.status, "DOWNLOAD_FAILED", "Could not download this template.");
+    return URL.createObjectURL(await res.blob());
+  },
   // Why a manifest can or cannot be locked, without trying to lock it. The
   // reviewer needs the blockers while deciding, not as a 409 after pressing
   // Approve.
@@ -292,6 +446,11 @@ export const api = {
     request<{ items: { source_version_id: string; field_bindings: Record<string, string>; value_map: Record<string, Record<string, string>> }[] }>(
       "GET", `/template-manifests/${manifestId}/bindings`,
     ),
+  // §22's metrics and §18's targets. READ_AUDIT-gated server-side: these are a
+  // summary of a customer's estate, its error rate and its review behaviour.
+  qualityReport: (windowDays = 30) =>
+    request<QualityReport>("GET", "/metrics", { query: { window_days: windowDays } }),
+
   fieldDictionary: () => request<{ items: any[] }>("GET", "/field-dictionary"),
   async batchZipUrl(jobId: string): Promise<string> {
     const token = ensureAuth();
@@ -303,10 +462,36 @@ export const api = {
   // ---- Human-in-the-loop review queue ----
   reviewTasks: (params: { status?: string; project_id?: string; kind?: string } = {}) =>
     request<{ items: ReviewTask[] }>("GET", "/review-tasks", { query: { status: params.status, project_id: params.project_id, kind: params.kind } }),
+  reviewTask: (taskId: string) => request<ReviewTask>("GET", `/review-tasks/${taskId}`),
   reviewSummary: () => request<{ open: number; resolved: number; dismissed: number; by_kind: Record<string, number> }>("GET", "/review-tasks/summary"),
   resolveReviewTask: (taskId: string, body: { resolved_value?: string; rationale: string; promote_to_manifest?: boolean; promote_as?: string }) =>
     request<any>("POST", `/review-tasks/${taskId}:resolve`, { json: body }),
-  dismissReviewTask: (taskId: string) => request<any>("POST", `/review-tasks/${taskId}:dismiss`),
+  dismissReviewTask: (taskId: string, body: { rationale: string }) =>
+    request<any>("POST", `/review-tasks/${taskId}:dismiss`, { json: body }),
+
+  // ---- Document review: a person objecting, as opposed to the engine asking ----
+  reviewQueue: (params: { state?: string; assigned_to?: string; project_id?: string } = {}) =>
+    request<{ items: QueueItem[] }>("GET", "/review-queue", { query: params }),
+  documentReviews: (versionId: string) =>
+    request<{ items: DocumentReview[] }>("GET", `/document-versions/${versionId}/reviews`),
+  openDocumentReview: (versionId: string, body: { reason: string; title?: string; assigned_to?: string }) =>
+    request<DocumentReview>("POST", `/document-versions/${versionId}/reviews`, { json: body }),
+  requestChanges: (versionId: string, body: { reason: string }) =>
+    request<DocumentReview>("POST", `/document-versions/${versionId}:request-changes`, { json: body }),
+  documentReview: (reviewId: string) =>
+    request<DocumentReview>("GET", `/reviews/${reviewId}`),
+  addReviewComment: (reviewId: string, body: { body: string; paragraph_index?: number; span_index?: number; quoted_text?: string }) =>
+    request<ReviewComment>("POST", `/reviews/${reviewId}/comments`, { json: body }),
+  resolveReviewComment: (reviewId: string, commentId: string) =>
+    request<ReviewComment>("POST", `/reviews/${reviewId}/comments/${commentId}:resolve`),
+  approveDocumentReview: (reviewId: string, body: { note?: string } = {}) =>
+    request<DocumentReview>("POST", `/reviews/${reviewId}:approve`, { json: body }),
+  rejectDocumentReview: (reviewId: string, body: { note: string }) =>
+    request<DocumentReview>("POST", `/reviews/${reviewId}:reject`, { json: body }),
+  withdrawDocumentReview: (reviewId: string) =>
+    request<DocumentReview>("POST", `/reviews/${reviewId}:withdraw`),
+  assignDocumentReview: (reviewId: string, userId: string | null) =>
+    request<DocumentReview>("POST", `/reviews/${reviewId}:assign`, { json: { user_id: userId } }),
 };
 
 export type BindingSuggestion = {
@@ -355,5 +540,75 @@ export type ReviewTask = {
   resolved_value: string | null;
   status: "open" | "resolved" | "dismissed";
   rationale: string | null;
+  created_at: string;
+  document_version_id: string | null;
+  resolved_by: string | null;
+  resolved_by_name: string | null;
+  resolved_at: string | null;
+};
+
+/** One remark on a review, optionally pinned to a run of the document. */
+export type ReviewComment = {
+  id: string;
+  parent_id: string | null;
+  author_id: string;
+  author_name: string | null;
+  body: string;
+  /** The coordinate the compiler, the fill engine and the editor all speak. */
+  paragraph_index: number | null;
+  span_index: number | null;
+  /** What the run said when the remark was written. */
+  quoted_text: string | null;
+  resolved_at: string | null;
+  created_at: string;
+};
+
+/** A person's objection to a finished document. */
+export type DocumentReview = {
+  id: string;
+  document_id: string;
+  document_version_id: string;
+  state: "open" | "approved" | "rejected" | "withdrawn";
+  title: string | null;
+  reason: string | null;
+  requested_by: string;
+  requested_by_name: string | null;
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  authored_by: string | null;
+  resolved_by: string | null;
+  resolved_by_name: string | null;
+  resolved_at: string | null;
+  resolution_note: string | null;
+  created_at: string;
+  /** Sent with the review so a disabled button can explain itself. */
+  can_resolve?: boolean;
+  cannot_resolve_reason?: string | null;
+  comments?: ReviewComment[];
+  document?: {
+    id: string | null;
+    display_id: number | null;
+    status: string | null;
+    version_no: number | null;
+    project_id: string | null;
+  };
+};
+
+/** One row of the unified inbox: an objection, or a question the engine parked. */
+export type QueueItem = {
+  kind: "document_review" | "unit_task";
+  /** Server-ranked. Lower sorts first; the judgement is made once, on the server. */
+  priority: number;
+  id: string;
+  title: string;
+  state: string;
+  project_id: string | null;
+  document_id?: string;
+  document_version_id: string | null;
+  document_status: string | null;
+  requested_by_name?: string | null;
+  assigned_to?: string | null;
+  task_kind?: "calculation" | "condition" | "binding" | "narrative";
+  unit_id?: string;
   created_at: string;
 };

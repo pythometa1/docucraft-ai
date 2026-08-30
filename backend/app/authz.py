@@ -34,12 +34,17 @@ EDIT_MANIFEST = "edit_manifest"
 APPROVE_MANIFEST = "approve_manifest"
 GENERATE_DOCUMENT = "generate_document"
 APPROVE_DOCUMENT = "approve_document"
+#: Closing somebody else's objection to a finished document. Separate from
+#: APPROVE_DOCUMENT because they are different acts: approving is signing a
+#: letter, and this is ruling on a complaint about one.
+REVIEW_DOCUMENT = "review_document"
 READ_AUDIT = "read_audit"
 MANAGE_USERS = "manage_users"
 
 ALL_CAPABILITIES = frozenset({
     UPLOAD_TEMPLATE, UPLOAD_SOURCE, COMPILE_MANIFEST, EDIT_MANIFEST,
-    APPROVE_MANIFEST, GENERATE_DOCUMENT, APPROVE_DOCUMENT, READ_AUDIT, MANAGE_USERS,
+    APPROVE_MANIFEST, GENERATE_DOCUMENT, APPROVE_DOCUMENT, REVIEW_DOCUMENT, READ_AUDIT,
+    MANAGE_USERS,
 })
 
 # ---------------------------------------------------------------------- roles
@@ -54,8 +59,12 @@ ALL_CAPABILITIES = frozenset({
 ROLE_CAPABILITIES: dict[str, frozenset] = {
     "org_admin": ALL_CAPABILITIES,
     "uploader": frozenset({UPLOAD_TEMPLATE, UPLOAD_SOURCE}),
-    "mapper": frozenset({UPLOAD_TEMPLATE, UPLOAD_SOURCE, COMPILE_MANIFEST, EDIT_MANIFEST}),
-    "approver": frozenset({APPROVE_MANIFEST, APPROVE_DOCUMENT, READ_AUDIT}),
+    # A mapper may rule on a complaint about a letter but still not sign one:
+    # reading documents all day is what makes them the obvious second pair of
+    # eyes, and signing is a separate act with a separate capability.
+    "mapper": frozenset({UPLOAD_TEMPLATE, UPLOAD_SOURCE, COMPILE_MANIFEST, EDIT_MANIFEST,
+                         REVIEW_DOCUMENT}),
+    "approver": frozenset({APPROVE_MANIFEST, APPROVE_DOCUMENT, REVIEW_DOCUMENT, READ_AUDIT}),
     "generator": frozenset({GENERATE_DOCUMENT}),
     "auditor": frozenset({READ_AUDIT}),
     # The compiler agent's service identity. P5 of the architecture record --
@@ -176,3 +185,35 @@ def check_role_assignment(*, actor: User, target_user_id: str, new_role: str) ->
             "Ask another administrator to grant it.",
         )
     return ApprovalCheck(True)
+
+
+def check_document_review_resolution(
+    *,
+    resolver_id: str,
+    authored_by_id: str | None,
+) -> ApprovalCheck:
+    """Whether this person may close this review.
+
+    The separation `check_manifest_approval` makes for a manifest, made one level
+    down for a letter: the person whose text is being judged is not the judge.
+
+    Unconditional, where the manifest rule applies only to templates flagged
+    legally binding. The asymmetry is deliberate and follows from how often each
+    happens. A manifest is reviewed once per template family, by someone who
+    knows they are signing something that will run thousands of times. A document
+    review happens per letter, in a queue, at speed -- and self-clearing one's
+    own is the cheapest possible way to make the whole queue decorative.
+
+    Opening a review on somebody else's document and then closing it is
+    deliberately *not* refused. Noticing a problem and being the one to confirm
+    it was fixed is ordinary; judging your own writing is not.
+    """
+    if authored_by_id and resolver_id == authored_by_id:
+        return ApprovalCheck(
+            allowed=False,
+            reason=(
+                "You wrote the version under review, so you cannot close the review of it. "
+                "Ask a colleague with the reviewer permission to look."
+            ),
+        )
+    return ApprovalCheck(allowed=True)

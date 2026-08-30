@@ -29,6 +29,7 @@ with `qa_passed` True, because nothing was watching for absence.
 import re
 from collections.abc import Iterable, Mapping
 
+from app.expressions.token_parser import _normalise_scalar
 from app.generation.missing_policy import BLOCK
 from app.qa.policy import (
     BRANCH_SELECTION,
@@ -110,14 +111,47 @@ def branch_count_failures(
     for field_id, members in sorted(groups.items()):
         if len(members) < 2:
             continue
-        if source_record.get(field_id) in (None, ""):
+        record_value = source_record.get(field_id)
+        if record_value in (None, ""):
             continue  # nothing selects a branch, so no branch is expected
         survivors = [value for cid, value in members if verdicts.get(cid)]
-        if len(survivors) != 1:
-            offered = ", ".join(repr(v) for _cid, v in members)
+
+        # How many branches SHOULD survive is the number of conditions testing
+        # the record's own value -- not one.
+        #
+        # One field commonly governs several independent switches. This contract
+        # keys three on `colleague_type`: which opening paragraph, which hours
+        # clause, and which remuneration table. A full-time colleague must keep
+        # exactly one branch of each, so three survive out of seven, and the
+        # letter is correct. Expecting one blocked every document from a
+        # correctly-compiled template, and the more conditions a compiler finds
+        # the more certainly it misfires -- so it punished the compiler for
+        # reading the template better.
+        #
+        # The check it is really making survives intact: an expression that is
+        # inverted or misread fires on the wrong value, and the count then stops
+        # matching. What is dropped is only the assumption that one field means
+        # one switch.
+        expected = sum(
+            1 for _cid, value in members
+            if _normalise_scalar(value) == _normalise_scalar(record_value)
+        )
+        offered = ", ".join(repr(v) for _cid, v in members)
+        if expected == 0:
+            # The record names a value no branch offers, so every branch is
+            # dropped and the letter is missing the section this switch exists to
+            # choose. Counting survivors against `expected` alone would call that
+            # agreement -- nought expected, nought survived -- which is exactly
+            # the silence this gate was written to break.
+            failures.append(
+                f"Branch selection on '{field_id}': no branch offers the record's value "
+                f"{record_value!r}, so all {len(members)} were dropped and the letter is missing "
+                f"this section. Template offers {offered}."
+            )
+        elif len(survivors) != expected:
             failures.append(
                 f"Branch selection on '{field_id}': {len(survivors)} of {len(members)} branches "
-                f"survived (expected exactly 1). Record value {source_record.get(field_id)!r}; "
+                f"survived; {expected} match the record. Record value {record_value!r}; "
                 f"template offers {offered}."
             )
 

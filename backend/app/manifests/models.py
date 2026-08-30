@@ -498,11 +498,17 @@ class RowValues:
     """Column values for a `TemplateManifest` row, and what would not fit.
 
     `unmapped` is not an error return -- it is the honest half of the mapping.
-    §6 defines ten object types and the table has three lists, so a STATIC,
-    NARRATIVE, HEADER, FOOTER or SIGNATURE object has nowhere to go until the
-    row grows a single JSON `objects` column. A caller that writes `columns`
-    and ignores a non-empty `unmapped` is dropping approved manifest content on
-    the floor, which is why it is returned rather than logged.
+    §6 defines ten object types and the three legacy lists hold five of them, so
+    a STATIC, NARRATIVE, HEADER, FOOTER or SIGNATURE object has nowhere to go in
+    them. A caller that writes `columns` and ignores a non-empty `unmapped` is
+    dropping approved manifest content on the floor, which is why it is returned
+    rather than logged.
+
+    The row has since grown that `objects` column, and a caller that passes
+    `objects_column=True` gets it filled and `unmapped` empty -- nothing is
+    lost, so there is nothing to report. The default stays False because the
+    column is opt-in: a writer that has not been taught to emit it must keep
+    being told what its write would discard.
     """
 
     columns: dict
@@ -527,7 +533,7 @@ def to_legacy_objects(envelope: ManifestEnvelope) -> dict:
     return out
 
 
-def to_row_values(envelope: ManifestEnvelope) -> RowValues:
+def to_row_values(envelope: ManifestEnvelope, *, objects_column: bool = False) -> RowValues:
     """Map the envelope onto `TemplateManifest`'s columns.
 
     Returns column names verbatim so a caller can `setattr` them onto a row.
@@ -535,9 +541,17 @@ def to_row_values(envelope: ManifestEnvelope) -> RowValues:
     the renderer removes, not one of §6's semantic objects, and a mapping that
     emitted it would overwrite the compiler's work with an empty list every
     time an envelope was written back.
+
+    `objects_column=True` additionally writes the lossless `objects` column, and
+    is what makes the mapping complete for all ten object types. It is opt-in
+    rather than the default for one reason: flipping the default would silently
+    change what every existing writer stores, and the point of `unmapped` is
+    that a writer which cannot store something is told so. Both projections are
+    written together -- never `objects` without the three lists, because the
+    fill engine, the validator and the source resolver all read those.
     """
     lists = to_legacy_objects(envelope)
-    unmapped = tuple(
+    unmapped = () if objects_column else tuple(
         o.object_id for o in envelope.objects
         if o.object_type not in LEGACY_COLUMN_BY_OBJECT_TYPE
     )
@@ -562,6 +576,8 @@ def to_row_values(envelope: ManifestEnvelope) -> RowValues:
         "approved_by": envelope.approved_by,
         "approved_at": envelope.approved_at,
     }
+    if objects_column:
+        columns["objects"] = [o.to_dict() for o in envelope.objects]
     return RowValues(columns=columns, unmapped=unmapped)
 
 
@@ -576,11 +592,24 @@ def envelope_from_row(row, *, template_family_id: str | None = None) -> Manifest
     is no column -- family membership lives in `TemplateClusterMember`. Pass it
     from there when the caller knows it; the envelope records `None` rather than
     inventing one.
+
+    The `objects` column wins when it holds anything, because it is the only one
+    of the two that can round-trip all ten types. An empty `objects` is read as
+    "this row predates the column, or was written by a caller that did not opt
+    in" and the three legacy lists are used instead -- which is why introducing
+    the column changed the envelope of exactly no existing row. The two are
+    never merged: a row carrying both would double every FIELD it holds, and
+    `ManifestEnvelope` refuses duplicate object ids, so the merge would not be a
+    subtle bug so much as an unreadable manifest.
     """
     objects: list = []
-    for column, default_type in DEFAULT_OBJECT_TYPE_BY_LEGACY_COLUMN.items():
-        for entry in getattr(row, column, None) or ():
-            objects.append(ManifestObject.from_legacy_dict(entry, default_type))
+    stored = getattr(row, "objects", None) or ()
+    if stored:
+        objects = [ManifestObject.from_dict(entry) for entry in stored]
+    else:
+        for column, default_type in DEFAULT_OBJECT_TYPE_BY_LEGACY_COLUMN.items():
+            for entry in getattr(row, column, None) or ():
+                objects.append(ManifestObject.from_legacy_dict(entry, default_type))
 
     return ManifestEnvelope(
         manifest_id=row.id,

@@ -1,204 +1,212 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
-import { FileText, Search, Plus, Star, Wand2, Braces, Sparkles, GitBranch, Repeat } from "lucide-react";
+import {
+  AlertTriangle, ArrowRight, Braces, FileText, GitBranch, Loader2, Plus, Search, Sparkles, Wand2,
+} from "lucide-react";
+import { toast } from "sonner";
+
+import { api } from "@/lib/api";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
+import { BlueprintImportDialog } from "@/components/blueprint-import-dialog";
+import { BlueprintKitDialog } from "@/components/blueprint-kit-dialog";
 import { cn } from "@/lib/utils";
-import { TemplateEditor } from "@/components/template-editor";
-import { TemplateConversionWizard } from "@/components/template-conversion-wizard";
-import { api } from "@/lib/api";
-import { toast } from "sonner";
+import type { Blueprint } from "@/lib/types";
 
 export const Route = createFileRoute("/_app/templates")({
   head: () => ({
     meta: [
       { title: "Templates — DocuMind AI" },
-      { name: "description", content: "Author token-based templates: black for static text, blue for source values, red for AI prompts. Import .docx or paste raw text." },
-      { property: "og:title", content: "Templates authoring — DocuMind AI" },
-      { property: "og:description", content: "Build reusable AI document templates with color-coded tokens." },
+      { name: "description", content: "Read a legacy .docx into an editable template, correct what the engine understood, and publish it as something the fill engine can execute." },
+      { property: "og:title", content: "Template authoring — DocuMind AI" },
+      { property: "og:description", content: "Legacy template in, mappable template out." },
     ],
   }),
   component: TemplatesPage,
 });
 
-const CATEGORIES = ["All", "HR", "Clinical", "Quality-CMC", "Medical Affairs", "Marketing", "Legal"];
-
-type Template = {
-  id: string;
-  name: string;
-  category: string;
-  description: string | null;
-  starred: boolean;
-  uses: number;
-  version: string;
-};
-
 function TemplatesPage() {
-  const [templates, setTemplates] = useState<Template[]>([]);
+  const navigate = useNavigate();
+  const [blueprints, setBlueprints] = useState<Blueprint[]>([]);
+  const [legacy, setLegacy] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
-  const [cat, setCat] = useState("All");
-  const [selectedId, setSelectedId] = useState<string>("");
   const [importOpen, setImportOpen] = useState(false);
+  const [kitOpen, setKitOpen] = useState(false);
+  const [migrating, setMigrating] = useState<string | null>(null);
 
   const refresh = () => {
-    api.listLibrary()
-      .then((r) => {
-        setTemplates(r.items);
-        if (!selectedId && r.items[0]) setSelectedId(r.items[0].id);
-      })
-      .catch((e: any) => toast.error("Could not load templates", { description: e?.message ?? String(e) }))
+    setLoading(true);
+    Promise.all([
+      api.listBlueprints().catch(() => ({ items: [] as Blueprint[] })),
+      // The old token library. Still readable so nobody's authoring work
+      // disappears, and no longer the way new templates are made.
+      api.listLibrary().catch(() => ({ items: [] as any[] })),
+    ])
+      .then(([bp, lib]) => { setBlueprints(bp.items); setLegacy(lib.items ?? []); })
+      .catch((e: any) => toast.error("Could not load templates", { description: e?.message }))
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(refresh, []);
 
   const list = useMemo(
-    () => templates.filter(
-      (t) => (cat === "All" || t.category === cat) && t.name.toLowerCase().includes(q.toLowerCase()),
-    ),
-    [templates, cat, q],
+    () => blueprints.filter((b) => b.name.toLowerCase().includes(q.toLowerCase())),
+    [blueprints, q],
   );
 
-  const selected = templates.find((t) => t.id === selectedId) ?? list[0];
-
-  const createBlank = () => {
-    api.createLibraryEntry({ name: "Untitled template", category: "HR", content_html: "<h1>Untitled template</h1><p>Start writing…</p>" })
-      .then((tpl) => {
-        setTemplates((s) => [tpl, ...s]);
-        setSelectedId(tpl.id);
-        toast.success("New template created");
-      })
-      .catch((e: any) => toast.error("Could not create template", { description: e?.message ?? String(e) }));
-  };
-
-  const handleConvert = (r: { name: string; category: string; html: string }) => {
-    api.createLibraryEntry({ name: r.name, category: r.category, content_html: r.html })
-      .then((tpl) => {
-        setTemplates((s) => [tpl, ...s]);
-        setSelectedId(tpl.id);
-        toast.success("Template converted", { description: r.name });
-      })
-      .catch((e: any) => toast.error("Could not save converted template", { description: e?.message ?? String(e) }));
-  };
-
   return (
-    <div className="p-6 lg:p-8 max-w-[1400px] mx-auto space-y-5">
-      <div className="flex items-start justify-between flex-wrap gap-4">
+    <div className="mx-auto max-w-[1400px] space-y-5 p-6 lg:p-8">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Templates</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Build templates from color-coded tokens. Static text stays black; blue pulls from source data; red is an LLM prompt.
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            Put a legacy <code className="text-xs">.docx</code> in and it is pre-scanned and
+            compiled: placeholders, author instructions and conditional sections are identified for
+            you. Correct what it got wrong, take the document back, and publish it as a template the
+            fill engine can execute.
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setImportOpen(true)} className="gap-2">
-            <Wand2 className="h-4 w-4" /> Convert legacy template
+          <Button variant="outline" onClick={() => setKitOpen(true)} className="gap-2">
+            <Plus className="h-4 w-4" /> Start from scratch
           </Button>
-          <Button onClick={createBlank} className="gap-2">
-            <Plus className="h-4 w-4" /> New template
+          <Button onClick={() => setImportOpen(true)} className="gap-2">
+            <Wand2 className="h-4 w-4" /> Read a legacy template
           </Button>
         </div>
       </div>
 
-      {/* Legend row */}
-      <div className="rounded-xl border border-border bg-card p-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-        <span className="font-medium text-muted-foreground text-xs uppercase tracking-wider mr-1">Token legend</span>
-        <LegendChip label="Static (black)" cssVar="--color-foreground" glyph="Aa" />
-        <LegendChip label="Source value (blue)" cssVar="--color-token-source" glyph="{ }" Icon={Braces} />
-        <LegendChip label="LLM prompt (red)" cssVar="--color-token-prompt" glyph="⚡" Icon={Sparkles} />
-        <LegendChip label="Conditional (green)" cssVar="--color-token-conditional" glyph="⌥" Icon={GitBranch} />
-        <LegendChip label="Repeat (purple)" cssVar="--color-token-repeat" glyph="↻" Icon={Repeat} />
+      {/* What the colours mean — the same three the pre-scanner classifies runs into. */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-border bg-card p-4 text-sm">
+        <span className="mr-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          How a template is read
+        </span>
+        <Legend label="Static text — copied as written" cssVar="--color-foreground" glyph="Aa" />
+        <Legend label="Placeholder — filled from your data" cssVar="--color-token-source" Icon={Braces} />
+        <Legend label="Author instruction — removed from the letter" cssVar="--color-token-prompt" Icon={Sparkles} />
+        <Legend label="Conditional section" cssVar="--color-token-conditional" Icon={GitBranch} />
       </div>
 
-      {/* Category chips + search */}
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative flex-1 min-w-[220px] max-w-sm">
-          <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search templates…" className="pl-9" />
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {CATEGORIES.map((c) => (
+      <div className="relative max-w-sm">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search templates…" className="pl-9" />
+      </div>
+
+      {loading ? (
+        <div className="py-16 text-center text-sm text-muted-foreground">Loading templates…</div>
+      ) : list.length === 0 ? (
+        <EmptyState onImport={() => setImportOpen(true)} filtered={q.length > 0} />
+      ) : (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {list.map((b) => (
             <button
-              key={c}
-              onClick={() => setCat(c)}
-              className={cn(
-                "px-2.5 py-1 rounded-full text-xs font-medium border transition-colors",
-                cat === c ? "bg-primary text-primary-foreground border-primary" : "border-border hover:bg-muted",
-              )}
+              key={b.id}
+              onClick={() => navigate({ to: "/templates/$blueprintId", params: { blueprintId: b.id } })}
+              className="rounded-xl border border-border bg-card p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/40"
             >
-              {c}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Split: list + editor */}
-      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5">
-        {/* Left list */}
-        <div className="rounded-xl border border-border bg-card overflow-hidden flex flex-col max-h-[calc(100vh-260px)]">
-          <div className="px-4 py-3 border-b border-border text-xs uppercase tracking-wider text-muted-foreground">
-            {list.length} template{list.length !== 1 && "s"}
-          </div>
-          <div className="flex-1 overflow-auto divide-y divide-border">
-            {list.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => setSelectedId(t.id)}
-                className={cn(
-                  "w-full text-left px-4 py-3 hover:bg-accent/50 transition-colors flex gap-3 items-start",
-                  selected?.id === t.id && "bg-accent/70",
-                )}
-              >
-                <div className="h-9 w-9 rounded-lg bg-gradient-to-br from-primary/20 to-purple-500/20 flex items-center justify-center shrink-0">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-purple-500/20">
                   <FileText className="h-4 w-4 text-primary" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <div className="font-medium text-sm truncate">{t.name}</div>
-                    {t.starred && <Star className="h-3 w-3 fill-yellow-500 text-yellow-500 shrink-0" />}
-                  </div>
-                  <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0">{t.category}</Badge>
-                    <Badge variant="outline" className="text-[10px] px-1.5 py-0">{t.version}</Badge>
-                    <span className="text-[11px] text-muted-foreground">· {t.uses} uses</span>
+                  <div className="truncate font-medium">{b.name}</div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    <Badge variant={b.status === "published" ? "default" : "secondary"} className="px-1.5 py-0 text-[10px]">
+                      {b.status}
+                    </Badge>
+                    <Badge variant="outline" className="px-1.5 py-0 text-[10px]">v{b.version_no ?? 1}</Badge>
+                    <span className="text-[11px] text-muted-foreground">· read from a {b.kind} source</span>
                   </div>
                 </div>
-              </button>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {legacy.length > 0 && (
+        <div className="rounded-xl border border-border bg-muted/30 p-4">
+          <p className="mb-1 flex items-center gap-1.5 text-sm font-medium">
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+            {legacy.length} template{legacy.length === 1 ? "" : "s"} in the old token library
+          </p>
+          <p className="text-xs text-muted-foreground">
+            These were authored as coloured tokens, which produced HTML that no manifest could be
+            compiled from — so they could never actually fill a document. Migrating one turns its
+            tokens into placeholders and conditions; nothing is deleted, the entry stays where it is.
+          </p>
+          <div className="mt-3 space-y-1.5">
+            {legacy.map((t: any) => (
+              <div key={t.id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/60 px-3 py-2">
+                <span className="truncate text-sm">{t.name}</span>
+                <Button
+                  size="sm" variant="ghost" className="gap-1.5 shrink-0"
+                  disabled={migrating != null}
+                  onClick={async () => {
+                    setMigrating(t.id);
+                    try {
+                      const bp = await api.blueprintFromLibrary({ library_id: t.id });
+                      toast.success("Migrated", { description: t.name });
+                      navigate({ to: "/templates/$blueprintId", params: { blueprintId: bp.id } });
+                    } catch (e: any) {
+                      toast.error("Could not migrate", { description: e?.message ?? String(e) });
+                    } finally { setMigrating(null); }
+                  }}
+                >
+                  {migrating === t.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
+                  Migrate
+                </Button>
+              </div>
             ))}
-            {!loading && list.length === 0 && (
-              <div className="p-6 text-center text-sm text-muted-foreground">No templates match.</div>
-            )}
           </div>
         </div>
+      )}
 
-        {/* Right editor */}
-        <div className="rounded-xl border border-border bg-card overflow-hidden flex flex-col min-h-[70vh] max-h-[calc(100vh-160px)]">
-          {selected ? (
-            <TemplateEditor
-              key={selected.id}
-              templateId={selected.id}
-              templateName={selected.name}
-            />
-          ) : (
-            <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-              {loading ? "Loading templates…" : "Select a template to start editing."}
-            </div>
-          )}
-        </div>
-      </div>
+      <BlueprintKitDialog
+        open={kitOpen}
+        onOpenChange={setKitOpen}
+        onCreated={(id) => navigate({ to: "/templates/$blueprintId", params: { blueprintId: id } })}
+      />
 
-      <TemplateConversionWizard open={importOpen} onOpenChange={setImportOpen} onFinish={handleConvert} />
+      <BlueprintImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onCreated={(id) => navigate({ to: "/templates/$blueprintId", params: { blueprintId: id } })}
+      />
     </div>
   );
 }
 
-function LegendChip({ label, cssVar, glyph, Icon }: { label: string; cssVar: string; glyph: string; Icon?: any }) {
+function EmptyState({ onImport, filtered }: { onImport: () => void; filtered: boolean }) {
+  if (filtered) {
+    return <div className="py-16 text-center text-sm text-muted-foreground">No templates match.</div>;
+  }
+  return (
+    <div className="rounded-xl border border-dashed border-border py-16 text-center">
+      <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-primary/20 to-purple-500/20">
+        <Wand2 className="h-5 w-5 text-primary" />
+      </div>
+      <p className="font-medium">No templates yet</p>
+      <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
+        Start with a Word document you already send — an offer letter, a contract, a study report.
+        It is read as it is, brackets and coloured instructions and all.
+      </p>
+      <Button onClick={onImport} className="mt-4 gap-2">
+        <Wand2 className="h-4 w-4" /> Read a legacy template
+      </Button>
+    </div>
+  );
+}
+
+function Legend({ label, cssVar, glyph, Icon }: {
+  label: string; cssVar: string; glyph?: string; Icon?: any;
+}) {
   return (
     <span className="inline-flex items-center gap-1.5 text-xs">
       <span
-        className="inline-flex items-center justify-center h-5 min-w-[24px] px-1 rounded font-mono font-bold text-[10px]"
+        className="inline-flex h-5 min-w-[24px] items-center justify-center rounded px-1 font-mono text-[10px] font-bold"
         style={{
           color: `var(${cssVar})`,
           background: `color-mix(in oklab, var(${cssVar}) 14%, transparent)`,

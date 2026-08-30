@@ -16,10 +16,12 @@ import { Route as AppTemplatesRouteImport } from './routes/_app.templates'
 import { Route as AppTeamRouteImport } from './routes/_app.team'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppReviewRouteImport } from './routes/_app.review'
+import { Route as AppQualityRouteImport } from './routes/_app.quality'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppChatRouteImport } from './routes/_app.chat'
 import { Route as AppAuditLogRouteImport } from './routes/_app.audit-log'
 import { Route as AppAnalyticsRouteImport } from './routes/_app.analytics'
+import { Route as AppTemplatesBlueprintIdRouteImport } from './routes/_app.templates_.$blueprintId'
 import { Route as AppProjectsIdRouteImport } from './routes/_app.projects.$id'
 import { Route as AppProjectsIdStudioTemplateIdRouteImport } from './routes/_app.projects.$id_.studio.$templateId'
 import { Route as AppProjectsIdEditDocIdRouteImport } from './routes/_app.projects.$id_.edit.$docId'
@@ -58,6 +60,11 @@ const AppReviewRoute = AppReviewRouteImport.update({
   path: '/review',
   getParentRoute: () => AppRoute,
 } as any)
+const AppQualityRoute = AppQualityRouteImport.update({
+  id: '/quality',
+  path: '/quality',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppDashboardRoute = AppDashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
@@ -76,6 +83,11 @@ const AppAuditLogRoute = AppAuditLogRouteImport.update({
 const AppAnalyticsRoute = AppAnalyticsRouteImport.update({
   id: '/analytics',
   path: '/analytics',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppTemplatesBlueprintIdRoute = AppTemplatesBlueprintIdRouteImport.update({
+  id: '/templates_/$blueprintId',
+  path: '/templates/$blueprintId',
   getParentRoute: () => AppRoute,
 } as any)
 const AppProjectsIdRoute = AppProjectsIdRouteImport.update({
@@ -102,11 +114,13 @@ export interface FileRoutesByFullPath {
   '/audit-log': typeof AppAuditLogRoute
   '/chat': typeof AppChatRoute
   '/dashboard': typeof AppDashboardRoute
+  '/quality': typeof AppQualityRoute
   '/review': typeof AppReviewRoute
   '/settings': typeof AppSettingsRoute
   '/team': typeof AppTeamRoute
   '/templates': typeof AppTemplatesRoute
   '/projects/$id': typeof AppProjectsIdRoute
+  '/templates/$blueprintId': typeof AppTemplatesBlueprintIdRoute
   '/projects/$id/edit/$docId': typeof AppProjectsIdEditDocIdRoute
   '/projects/$id/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
@@ -117,11 +131,13 @@ export interface FileRoutesByTo {
   '/audit-log': typeof AppAuditLogRoute
   '/chat': typeof AppChatRoute
   '/dashboard': typeof AppDashboardRoute
+  '/quality': typeof AppQualityRoute
   '/review': typeof AppReviewRoute
   '/settings': typeof AppSettingsRoute
   '/team': typeof AppTeamRoute
   '/templates': typeof AppTemplatesRoute
   '/projects/$id': typeof AppProjectsIdRoute
+  '/templates/$blueprintId': typeof AppTemplatesBlueprintIdRoute
   '/projects/$id/edit/$docId': typeof AppProjectsIdEditDocIdRoute
   '/projects/$id/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
@@ -134,11 +150,13 @@ export interface FileRoutesById {
   '/_app/audit-log': typeof AppAuditLogRoute
   '/_app/chat': typeof AppChatRoute
   '/_app/dashboard': typeof AppDashboardRoute
+  '/_app/quality': typeof AppQualityRoute
   '/_app/review': typeof AppReviewRoute
   '/_app/settings': typeof AppSettingsRoute
   '/_app/team': typeof AppTeamRoute
   '/_app/templates': typeof AppTemplatesRoute
   '/_app/projects/$id': typeof AppProjectsIdRoute
+  '/_app/templates_/$blueprintId': typeof AppTemplatesBlueprintIdRoute
   '/_app/projects/$id_/edit/$docId': typeof AppProjectsIdEditDocIdRoute
   '/_app/projects/$id_/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
@@ -151,11 +169,13 @@ export interface FileRouteTypes {
     | '/audit-log'
     | '/chat'
     | '/dashboard'
+    | '/quality'
     | '/review'
     | '/settings'
     | '/team'
     | '/templates'
     | '/projects/$id'
+    | '/templates/$blueprintId'
     | '/projects/$id/edit/$docId'
     | '/projects/$id/studio/$templateId'
   fileRoutesByTo: FileRoutesByTo
@@ -166,11 +186,13 @@ export interface FileRouteTypes {
     | '/audit-log'
     | '/chat'
     | '/dashboard'
+    | '/quality'
     | '/review'
     | '/settings'
     | '/team'
     | '/templates'
     | '/projects/$id'
+    | '/templates/$blueprintId'
     | '/projects/$id/edit/$docId'
     | '/projects/$id/studio/$templateId'
   id:
@@ -182,11 +204,13 @@ export interface FileRouteTypes {
     | '/_app/audit-log'
     | '/_app/chat'
     | '/_app/dashboard'
+    | '/_app/quality'
     | '/_app/review'
     | '/_app/settings'
     | '/_app/team'
     | '/_app/templates'
     | '/_app/projects/$id'
+    | '/_app/templates_/$blueprintId'
     | '/_app/projects/$id_/edit/$docId'
     | '/_app/projects/$id_/studio/$templateId'
   fileRoutesById: FileRoutesById
@@ -248,6 +272,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppReviewRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/quality': {
+      id: '/_app/quality'
+      path: '/quality'
+      fullPath: '/quality'
+      preLoaderRoute: typeof AppQualityRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/dashboard': {
       id: '/_app/dashboard'
       path: '/dashboard'
@@ -274,6 +305,13 @@ declare module '@tanstack/react-router' {
       path: '/analytics'
       fullPath: '/analytics'
       preLoaderRoute: typeof AppAnalyticsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/templates_/$blueprintId': {
+      id: '/_app/templates_/$blueprintId'
+      path: '/templates/$blueprintId'
+      fullPath: '/templates/$blueprintId'
+      preLoaderRoute: typeof AppTemplatesBlueprintIdRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/projects/$id': {
@@ -305,11 +343,13 @@ interface AppRouteChildren {
   AppAuditLogRoute: typeof AppAuditLogRoute
   AppChatRoute: typeof AppChatRoute
   AppDashboardRoute: typeof AppDashboardRoute
+  AppQualityRoute: typeof AppQualityRoute
   AppReviewRoute: typeof AppReviewRoute
   AppSettingsRoute: typeof AppSettingsRoute
   AppTeamRoute: typeof AppTeamRoute
   AppTemplatesRoute: typeof AppTemplatesRoute
   AppProjectsIdRoute: typeof AppProjectsIdRoute
+  AppTemplatesBlueprintIdRoute: typeof AppTemplatesBlueprintIdRoute
   AppProjectsIdEditDocIdRoute: typeof AppProjectsIdEditDocIdRoute
   AppProjectsIdStudioTemplateIdRoute: typeof AppProjectsIdStudioTemplateIdRoute
 }
@@ -319,11 +359,13 @@ const AppRouteChildren: AppRouteChildren = {
   AppAuditLogRoute: AppAuditLogRoute,
   AppChatRoute: AppChatRoute,
   AppDashboardRoute: AppDashboardRoute,
+  AppQualityRoute: AppQualityRoute,
   AppReviewRoute: AppReviewRoute,
   AppSettingsRoute: AppSettingsRoute,
   AppTeamRoute: AppTeamRoute,
   AppTemplatesRoute: AppTemplatesRoute,
   AppProjectsIdRoute: AppProjectsIdRoute,
+  AppTemplatesBlueprintIdRoute: AppTemplatesBlueprintIdRoute,
   AppProjectsIdEditDocIdRoute: AppProjectsIdEditDocIdRoute,
   AppProjectsIdStudioTemplateIdRoute: AppProjectsIdStudioTemplateIdRoute,
 }

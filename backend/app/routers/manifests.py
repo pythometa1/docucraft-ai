@@ -38,9 +38,8 @@ from app.generation.docx_renderer import fill_template
 from app.generation.pdf_fill import fill_pdf_template
 from app.generation.source_template import build_workbook, filename_for
 from app.compile_progress import DETERMINISTIC, EMBEDDING, MODEL, RETRIEVAL, CompileProgress
-from app.compiler.mapping_agent import _escalate_if_rules_missed_the_logic, _paragraph_texts, compile_agentic
-from app.compiler.llm_compiler import choose_compiler, compile_manifest_llm, rules_fell_short
-from app.compiler.rule_compiler import compile_manifest, refine_with_llm
+from app.compiler.agentic_compiler import compile_template as compile_agentic_template
+from app.compiler.mapping_agent import _paragraph_texts
 from app.authz import APPROVE_MANIFEST, check_manifest_approval, require
 from app.compiler.confidence import Band
 from app.expressions.plain_english import annotate_conditions, strip_derived
@@ -57,6 +56,14 @@ from app.manifests.models import envelope_from_row, to_row_values
 from app.storage import abs_path, save_upload
 
 router = APIRouter(tags=["template-manifests"])
+
+
+def _validatable(m) -> dict:
+    """A stored manifest in the shape `validate_manifest` expects."""
+    return {
+        "fields": m.fields, "conditions": m.conditions, "blocks": m.blocks,
+        "delete_always": m.delete_always, "status": m.status,
+    }
 
 
 def _manifest_out(m: TemplateManifest) -> dict:
@@ -153,8 +160,6 @@ def _compile_evidence(db: Session, org_id: str, paragraph_texts: list[str]) -> l
 @router.post("/templates/{template_file_id}/compile-manifest", status_code=201)
 def compile_manifest_endpoint(
     template_file_id: str,
-    use_llm_refinement: bool = False,
-    agentic: bool = False,
     # A token the caller chose before making the request, so it can poll
     # `GET /jobs/{token}` while this is still running. Server-generated ids are
     # useless here: the client cannot learn one until the response arrives, and
@@ -175,7 +180,8 @@ def compile_manifest_endpoint(
     # is handed this policy, so a compile for an EU-pinned organisation refuses
     # rather than reaching a global deployment -- the check used to live only in
     # `llm.boundary`, which no compile path goes through.
-    policy = llm_policy_for(db, user.org_id)
+    policy = llm_policy_for(db, user.org_id, project_id=tf.project_id, user_id=user.id,
+                            subject_type="template_file", subject_id=tf.id)
     agent_log: list = []
     progress = CompileProgress(
         progress_token, org_id=user.org_id, project_id=tf.project_id, user_id=user.id,
@@ -198,49 +204,21 @@ def compile_manifest_endpoint(
                 f"{len(evidence)} column(s) found to compare against"
                 if evidence else "no indexed columns yet, so the compiler works from the template alone"
             )
-        if agentic:
-            # Compile -> test-fill against real rows -> read the QA failures ->
-            # revise. Only worth doing where there is an objective success
-            # signal, which the fill engine's QA gates provide.
-            # §18 allows 5 minutes for an agentic compile. It is the only
-            # operation in that table with model round trips in it, so it is
-            # also the one whose target is least likely to survive measurement.
-            with progress.stage("agentic", "Compiling, test-filling and revising", MODEL):
-                with timed(db, org_id=user.org_id, operation=AGENTIC_COMPILE):
-                    outcome = compile_agentic(path, sample_records=None, columns=None, llm_policy=policy, evidence=evidence)
-                compiled, agent_log = outcome.manifest, outcome.log()
-        else:
-            # Dispatch on what the rules actually found. Colour and brackets are
-            # language-independent, so a coloured German template still takes the
-            # free fast path; an uncoloured English one cannot.
-            if choose_compiler(scan) == "rules":
-                with progress.stage("rules", "Reading the colour convention", DETERMINISTIC):
-                    compiled = compile_manifest(scan)
-                    progress.note(
-                        f"{len(compiled.fields)} field(s) and {len(compiled.conditions)} condition(s) "
-                        "read deterministically, at no cost"
-                    )
-                # Whether the rules were enough is the branch that decides
-                # whether this compile is free or costs a model call, so it is
-                # the one a reviewer most wants named.
-                shortfall = rules_fell_short(scan, compiled)
-                if shortfall:
-                    with progress.stage("model", "Handing the template to a model", MODEL) as entry:
-                        entry["detail"] = shortfall[:200]
-                        compiled = _escalate_if_rules_missed_the_logic(
-                            scan, compiled, _paragraph_texts(scan), llm_policy=policy, evidence=evidence,
-                        )
-                        progress.note(
-                            f"{len(compiled.fields)} field(s) and {len(compiled.conditions)} condition(s) "
-                            f"after the model read it"
-                        )
-                if use_llm_refinement and compiled.compiled_by.startswith("rule"):
-                    with progress.stage("refine", "Refining with a model", MODEL):
-                        compiled = refine_with_llm(compiled, "", paragraphs=_paragraph_texts(scan), llm_policy=policy)
-            else:
-                with progress.stage("model", "Reading the template with a model", MODEL):
-                    progress.note("no colour convention found, so the rules have nothing to read")
-                    compiled = compile_manifest_llm(scan, _paragraph_texts(scan), llm_policy=policy, evidence=evidence)
+        # One path. Every template is read by a model, in as many parts as it
+        # takes, and reviewed against what the document itself says is wrong
+        # until nothing is. There is no dispatch on whether the rules can see
+        # anything and no silent substitution when the model cannot be reached:
+        # `outcome.ok` is False and the row below records the attempt as failed.
+        with progress.stage("agentic", "Reading and reviewing the template", MODEL):
+            with timed(db, org_id=user.org_id, operation=AGENTIC_COMPILE):
+                outcome = compile_agentic_template(
+                    path, llm_policy=policy, evidence=evidence, progress=progress,
+                )
+            compiled, agent_log = outcome.manifest, outcome.transcript_dicts()
+            progress.note(
+                f"{len(compiled.fields)} field(s) and {len(compiled.conditions)} condition(s) read"
+                if outcome.ok else f"compile did not converge: {outcome.reason[:160]}"
+            )
     except Exception as exc:
         raise error("COMPILE_FAILED", f"Could not compile manifest: {exc}", 422)
 
@@ -249,10 +227,15 @@ def compile_manifest_endpoint(
 
     manifest = TemplateManifest(
         org_id=user.org_id, template_file_id=template_file_id, template_version_id=tv.id, version_no=version_no,
-        status="draft", fields=compiled.fields, conditions=compiled.conditions, blocks=compiled.blocks,
+        # A compile that did not converge is persisted, not raised. The reviewer
+        # needs to see that it was attempted and why it stopped; `validate_manifest`
+        # refuses to approve the row, so nothing can generate from it.
+        status="draft" if outcome.ok else "failed",
+        fields=compiled.fields, conditions=compiled.conditions, blocks=compiled.blocks,
         delete_always=compiled.delete_always, compiled_by=compiled.compiled_by, confidence=compiled.confidence,
         warnings=getattr(compiled, "warnings", []) or [],
         prescan_summary={**compiled.prescan_summary, "notes": compiled.notes, "agent_log": agent_log},
+        compile_transcript=agent_log,
         created_by=user.id,
     )
     db.add(manifest)
@@ -274,7 +257,11 @@ def compile_manifest_endpoint(
     except Exception:  # noqa: BLE001 - the manifest is the deliverable, not the index
         pass
 
-    log_audit(db, user, "Compiled template manifest", "template_manifest", manifest.id, tf.project_id, "success", f"{tf.name} v{version_no}")
+    log_audit(
+        db, user, "Compiled template manifest", "template_manifest", manifest.id, tf.project_id,
+        "success" if outcome.ok else "failure",
+        f"{tf.name} v{version_no}" + ("" if outcome.ok else f" -- {outcome.reason[:200]}"),
+    )
     db.commit()
     db.refresh(manifest)
     progress.finish()
@@ -366,7 +353,14 @@ def manifest_validation(manifest_id: str, db: Session = Depends(get_db), user: U
     """
     m = owned_manifest(db, manifest_id, user)
     failures = validate_manifest(
-        {"fields": m.fields, "conditions": m.conditions, "blocks": m.blocks},
+        # The whole stored shape, not three of its keys.
+        #
+        # `delete_always` was missing, and `orphaned_fields` -- the check whose
+        # entire job is "this field sits only in paragraphs the compile deletes"
+        # -- reads it. With the key absent it saw nothing deleted and could never
+        # fire, at the one moment it exists for. `status` was missing for the same
+        # reason and let a failed compile be approved.
+        _validatable(m),
         warnings=m.warnings, dispositions=m.warning_dispositions,
     )
     return {
@@ -417,7 +411,14 @@ def approve_manifest(manifest_id: str, db: Session = Depends(get_db), user: User
     # approved can actually run. Setting the status and writing an audit line
     # about it is not a check.
     failures = validate_manifest(
-        {"fields": m.fields, "conditions": m.conditions, "blocks": m.blocks},
+        # The whole stored shape, not three of its keys.
+        #
+        # `delete_always` was missing, and `orphaned_fields` -- the check whose
+        # entire job is "this field sits only in paragraphs the compile deletes"
+        # -- reads it. With the key absent it saw nothing deleted and could never
+        # fire, at the one moment it exists for. `status` was missing for the same
+        # reason and let a failed compile be approved.
+        _validatable(m),
         warnings=m.warnings, dispositions=m.warning_dispositions,
     )
     if failures:
@@ -670,18 +671,14 @@ def inherit_manifest_endpoint(template_file_id: str, body: InheritManifestReques
         if decision.branch is not InheritanceBranch.REUSE_MANIFEST:
             draft = as_evidence_only(draft)
 
-        row_values = to_row_values(draft)
-        if not row_values.is_complete():
-            # `template_manifests` stores three object lists, and §6 defines ten
-            # object types. Writing the row anyway would drop the approved
-            # SIGNATURE or HEADER objects on the floor and report a successful
-            # inheritance.
-            raise error(
-                "MANIFEST_OBJECTS_UNSTORABLE",
-                "This manifest carries object types the manifest table has no column for, so "
-                "inheriting it would silently drop them: " + ", ".join(row_values.unmapped),
-                422,
-            )
+        # `objects_column=True` writes the lossless §6 envelope alongside the
+        # three legacy lists. Until the column existed this call refused with
+        # MANIFEST_OBJECTS_UNSTORABLE whenever the parent carried a SIGNATURE,
+        # HEADER, FOOTER, STATIC or NARRATIVE object, because writing the row
+        # anyway would have dropped them and reported a successful inheritance.
+        # A real offer letter has a signature block, so that refusal was the
+        # common case rather than the edge one.
+        row_values = to_row_values(draft, objects_column=True)
 
         existing = db.scalars(
             select(TemplateManifest).where(TemplateManifest.template_file_id == tf.id)
@@ -874,6 +871,14 @@ def bulk_onboard(project_id: str, files: list[UploadFile] = File(...), auto_comp
     if len(files) < 1:
         raise error("NO_FILES", "Upload at least one template file", 400)
 
+    # §16 residency, resolved once for the whole bulk run. Auto-compile reads
+    # every representative template with a model, so this path needs the tenant's
+    # policy exactly as the single-template compile does.
+    # Attributed to the project rather than to any one template: a bulk run
+    # compiles one representative per family, so the cost belongs to the
+    # onboarding, not to whichever file happened to represent its family.
+    policy = llm_policy_for(db, user.org_id, project_id=project_id, user_id=user.id,
+                            subject_type="project", subject_id=project_id)
     uploaded = []
     for file in files:
         if not (file.filename or "").lower().endswith((".docx", ".dotx")):
@@ -929,13 +934,28 @@ def bulk_onboard(project_id: str, files: list[UploadFile] = File(...), auto_comp
             rep_tf = db.get(TemplateFile, c.representative_template_file_id)
             rep_tv = db.get(TemplateVersion, rep_tf.current_version_id)
             try:
-                scan = prescan(str(abs_path(rep_tv.blob_path)))
-                compiled = compile_manifest(scan)
+                # The same path a single compile takes. This used to call the
+                # rule compiler directly, which meant a template onboarded
+                # through clustering was read by a different compiler than the
+                # same template onboarded on its own -- and the two disagreed
+                # about what a field was on any template without colour.
+                # Timed, like the single-template path above. §18 puts a family
+                # onboarding at ~15-40 model calls, so this is the most
+                # expensive compile in the product -- and it was the one
+                # `slo_report` could not see, which made the reported duration a
+                # measurement of the cheap path only.
+                with timed(db, org_id=user.org_id, operation=AGENTIC_COMPILE):
+                    outcome = compile_agentic_template(
+                        str(abs_path(rep_tv.blob_path)), llm_policy=policy,
+                    )
+                compiled = outcome.manifest
                 manifest = TemplateManifest(
                     org_id=user.org_id, template_file_id=rep_tf.id, template_version_id=rep_tv.id, version_no=1,
-                    status="draft", fields=compiled.fields, conditions=compiled.conditions, blocks=compiled.blocks,
+                    status="draft" if outcome.ok else "failed",
+                    fields=compiled.fields, conditions=compiled.conditions, blocks=compiled.blocks,
                     delete_always=compiled.delete_always, compiled_by=compiled.compiled_by, confidence=compiled.confidence,
-                    prescan_summary=compiled.prescan_summary, created_by=user.id,
+                    prescan_summary=compiled.prescan_summary,
+                    compile_transcript=outcome.transcript_dicts(), created_by=user.id,
                 )
                 manifest.template_family_id = family_row.id
                 db.add(manifest)

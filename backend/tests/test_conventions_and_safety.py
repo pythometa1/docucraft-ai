@@ -473,3 +473,55 @@ def test_the_structural_gate_notices_a_malformed_body(tmp_path, fixtures_dir):
 
     failures = _structural_failures(str(template), str(mangled))
     assert any("well-formed" in f for f in failures), failures
+
+
+# ---- where a document's date and number formatting actually comes from -------
+
+def test_a_project_locale_is_what_makes_an_australian_letter_australian():
+    """`region` cannot answer this and never could.
+
+    The vocabulary is continental -- "Europe", "Asia Pacific" -- so
+    `REGION_LOCALES` is empty by design, and every project therefore resolved to
+    `en_US`. An Australian offer letter rendered "May 9, 2024" for a date its own
+    source wrote as 09/05/2024. The date was correct; the way it was written was
+    American, and nothing recorded that a choice had been made.
+    """
+    from app.generation.value_format import resolved_locale
+
+    assert resolved_locale(region="Asia Pacific") == ("en_US", "default")
+    assert resolved_locale(region="Asia Pacific", project_locale="en_AU") == ("en_AU", "project")
+    assert resolved_locale(field={"locale": "en_GB"}, project_locale="en_AU") == ("en_GB", "field")
+
+
+def test_an_unparseable_project_locale_falls_back_and_says_so():
+    """Silence is the failure mode. A locale babel cannot read must not look
+    like a configured one."""
+    from app.generation.value_format import resolved_locale
+
+    assert resolved_locale(project_locale="not-a-locale") == ("en_US", "default")
+
+
+def test_the_parser_reads_an_ambiguous_date_day_first():
+    """09/05/2024 is 9 May, not 5 September.
+
+    A validation report read the American OUTPUT format and concluded the
+    PARSER was American, then asked for `09/05/2024 -> "September 5, 2024"` --
+    which is the month-first reading it was trying to avoid. Making that change
+    would misread every genuine Australian date whose day is 12 or lower.
+    """
+    from app.generation.value_format import parse_date
+
+    assert parse_date("09/05/2024").isoformat() == "2024-05-09"
+    assert parse_date("05/09/2024").isoformat() == "2024-09-05"
+    assert parse_date("25/12/2024").isoformat() == "2024-12-25"
+    # Day-first is tried first, so a month-first string only parses when its
+    # leading number cannot be a day-of-month ambiguity the other way.
+    assert parse_date("10/15/2024").isoformat() == "2024-10-15"
+
+
+def test_the_same_date_renders_differently_and_correctly_per_locale():
+    from app.generation.value_format import format_value
+
+    field = {"type": "date"}
+    assert format_value("09/05/2024", field, "en_AU") == "9 May 2024"
+    assert format_value("09/05/2024", field, "en_US") == "May 9, 2024"
