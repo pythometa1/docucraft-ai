@@ -102,7 +102,19 @@ def upgrade() -> None:
     # the constraint is what decides: if any row is still NULL this migration
     # fails and someone looks at why.
     for table in TABLES:
-        op.alter_column(table, 'org_id', existing_type=sa.String(), nullable=False)
+        # `batch_alter_table`, not a bare `alter_column`. SQLite has no
+        # ALTER COLUMN, so alembic's generic implementation emits
+        # `ALTER TABLE t ALTER COLUMN c SET NOT NULL` and the database rejects it
+        # as a syntax error. Batch mode rebuilds the table instead, and renders
+        # as a plain ALTER on PostgreSQL, so one line is correct on both.
+        #
+        # This was invisible on the machine it was written on: SQLite 3.53 --
+        # very recent, and what Homebrew's Python happens to bundle -- accepts
+        # the statement. Every older SQLite, CI's included, does not. So a
+        # migration the project describes as runnable "on a laptop with nothing
+        # installed" in fact required one specific bleeding-edge SQLite.
+        with op.batch_alter_table(table) as batch:
+            batch.alter_column('org_id', existing_type=sa.String(), nullable=False)
         op.create_index(f'ix_{table}_org_id', table, ['org_id'])
 
 
