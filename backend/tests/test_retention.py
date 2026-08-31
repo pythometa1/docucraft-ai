@@ -1395,8 +1395,28 @@ def test_the_lineage_is_found_by_version_id_not_by_the_path_it_was_written_to(
             blob_path="documents/edited-v2.docx", status="draft", created_by=user_id)
         db.add(version)
         db.flush()
+        # A real manifest row: `manifest_generations.manifest_id` is a foreign
+        # key, which PostgreSQL enforces and SQLite does not.
+        template_file = TemplateFile(org_id=org_id, project_id=project_id, name="t.docx",
+                                     status="ready", created_by=user_id)
+        db.add(template_file)
+        db.flush()
+        template_version = TemplateVersion(template_file_id=template_file.id, org_id=org_id,
+                                           version_no=1, blob_path="t.docx",
+                                           created_by=user_id)
+        db.add(template_version)
+        db.flush()
+        template_manifest = TemplateManifest(
+            org_id=org_id, template_file_id=template_file.id,
+            template_version_id=template_version.id, version_no=1, status="draft",
+            fields=[], conditions=[], blocks=[], delete_always=[], confidence=1.0,
+            compiled_by="rule_based", prescan_summary={}, created_by=user_id)
+        db.add(template_manifest)
+        db.flush()
+
         generation = ManifestGeneration(
-            org_id=org_id, manifest_id="m1", source_record={"salary": "48000"},
+            org_id=org_id, manifest_id=template_manifest.id,
+            source_record={"salary": "48000"},
             field_lineage=[], condition_lineage=[], qa_passed=True, qa_notes=[],
             # What v1 was rendered to. The edit wrote somewhere else.
             blob_path="documents/original-v1.docx",

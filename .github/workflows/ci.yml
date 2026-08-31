@@ -50,7 +50,17 @@ jobs:
       # place row-level security, the pgvector column, foreign keys and the
       # session timezone actually exist -- and every one of those has hidden a
       # real defect in this codebase while the SQLite run stayed green.
-      DATABASE_URL: postgresql+psycopg://documind:documind@localhost:5432/documind_test
+      # `documind_app`, not `documind`. `POSTGRES_USER` is the cluster superuser,
+      # and PostgreSQL ignores every row-level security policy for a superuser --
+      # silently, with the policies still listed in `pg_policies` and FORCE still
+      # set. Connecting as it would have made every RLS test in the suite assert
+      # against a database that does not filter, which is the exact failure
+      # `scripts/init-db/01-app-role.sh` exists to prevent in production.
+      #
+      # `test_the_real_connection_is_checked_when_running_on_postgres` catches it
+      # rather than letting it pass quietly, so this job fails outright until the
+      # role is right. The step below creates it.
+      DATABASE_URL: postgresql+psycopg://documind_app:documind_app@localhost:5432/documind_test
       REDIS_URL: redis://localhost:6379/0
       JWT_SECRET: ci-secret-not-used-outside-ci
       # Deliberately empty. The suite must pass with no model configured; a test
@@ -70,6 +80,36 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Create the extension and a role row-level security applies to
+        # Two things the service container cannot do for itself.
+        #
+        # The extension, because migration b2f47c9e1a63 runs
+        # `CREATE EXTENSION IF NOT EXISTS vector` and creating one needs
+        # privileges the application role deliberately does not have -- so it is
+        # installed once, here, as the superuser, and the migration finds it
+        # already present.
+        #
+        # The role, because the whole point of the PostgreSQL job is that the
+        # policies are enforced. It owns the database so Alembic can run its DDL,
+        # and it is NOSUPERUSER NOBYPASSRLS so it cannot see through a policy.
+        env:
+          PGPASSWORD: documind
+        run: |
+          psql -h localhost -U documind -d documind_test -v ON_ERROR_STOP=1 <<'SQL'
+            CREATE EXTENSION IF NOT EXISTS vector;
+            DO $$
+            BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'documind_app') THEN
+                CREATE ROLE documind_app
+                  LOGIN PASSWORD 'documind_app'
+                  NOSUPERUSER NOCREATEROLE NOBYPASSRLS;
+              END IF;
+            END
+            $$;
+            GRANT ALL ON SCHEMA public TO documind_app;
+            ALTER DATABASE documind_test OWNER TO documind_app;
+          SQL
+
       - name: Apply migrations against Postgres
         # Not a formality: the schema is owned by Alembic, so a revision that
         # fails on a real database fails here rather than on a deploy.
@@ -87,7 +127,7 @@ jobs:
         # verbatim there. A suite that only ever runs on SQLite is not evidence
         # about the database this ships on.
         env:
-          TEST_DATABASE_URL: postgresql+psycopg://documind:documind@localhost:5432/documind_test
+          TEST_DATABASE_URL: postgresql+psycopg://documind_app:documind_app@localhost:5432/documind_test
         run: python -m pytest -q
 
       - name: Upload coverage

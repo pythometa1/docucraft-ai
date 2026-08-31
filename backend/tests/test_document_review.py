@@ -11,8 +11,8 @@ import pytest
 
 from app.db import SessionLocal
 from app.models import (
-    DocumentReview, DocumentVersion, GeneratedDocument, Organization, Project, ReviewComment,
-    ReviewTask, User,
+    DocumentReview, DocumentVersion, GeneratedDocument, ManifestGeneration, Project,
+    ReviewComment, ReviewTask, User,
 )
 from app.security import create_access_token, hash_password
 
@@ -72,15 +72,39 @@ def party(two_orgs, app_client):
     yield ids
     db = SessionLocal()
     try:
-        for review in db.query(DocumentReview).filter(
-                DocumentReview.document_id == ids["document_id"]).all():
-            db.query(ReviewComment).filter(ReviewComment.review_id == review.id).delete()
-            db.delete(review)
-        db.query(ReviewTask).filter(
-            ReviewTask.document_version_id == ids["version_id"]).delete()
-        db.query(DocumentVersion).filter(DocumentVersion.id == ids["version_id"]).delete()
+        # Children before parents, and every version rather than the one this
+        # fixture made. Two tests mint successors -- the text editor writes a new
+        # version by design -- and one adds a predecessor, so deleting only
+        # `ids["version_id"]` left rows behind. On SQLite that was invisible;
+        # PostgreSQL enforces the foreign keys and refused the delete.
+        version_ids = [
+            v.id for v in db.query(DocumentVersion).filter(
+                DocumentVersion.document_id == ids["document_id"]).all()
+        ]
+        review_ids = [
+            r.id for r in db.query(DocumentReview).filter(
+                DocumentReview.document_id == ids["document_id"]).all()
+        ]
+        if review_ids:
+            db.query(ReviewComment).filter(
+                ReviewComment.review_id.in_(review_ids)).delete(synchronize_session=False)
+            db.query(DocumentReview).filter(
+                DocumentReview.id.in_(review_ids)).delete(synchronize_session=False)
+        if version_ids:
+            db.query(ReviewTask).filter(
+                ReviewTask.document_version_id.in_(version_ids)).delete(
+                    synchronize_session=False)
+            db.query(ManifestGeneration).filter(
+                ManifestGeneration.document_version_id.in_(version_ids)).delete(
+                    synchronize_session=False)
+        # This session is created with autoflush=False, so ORM deletes queued
+        # above would otherwise still be pending when the bulk delete below runs.
+        db.flush()
+        db.query(DocumentVersion).filter(
+            DocumentVersion.document_id == ids["document_id"]).delete(
+                synchronize_session=False)
         db.query(GeneratedDocument).filter(
-            GeneratedDocument.id == ids["document_id"]).delete()
+            GeneratedDocument.id == ids["document_id"]).delete(synchronize_session=False)
         db.commit()
     finally:
         db.close()
