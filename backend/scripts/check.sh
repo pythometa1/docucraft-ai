@@ -32,6 +32,7 @@ echo "==> pytest (offline, --cov-fail-under=${COV_FLOOR})"
 echo
 echo "==> per-module floors for the document-producing path"
 "$PYTHON" - <<'PY'
+import pathlib
 import sys
 import xml.etree.ElementTree as ET
 
@@ -122,6 +123,30 @@ FLOORS = {
     "retrieval/mapping_memory.py": 90,
 }
 
+# Three floors are only reachable with the client-owned template masters, which
+# are deliberately not published with this repository -- they are a real offer
+# letter and two ICC contracts. `conftest.pytest_collection_modifyitems` skips
+# the tests that need them, so on a checkout without those files the coverage of
+# the modules that read a .docx is legitimately lower.
+#
+# CI is exactly such a checkout, so these floors could never be met there. That
+# made the gate fail on every machine that does *not* hold customer data, which
+# is the wrong way round and is the kind of red that teaches people to stop
+# reading CI. They are reported as unmeasurable instead -- visible, and not a
+# pass -- and enforced in full wherever the masters are present.
+FIXTURE_DEPENDENT = {
+    "compiler/rule_compiler.py",
+    "generation/docx_renderer.py",
+    "templates/parsers/docx_prescan.py",
+}
+FIXTURES = pathlib.Path("tests/fixtures")
+missing_masters = [
+    name for name in ("templates/hospira_offer.docx",
+                      "templates/icc_ct036_template.docx",
+                      "templates/icc_ct040_template.docx")
+    if not (FIXTURES / name).exists()
+]
+
 root = ET.parse("coverage.xml").getroot()
 rates = {
     cls.get("filename"): round(float(cls.get("line-rate")) * 100)
@@ -135,10 +160,20 @@ for path, floor in sorted(FLOORS.items()):
         print(f"  MISSING {path} -- not in the coverage report")
         failed = True
         continue
+    if actual < floor and missing_masters and path in FIXTURE_DEPENDENT:
+        print(f"  --  {path:28} {actual:3d}%  (floor {floor}% -- not measurable "
+              "without the client masters)")
+        continue
     mark = "ok " if actual >= floor else "LOW"
     print(f"  {mark} {path:28} {actual:3d}%  (floor {floor}%)")
     if actual < floor:
         failed = True
+
+if missing_masters:
+    print()
+    print("  Note: " + str(len(missing_masters)) + " client template master(s) absent, so the "
+          "tests that read a real .docx were skipped.")
+    print("  The floors marked -- above are enforced wherever those files are present.")
 
 sys.exit(1 if failed else 0)
 PY
