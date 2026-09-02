@@ -149,13 +149,27 @@ def test_the_read_endpoint_tells_the_client_whether_to_offer_an_editor(
 
 # ------------------------------------------------------- the manifest lock gate
 
-def _manifest(org_id: str, status: str) -> str:
+def _manifest(org_id: str, status: str, *, legally_binding: bool | None = None) -> str:
+    """A manifest in `status`. Pass `legally_binding` to attach a template file
+    carrying that flag, which is the only thing that still demands a signature."""
     db = SessionLocal()
     try:
         user = db.scalar(select(User).where(User.org_id == org_id))
         template_version = db.scalar(select(TemplateVersion))
+        template_file_id = None
+        if legally_binding is not None:
+            from app.models import Project as _Project, TemplateFile
+
+            project = db.scalar(select(_Project).where(_Project.org_id == org_id))
+            tf = TemplateFile(
+                org_id=org_id, project_id=project.id, name="binding.docx",
+                status="parsed", legally_binding=legally_binding, created_by=user.id,
+            )
+            db.add(tf)
+            db.flush()
+            template_file_id = tf.id
         manifest = TemplateManifest(
-            org_id=org_id, template_file_id=None,
+            org_id=org_id, template_file_id=template_file_id,
             template_version_id=template_version.id if template_version else "tv-missing",
             version_no=1, status=status, fields=[], conditions=[], blocks=[], delete_always=[],
             created_by=user.id,
@@ -167,22 +181,96 @@ def _manifest(org_id: str, status: str) -> str:
         db.close()
 
 
-@pytest.mark.parametrize("status", ["draft", "in_review", "deprecated"])
-def test_only_an_approved_manifest_can_generate(app_client, org_context, status):
-    """The batch endpoint has always refused these. The single-record endpoint
-    did not, so the same unapproved manifest could still issue a real letter one
-    row at a time."""
-    token, org_id, project_id = org_context
-    manifest_id = _manifest(org_id, status)
+def _generate_batch(app_client, token, manifest_id):
+    """Drive the batch endpoint with a source version that does not exist.
 
-    res = app_client.post(
-        f"/api/v1/template-manifests/{manifest_id}/generate",
-        json={"source_record": {"name": "Dana"}, "project_id": project_id},
+    The two gates under test sit immediately before the source lookup, so a 404
+    saying `SOURCE_NOT_FOUND` is proof that both of them let the request through
+    -- without having to render a document to find out. A gate that refuses
+    answers 409 before ever reaching it.
+    """
+    return app_client.post(
+        f"/api/v1/template-manifests/{manifest_id}/generate-batch",
+        json={"source_version_id": "no-such-source", "language": "en"},
         headers=_auth(token),
     )
 
+
+def _code(res):
+    return res.json().get("detail", {}).get("error", {}).get("code")
+
+
+@pytest.mark.parametrize("status", ["draft", "in_review", "approved"])
+def test_an_unapproved_manifest_is_no_longer_refused(app_client, org_context, status):
+    """Approval has stopped being a precondition for generating.
+
+    It used to be, and it could not be met without going through a review:
+    `validate_manifest` turns every undispositioned compiler warning into a
+    failure, and a manifest that has just been read has warnings and no
+    dispositions by construction. So the gate did not mean "somebody looked at
+    this" -- it meant "acknowledge every warning in writing, then sign, then
+    generate", imposed on every template whether or not anybody had asked for a
+    review."""
+    token, org_id, _project_id = org_context
+    res = _generate_batch(app_client, token, _manifest(org_id, status))
+
+    assert _code(res) == "SOURCE_NOT_FOUND", res.text
+
+
+def test_a_manifest_the_compiler_could_not_read_still_cannot_generate(app_client, org_context):
+    """One of the two checks that replaced it, and the one that was always the
+    real point: a failed compile produced no usable reading, so there is nothing
+    to fill from and every row would fail the same way for the same reason."""
+    token, org_id, _project_id = org_context
+    res = _generate_batch(app_client, token, _manifest(org_id, "failed"))
+
     assert res.status_code == 409, res.text
-    assert res.json()["detail"]["error"]["code"] == "MANIFEST_NOT_APPROVED"
+    assert _code(res) == "MANIFEST_NOT_READ"
+
+
+@pytest.mark.parametrize("status", ["superseded", "deprecated"])
+def test_a_retired_reading_still_cannot_generate(app_client, org_context, status):
+    """The other one, and the reason relaxing the gate is not the same as
+    removing it.
+
+    A superseded manifest is not an *unsigned* reading, it is a *replaced* one --
+    a newer compile of the same template took its place. Generating from it
+    produces letters built from a version the project has moved off, which is
+    exactly what the one-approved-manifest-per-template rule exists to stop."""
+    token, org_id, _project_id = org_context
+    res = _generate_batch(app_client, token, _manifest(org_id, status))
+
+    assert res.status_code == 409, res.text
+    assert _code(res) == "MANIFEST_RETIRED"
+
+
+def test_a_legally_binding_template_still_needs_its_signature(app_client, org_context):
+    """The one approval that survives. §16 asks for four eyes on a template
+    flagged legally binding, and relaxing the gate everywhere would have deleted
+    that rule along with the bookkeeping it was buried in."""
+    token, org_id, _project_id = org_context
+    res = _generate_batch(app_client, token, _manifest(org_id, "draft", legally_binding=True))
+
+    assert res.status_code == 409, res.text
+    assert _code(res) == "MANIFEST_NOT_APPROVED"
+    assert "legally binding" in res.json()["detail"]["error"]["message"]
+
+
+def test_the_flag_is_what_holds_it_not_the_template_file(app_client, org_context):
+    """The same shape with the flag off, so the test above pins the flag rather
+    than the mere presence of a template file."""
+    token, org_id, _project_id = org_context
+    res = _generate_batch(app_client, token, _manifest(org_id, "draft", legally_binding=False))
+
+    assert _code(res) == "SOURCE_NOT_FOUND", res.text
+
+
+def test_an_approved_legally_binding_template_generates(app_client, org_context):
+    """And the signature, once given, is what releases it."""
+    token, org_id, _project_id = org_context
+    res = _generate_batch(app_client, token, _manifest(org_id, "approved", legally_binding=True))
+
+    assert _code(res) == "SOURCE_NOT_FOUND", res.text
 
 
 # ------------------------------------------------ QA blocking is not advisory

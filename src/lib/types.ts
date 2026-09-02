@@ -12,6 +12,9 @@ export type FunctionKey =
   | "Regulatory Affairs";
 
 export interface TemplateFile {
+  /** Set when a blueprint is already open on this template, so the row can offer
+   *  "continue editing" and the click need not guess whether one exists. */
+  blueprintId?: string;
   id: string;
   name: string;
   size: string;
@@ -25,6 +28,25 @@ export interface TemplateFile {
   compileError?: string;
   fieldCount: number;
   conditionCount: number;
+  /** Placeholders in the document that the reading did not claim.
+   *
+   *  Each one is a document that will come back blocked with "Leftover
+   *  placeholder brackets": the fill engine leaves the literal text where the
+   *  value should go, and QA refuses it. Known the moment the template is read,
+   *  which is the moment somebody can still change the template. */
+  unfillable: UnfillablePlaceholder[];
+  unfillableCount: number;
+}
+
+export interface UnfillablePlaceholder {
+  /** `uncovered_placeholder` — nothing claims it, and a field could be added.
+   *  `W-SPLIT-PLACEHOLDER` — Word split it across runs, so no field *can* be
+   *  attached to it and the fix is to retype it in one go. The two need
+   *  different advice, so the code is carried rather than flattened away. */
+  code: string;
+  paragraph_index: number | null;
+  placeholder: string | null;
+  message: string | null;
 }
 
 export interface SourceFile {
@@ -39,6 +61,34 @@ export interface SourceFile {
   currentVersionId?: string;
 }
 
+/** Where a document sits, as a reader sees it.
+ *
+ *  Two axes are collapsed into this one list on read: `approved` comes from the
+ *  signature and `blocked` from the QA gate, and neither is a label anybody
+ *  applies. The other three are. */
+export type WorkflowStatus =
+  | "work_in_progress"
+  | "completed"
+  | "approved"
+  | "blocked"
+  | "cancelled";
+
+/** The three a person may actually set. The server refuses the other two with an
+ *  explanation, so the select offers three options rather than five that fail. */
+export type SettableWorkflowStatus = "work_in_progress" | "completed" | "cancelled";
+
+export const SETTABLE_WORKFLOW: SettableWorkflowStatus[] = [
+  "work_in_progress", "completed", "cancelled",
+];
+
+export const WORKFLOW_LABELS: Record<WorkflowStatus, string> = {
+  work_in_progress: "Work in progress",
+  completed: "Completed",
+  approved: "Approved",
+  blocked: "Blocked",
+  cancelled: "Cancelled",
+};
+
 export interface GeneratedDoc {
   id: string;
   filename: string;
@@ -48,6 +98,15 @@ export interface GeneratedDoc {
   currentVersionId?: string;
   status: string;
   statusReason?: string;
+  /** What to show. Layers the signature and the QA verdict over the lane. */
+  workflowStatus: WorkflowStatus;
+  /** What the person actually set, which is what the dropdown shows as selected.
+   *  Kept separate so a document somebody marked completed that then failed QA
+   *  reads "Blocked" without forgetting they had marked it completed. */
+  workflowStatusSet: SettableWorkflowStatus;
+  /** Whether the server would hand over the bytes. Sent so the control can be
+   *  disabled with a reason rather than discovered by pressing it. */
+  downloadable: boolean;
   /** Set when a person has an objection open against the current version. */
   openReviewId?: string;
   generatedAt: string;

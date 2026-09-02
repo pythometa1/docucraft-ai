@@ -30,7 +30,7 @@ function SettingsPage() {
   return (
     <div className="p-6 lg:p-8 max-w-6xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-gradient">Settings</h1>
         <p className="text-sm text-muted-foreground mt-1">Manage your account, workspace, and integrations.</p>
       </div>
 
@@ -66,7 +66,7 @@ function SettingsPage() {
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-6">
+    <div className="rounded-xl surface-raised p-6">
       <div className="mb-5">
         <h2 className="font-semibold">{title}</h2>
         {description && <p className="text-xs text-muted-foreground mt-1">{description}</p>}

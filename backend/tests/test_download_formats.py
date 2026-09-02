@@ -28,7 +28,10 @@ def _auth(token):
 
 @pytest.fixture
 def generated(app_client, two_orgs, tmp_path):
-    """One generated document belonging to org A, with a real .docx on disk."""
+    """One approved document belonging to org A, with a real .docx on disk.
+
+    Approved because every download path now refuses an unsigned letter. These
+    tests are about formats and conversion; the gate itself has its own file."""
     import docx
     from app.db import SessionLocal
     from app.models import DocumentVersion, GeneratedDocument, Project, User
@@ -49,13 +52,13 @@ def generated(app_client, two_orgs, tmp_path):
 
         gd = GeneratedDocument(
             org_id=project.org_id, project_id=project.id, display_id=1,
-            language="en", status="draft",
+            language="en", status="approved",
         )
         db.add(gd)
         db.flush()
         dv = DocumentVersion(
             document_id=gd.id, org_id=gd.org_id, version_no=1, blob_path=rel,
-            renderer="ooxml_fill/1.0", status="draft", created_by=user.id,
+            renderer="ooxml_fill/1.0", status="approved", created_by=user.id,
         )
         db.add(dv)
         db.flush()

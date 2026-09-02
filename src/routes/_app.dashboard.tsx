@@ -54,6 +54,9 @@ import {
   Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { FadeIn } from "@/components/motion";
+import { BulkSelectBar, SelectBox, useSelection } from "@/components/bulk-select";
+import { Checkbox } from "@/components/ui/checkbox";
 
 export const Route = createFileRoute("/_app/dashboard")({
   head: () => ({
@@ -199,6 +202,13 @@ function Dashboard() {
 
   const resetToFirstPage = () => setOffset(0);
 
+  // Selection is by project id, which matters more here than on the other lists:
+  // this table is paged, and `rows` is replaced wholesale on every search, filter
+  // and page change. `useSelection` intersects the ticked ids with what is
+  // currently on screen, so a project ticked on page 1 is not silently deleted
+  // from page 2 -- the count and the request only ever cover visible rows.
+  const sel = useSelection(rows, (r: Row) => String(r.id));
+
   const runRowAction = async (row: Row, action: () => Promise<unknown>, success: string, failure: string): Promise<boolean> => {
     // Returning undefined here read as failure to `confirmDelete`, which then
     // left the dialog open with no toast and no explanation of why nothing
@@ -240,7 +250,7 @@ function Dashboard() {
   return (
     <div className="p-8 space-y-8">
       {/* Welcome banner */}
-      <div className="relative overflow-hidden rounded-2xl border border-border bg-surface p-8 md:p-10">
+      <FadeIn className="relative overflow-hidden rounded-2xl surface-raised p-8 md:p-10">
         <div className="absolute inset-0 bg-hero-orbs opacity-70 pointer-events-none" />
         <div className="relative grid md:grid-cols-[1fr_auto] gap-8 items-center">
           <div>
@@ -253,7 +263,7 @@ function Dashboard() {
           </div>
           <WelcomeIllustration />
         </div>
-      </div>
+      </FadeIn>
 
       {/* Content studio */}
       <div>
@@ -282,7 +292,7 @@ function Dashboard() {
                 <button
                   title={activeStatus ? `Status: ${activeStatus.label}` : "Filter by status"}
                   className={cn(
-                    "h-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center gap-1.5 text-muted-foreground",
+                    "h-9 rounded-lg surface-raised hover:bg-accent flex items-center justify-center gap-1.5 text-muted-foreground",
                     activeStatus ? "px-3 border-brand/40 text-brand" : "w-9",
                   )}
                 >
@@ -311,7 +321,7 @@ function Dashboard() {
               onClick={() => void load()}
               disabled={loading}
               title="Refresh"
-              className="h-9 w-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center text-muted-foreground disabled:opacity-50"
+              className="h-9 w-9 rounded-lg surface-raised hover:bg-accent flex items-center justify-center text-muted-foreground disabled:opacity-50"
             >
               <RefreshCcw className={cn("h-4 w-4", loading && "animate-spin")} />
             </button>
@@ -324,12 +334,35 @@ function Dashboard() {
           </div>
         </div>
 
+        {/* Only once something is ticked. A destructive control sitting on the
+            dashboard permanently, with nothing selected, is one mis-click from a
+            dialog nobody meant to open. */}
+        {sel.chosen.length > 0 && (
+          <div className="mt-6 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-2">
+            <BulkSelectBar
+              selection={sel}
+              noun="project" pluralNoun="projects"
+              names={rows.filter((r) => sel.has(r.id)).map((r) => r.name)}
+              onDelete={(ids) => api.deleteProjects(ids)}
+              onDone={() => load()}
+            />
+          </div>
+        )}
+
         {/* Table */}
-        <div className="mt-6 rounded-xl border border-border bg-surface overflow-hidden">
+        <div className="mt-6 rounded-xl surface-raised overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr className="bg-gradient-brand text-white text-left text-[11px] uppercase tracking-wider">
+                  <th className="px-4 py-3 w-10">
+                    <Checkbox
+                      checked={sel.allChosen}
+                      onCheckedChange={(v) => sel.setAll(v === true)}
+                      aria-label="Select all projects on this page"
+                      className="border-white/70 data-[state=checked]:bg-white data-[state=checked]:text-brand"
+                    />
+                  </th>
                   <th className="px-4 py-3 font-semibold whitespace-nowrap">Project name</th>
                   <th className="px-4 py-3 font-semibold whitespace-nowrap">Project ID</th>
                   <th className="px-4 py-3 font-semibold whitespace-nowrap">Document type</th>
@@ -347,9 +380,13 @@ function Dashboard() {
                     className={cn(
                       "border-t border-border hover:bg-accent/40 transition-colors group",
                       idx % 2 === 1 && "bg-surface-elevated/30",
+                      sel.has(p.id) && "bg-brand/5",
                       busyId === p.id && "opacity-60",
                     )}
                   >
+                    <td className="px-4 py-3">
+                      <SelectBox id={p.id} selection={sel} label={p.name} />
+                    </td>
                     <td className="px-4 py-3 max-w-[220px]">
                       <Link
                         to="/projects/$id"
@@ -443,7 +480,7 @@ function Dashboard() {
                 ))}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground text-sm">
+                    <td colSpan={9} className="px-4 py-12 text-center text-muted-foreground text-sm">
                       {loading
                         ? "Loading projects…"
                         : search || status !== "all"
@@ -605,27 +642,39 @@ function DateCell({ v }: { v: string }) {
   );
 }
 
+/** A template on the left, a filled document on the right.
+ *
+ *  Every fill and stroke reads a theme token rather than a literal. It used to
+ *  hardcode the dark palette's oklch values -- `fill="oklch(0.22 0.02 270)"` and
+ *  so on -- which meant it did not follow a token change and was already broken
+ *  in light mode: dark grey panels on a white page, with grey-on-grey text lines
+ *  that vanished entirely. */
 function WelcomeIllustration() {
   return (
-    <svg viewBox="0 0 220 160" className="w-56 md:w-64 h-auto">
+    <svg viewBox="0 0 220 160" className="w-56 md:w-64 h-auto" role="img"
+         aria-label="A template on the left, filled into a finished document on the right">
       <defs>
         <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="oklch(0.66 0.19 268)" />
-          <stop offset="1" stopColor="oklch(0.6 0.22 300)" />
+          <stop offset="0" stopColor="var(--color-brand)" />
+          <stop offset="1" stopColor="var(--color-purple)" />
         </linearGradient>
       </defs>
-      <rect x="20" y="30" width="80" height="100" rx="6" fill="oklch(0.22 0.02 270)" stroke="oklch(0.34 0.025 270)" />
+      <rect x="20" y="30" width="80" height="100" rx="6"
+            fill="var(--color-muted)" stroke="var(--color-border-strong)" />
       <rect x="30" y="45" width="60" height="4" rx="2" fill="url(#g1)" />
-      <rect x="30" y="55" width="50" height="3" rx="1.5" fill="oklch(0.35 0.02 270)" />
-      <rect x="30" y="62" width="55" height="3" rx="1.5" fill="oklch(0.35 0.02 270)" />
-      <rect x="30" y="69" width="45" height="3" rx="1.5" fill="oklch(0.35 0.02 270)" />
+      {[55, 62, 69].map((y, i) => (
+        <rect key={y} x="30" y={y} width={[50, 55, 45][i]} height="3" rx="1.5"
+              fill="var(--color-muted-foreground)" opacity="0.55" />
+      ))}
       <circle cx="140" cy="60" r="18" fill="url(#g1)" opacity="0.9" />
-      <path d="M105 70 L125 65" stroke="url(#g1)" strokeWidth="2" markerEnd="url(#arrow)" />
-      <rect x="130" y="90" width="80" height="50" rx="6" fill="oklch(0.28 0.04 275)" stroke="url(#g1)" />
+      <path d="M105 70 L125 65" stroke="url(#g1)" strokeWidth="2" />
+      <rect x="130" y="90" width="80" height="50" rx="6"
+            fill="var(--color-accent)" stroke="url(#g1)" />
       <rect x="140" y="100" width="60" height="3" rx="1.5" fill="url(#g1)" />
-      <rect x="140" y="108" width="55" height="3" rx="1.5" fill="oklch(0.5 0.02 270)" />
-      <rect x="140" y="116" width="50" height="3" rx="1.5" fill="oklch(0.5 0.02 270)" />
-      <rect x="140" y="124" width="45" height="3" rx="1.5" fill="oklch(0.5 0.02 270)" />
+      {[108, 116, 124].map((y, i) => (
+        <rect key={y} x="140" y={y} width={[55, 50, 45][i]} height="3" rx="1.5"
+              fill="var(--color-muted-foreground)" opacity="0.7" />
+      ))}
     </svg>
   );
 }

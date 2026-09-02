@@ -34,6 +34,7 @@ from app.models import (
     TemplateManifest, TemplateVersion, User,
 )
 from app.ownership import owned_manifest, owned_project, owned_source_version
+from app.generation.document_status import DOWNLOADABLE
 from app.security import error, get_current_user
 from app.compiler import confidence as cf
 from app.generation.batch_runner import run_batch, run_row
@@ -599,15 +600,58 @@ def generate_batch(
     user: User = Depends(get_current_user),
 ):
     manifest = owned_manifest(db, manifest_id, user)
-    if manifest.status != "approved":
+    # What this gate asks is "could the compiler read this template?", not "has
+    # somebody signed it".
+    #
+    # It used to demand `approved`, which made a signature a precondition for
+    # generating anything -- and a freshly compiled manifest can never satisfy
+    # that on its own: `validate_manifest` turns every undispositioned compiler
+    # warning into a failure, and a manifest that has just been read has warnings
+    # and no dispositions by construction. So the real path was upload, read,
+    # acknowledge each warning one at a time, approve, and only then generate --
+    # for every template, including the ones nobody had asked to review.
+    #
+    # Two states are still refused, and neither is about a signature.
+    #
+    # `failed` means the compiler did not produce a usable reading, so there is
+    # nothing to fill from and every row would fail the same way.
+    #
+    # `superseded` and `deprecated` mean this reading has been explicitly
+    # retired -- a newer compile of the same template replaced it, or somebody
+    # withdrew it. Generating from one produces letters built from a version of
+    # the template the customer has already moved off, which is the failure the
+    # supersede rule was written for: without it a template accumulated approved
+    # manifests and "which one does production run?" had no answer.
+    if manifest.status == "failed":
+        raise error(
+            "MANIFEST_NOT_READ",
+            "The compiler could not produce a usable reading of this template, so there is nothing "
+            "to fill from. Read the template again from its row on the Template stage.",
+            409,
+        )
+    if manifest.status in ("superseded", "deprecated"):
+        raise error(
+            "MANIFEST_RETIRED",
+            "This reading of the template has been replaced by a newer one, so generating from it "
+            "would produce documents from a version the project has moved off. Use the current "
+            "manifest for this template.",
+            409,
+        )
+    template_file = db.get(TemplateFile, manifest.template_file_id) if manifest.template_file_id else None
+    # The one approval that survives, and only where the customer has switched it
+    # on. §16 requires four eyes for a template flagged legally binding, which is
+    # the case that rule was written for -- a contract going out under somebody's
+    # name. Nothing in the product sets this flag today, so no ordinary template
+    # reaches this branch.
+    if template_file is not None and template_file.legally_binding and manifest.status != "approved":
         raise error(
             "MANIFEST_NOT_APPROVED",
-            "Only an approved manifest can generate documents. Review and approve it first.",
+            "This template is marked legally binding, so it needs sign-off from two different "
+            "people before it can generate. Ask a reviewer to approve its manifest.",
             409,
         )
     version = owned_source_version(db, body.source_version_id, user)
     source = _source_file_for(db, version)
-    template_file = db.get(TemplateFile, manifest.template_file_id) if manifest.template_file_id else None
     if template_file is None:
         raise error("PROJECT_REQUIRED", "This manifest is not attached to a project template.", 400)
     project = owned_project(db, template_file.project_id, user)
@@ -668,7 +712,20 @@ def generate_batch(
 
 @router.get("/jobs/{job_id}/download")
 def download_batch(job_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Every document from a batch as one ZIP."""
+    """Every approved document from a batch as one ZIP.
+
+    Gated per document like every other egress path. A batch of two hundred
+    freshly generated letters is by definition two hundred *unapproved*
+    documents, so before this check the endpoint was the one place the approval
+    gate could be walked straight around -- and it is the one the batch screen
+    calls.
+
+    Skipped rather than refused whole, and listed in `_FAILED.txt`, which is the
+    same call `POST /documents:download` makes: a reviewer with a hundred and
+    ninety signed letters and ten unsigned ones needs the hundred and ninety plus
+    a list, not a 409 and nothing. When nothing at all is approved the count
+    below is zero and the refusal arrives honestly, saying why.
+    """
     job = db.get(GenerationJob, job_id)
     if not job or job.org_id != user.org_id:
         raise error("JOB_NOT_FOUND", "Job not found", 404)
@@ -679,19 +736,45 @@ def download_batch(job_id: str, db: Session = Depends(get_db), user: User = Depe
         raise error("NOTHING_TO_DOWNLOAD", "This job has not produced any documents yet.", 409)
 
     buffer = io.BytesIO()
+    skipped: list[str] = []
+    written = 0
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for version_id in version_ids:
             version = db.get(DocumentVersion, version_id)
             if not version or not version.blob_path:
                 continue
+            document = db.get(GeneratedDocument, version.document_id)
+            # The job records the org; the documents inside it are checked one by
+            # one, because a bulk endpoint that trusts its own stored list is the
+            # weaker of the two checks available here.
+            if document is None or document.org_id != user.org_id:
+                continue
+            project = db.get(Project, document.project_id)
+            name = f"{project.name}_{document.display_id}_{document.language}.docx"
+            if version.status not in DOWNLOADABLE:
+                skipped.append(f"{name}: not approved (currently {version.status}), so it was left out")
+                continue
             path = abs_path(version.blob_path)
             if not path.exists():
+                skipped.append(f"{name}: the file is no longer on disk")
                 continue
-            document = db.get(GeneratedDocument, version.document_id)
-            project = db.get(Project, document.project_id)
-            archive.write(path, arcname=f"{project.name}_{document.display_id}_{document.language}.docx")
-    buffer.seek(0)
+            archive.write(path, arcname=name)
+            written += 1
 
+        if skipped:
+            archive.writestr(
+                "_FAILED.txt",
+                "These documents are not in this archive:\n\n" + "\n".join(skipped) + "\n",
+            )
+
+    if not written:
+        raise error(
+            "NOTHING_TO_DOWNLOAD",
+            "None of this batch's documents could be prepared: " + "; ".join(skipped[:3]),
+            409,
+        )
+
+    buffer.seek(0)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     return StreamingResponse(
         buffer,

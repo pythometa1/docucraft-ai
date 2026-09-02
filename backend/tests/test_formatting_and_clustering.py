@@ -130,3 +130,64 @@ def test_a_rate_stored_as_a_fraction_renders_as_a_percentage():
 
 def test_a_number_with_declared_decimals_keeps_locale_grouping():
     assert format_value("1234567", {"type": "number", "decimals": 2}, "en_IN") == "12,34,567.00"
+
+
+# ------------------------------------------------- a date is a date, whatever the field says
+
+def test_a_midnight_datetime_is_written_as_a_date():
+    """The `00:00:00` bug, and the reason it was invisible for so long.
+
+    The date branch of `format_value` only runs when the *compiler* typed the
+    field as a date, and it frequently does not. A column it read as a string
+    still arrives here as a real `datetime`, because openpyxl returns datetimes
+    for date-formatted cells -- so the fallthrough ran `str(value)` and put
+
+        变动将于2026-09-01 00:00:00生效
+
+    into a customer's letter. The field's declared type is the compiler's
+    opinion; the value's type is a fact, and the fact decides.
+    """
+    from datetime import datetime
+
+    assert format_value(datetime(2026, 9, 1)) == "Sep 1, 2026"
+    assert "00:00:00" not in format_value(datetime(2026, 9, 1))
+
+
+def test_a_date_object_is_written_as_a_date():
+    from datetime import date
+
+    assert format_value(date(2026, 9, 1)) == "Sep 1, 2026"
+
+
+def test_a_real_time_is_kept_rather_than_dropped():
+    """Silently discarding a time would be inventing a fact rather than
+    formatting one. What goes away is the midnight that was never meant; a
+    timestamp that carries an actual time keeps it, in the locale's short form
+    rather than as ISO seconds."""
+    from datetime import datetime
+
+    out = format_value(datetime(2026, 9, 1, 14, 30))
+    assert out.startswith("Sep 1, 2026")
+    assert "2:30" in out
+    assert ":00 " not in out and not out.endswith(":00")
+
+
+def test_the_date_follows_the_locale_like_every_other_value():
+    from datetime import datetime
+
+    assert format_value(datetime(2026, 9, 1), locale="zh_CN") == "2026年9月1日"
+    assert format_value(datetime(2026, 9, 1), locale="de_DE") == "01.09.2026"
+
+
+def test_an_author_pattern_still_wins_over_the_locale():
+    """A template that says YYYY-MM-DD means it, on an untyped field too."""
+    from datetime import datetime
+
+    assert format_value(datetime(2026, 9, 1), {"format": "YYYY-MM-DD"}) == "2026-09-01"
+
+
+def test_a_value_that_is_not_a_date_is_untouched():
+    """The guard is on the value's type, so nothing else changed shape."""
+    assert format_value("Promotion") == "Promotion"
+    assert format_value("2026-09-01") == "2026-09-01"
+    assert format_value(42) == "42"

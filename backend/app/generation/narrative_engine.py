@@ -6,9 +6,7 @@ described in docs/BACKEND_SPEC.md §10.
 
 import re
 
-from sqlalchemy.orm import Session
-
-from app.models import Mapping, SourceChunk, TemplateSection
+from app.models import SourceChunk
 from app.expressions import token_parser
 from app.llm.provider import LLMProvider
 from app.retrieval.lexical import retrieve
@@ -40,53 +38,6 @@ def build_fact_sheet(chunks: list[SourceChunk], field_names: list[str]) -> dict:
         if value is not None:
             sheet[field] = value
     return sheet
-
-
-def resolve_section_unit(
-    *,
-    action: str,
-    instructions: str,
-    section: TemplateSection,
-    chunks: list[SourceChunk],
-    fact_sheet: dict,
-    llm: LLMProvider,
-    max_words: int | None,
-) -> dict:
-    """Returns {status, blocks, citations, grounding_score, model, input_tokens, output_tokens, error}."""
-    if action == "manual":
-        return {"status": "skipped", "blocks": None, "citations": None, "grounding_score": None, "model": None, "input_tokens": 0, "output_tokens": 0, "error": None}
-
-    query = f"{section.section_path} {instructions or ''}".strip()
-    if action == "extract_table":
-        pool = [c for c in chunks if c.element_type in ("table", "sheet_rows")] or chunks
-    else:
-        pool = chunks
-    ranked = retrieve(pool, query, k=8)
-    context = [{"id": c.id, "text": c.text} for c, _ in ranked]
-
-    if action == "copy_verbatim":
-        if not context:
-            return {"status": "failed", "blocks": None, "citations": None, "grounding_score": 0.0, "model": None, "input_tokens": 0, "output_tokens": 0, "error": "No matching source content found."}
-        blocks = [{"type": "paragraph", "text": context[0]["text"], "citations": [context[0]["id"]]}]
-        return {"status": "done", "blocks": blocks, "citations": blocks[0]["citations"], "grounding_score": 1.0, "model": "copy_verbatim", "input_tokens": 0, "output_tokens": 0, "error": None}
-
-    try:
-        result = llm.generate(instructions=instructions, context_chunks=context, fact_sheet=fact_sheet, max_words=max_words)
-    except Exception as exc:  # provider/network error -- surface, don't crash the job
-        return {"status": "failed", "blocks": None, "citations": None, "grounding_score": None, "model": None, "input_tokens": 0, "output_tokens": 0, "error": str(exc)}
-
-    citations = sorted({cid for b in result.blocks for cid in b.get("citations", [])})
-    grounding_score = _grounding_score(result.blocks)
-    return {
-        "status": "done",
-        "blocks": result.blocks,
-        "citations": citations,
-        "grounding_score": grounding_score,
-        "model": result.model,
-        "input_tokens": result.input_tokens,
-        "output_tokens": result.output_tokens,
-        "error": None,
-    }
 
 
 def _grounding_score(blocks: list[dict]) -> float:

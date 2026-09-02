@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -20,7 +21,10 @@ from app.downloads import GRANT_TTL_SECONDS, issue as issue_download_grant, rede
 from app.metrics import record_qa_overrides
 from app.retention import delete_generated_document
 from app.ownership import owned_document, owned_document_version, owned_draft, owned_project
-from app.generation.document_status import BLOCKED, refresh_status
+from app.generation.document_status import APPROVED, BLOCKED, DOWNLOADABLE, refresh_status
+from app.generation.workflow_status import (
+    CANCELLED, COMPLETED, SETTABLE, WORK_IN_PROGRESS, effective as effective_workflow,
+)
 from app.generation.legacy_assembly import assemble_from_html
 from app.generation.text_edit import EditRejected, apply_edits, read_document, structural_diff
 from app.generation.narrative_engine import build_fact_sheet, resolve_token_unit
@@ -29,6 +33,8 @@ from app.tenancy import llm_policy_for
 from app.generation.renderers import DOCX_TEMPLATE_ASSEMBLY, HTML_ASSEMBLY, is_html_editable
 from app.expressions.token_parser import fact_sheet_fields, parse_tokens, render_content_html
 from app.storage import abs_path
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["generation"])
 
@@ -131,6 +137,16 @@ def _doc_out(db: Session, gd: GeneratedDocument, project: Project) -> dict:
     return {
         "id": gd.id, "display_id": gd.display_id, "filename": filename, "language": gd.language,
         "status": gd.status, "status_reason": version.status_reason if version else None,
+        # Two axes, and both are returned. Collapsing them is the same mistake
+        # the `open_review` lookup above exists to undo: `status` is what the
+        # engine and the reviewers say, `workflow_status` is where a person put
+        # it, and picking one silently loses the other. `workflow_status` is what
+        # goes on the card; `workflow_status_set` is what the dropdown shows as
+        # selected, so a document somebody marked completed that then failed QA
+        # can read "Blocked" without forgetting they had marked it completed.
+        "workflow_status": effective_workflow(gd),
+        "workflow_status_set": gd.workflow_status,
+        "downloadable": bool(version and version.status in DOWNLOADABLE),
         "current_version_id": gd.current_version_id,
         "open_review_id": open_review,
         "size_bytes": size_bytes,
@@ -156,6 +172,70 @@ def get_document(document_id: str, db: Session = Depends(get_db), user: User = D
         raise error("DOCUMENT_NOT_FOUND", "Document not found", 404)
     project = db.get(Project, gd.project_id)
     return _doc_out(db, gd, project)
+
+
+class WorkflowPatch(BaseModel):
+    workflow_status: str
+
+
+@router.patch("/documents/{document_id}/workflow")
+def set_document_workflow(document_id: str, body: WorkflowPatch, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    """Move a document along someone's own process, and refuse to let it lie.
+
+    Each refusal below is a state this column must not be able to *assert*,
+    rather than a state it would be inconvenient to allow.
+
+    No capability required, deliberately. Moving a card is not an act on the
+    document -- nothing is signed, nothing is destroyed, no bytes change -- and
+    the two states that *are* acts are the two this refuses outright.
+    """
+    gd = owned_document(db, document_id, user)
+    requested = (body.workflow_status or "").strip()
+
+    if requested == APPROVED:
+        raise error(
+            "APPROVAL_IS_NOT_A_LABEL",
+            "Approving a document is a signature, not a status. Use the approve action on its "
+            "current version -- that is what records who signed it and when.",
+            409, {"approve_with": f"/document-versions/{gd.current_version_id}:approve"})
+    if requested == BLOCKED:
+        raise error(
+            "BLOCK_IS_A_VERDICT",
+            "Blocked is what the QA gate found when this document was generated, not a label "
+            "anyone applies or removes. Fix the manifest or the source row and generate again -- "
+            "or cancel it, which is what cancelling is for.",
+            409)
+    if requested not in SETTABLE:
+        raise error(
+            "UNKNOWN_WORKFLOW_STATUS",
+            f"{requested!r} is not a workflow status. Use one of: {', '.join(SETTABLE)}.",
+            422)
+
+    if effective_workflow(gd) == APPROVED:
+        raise error(
+            "DOCUMENT_APPROVED",
+            "This document has been approved. Withdraw the approval before moving it, so the "
+            "withdrawal is recorded against the person who made it.",
+            409)
+    # Cancelling a blocked document is deliberately allowed: giving up on a
+    # letter that cannot be fixed is the ordinary answer to one, and refusing it
+    # would leave the reader no move at all. Calling it *completed* is not.
+    if requested == COMPLETED and gd.status == BLOCKED:
+        raise error(
+            "DOCUMENT_BLOCKED",
+            "This document failed its QA checks, so it cannot be marked completed. Fix the "
+            "manifest or the source data and generate again, or cancel it.",
+            409)
+
+    if gd.workflow_status != requested:
+        previous = gd.workflow_status
+        gd.workflow_status = requested
+        log_audit(db, user, "Moved a document in the workflow", "generated_document", gd.id,
+                  gd.project_id, "warning" if requested == CANCELLED else "info",
+                  f"{previous} -> {requested}")
+    db.commit()
+    return _doc_out(db, gd, db.get(Project, gd.project_id))
 
 
 @router.delete("/documents/{document_id}")
@@ -191,6 +271,123 @@ def delete_document(document_id: str, db: Session = Depends(get_db), user: User 
     )
     db.commit()
     return {"status": "deleted", "blobs_deleted": len(manifest.blobs), "rows_deleted": manifest.counts}
+
+
+class BulkDelete(BaseModel):
+    document_ids: list[str]
+
+
+@router.post("/documents:delete")
+def delete_documents(body: BulkDelete, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """Destroy several generated documents, and say what happened to each.
+
+    The same cascade as `DELETE /documents/{id}`, run per document, with the same
+    refusal for an approved one. Selecting forty letters and deleting them is one
+    gesture on the screen; it is forty independent deletions here, and the
+    response says which of them happened.
+
+    **Partial by design.** A bulk delete that fails whole because one document in
+    the selection is signed is a bulk delete nobody can use -- the reviewer clears
+    the checkbox and tries again, or worse, revokes an approval to get the button
+    to work. So each document is judged on its own and the refusals come back as
+    data: `deleted` for what went, `refused` for what did not and the reason why.
+    Nothing is skipped silently.
+
+    **One commit per document, deliberately.** `delete_generated_document` unlinks
+    the rendered file before the transaction ends, so batching every row into a
+    single commit would mean a failure on document thirty leaves twenty-nine files
+    already gone from disk and their rows rolled back -- a database that says the
+    letters exist and a filesystem that disagrees. Committing each one keeps the
+    two in step, and a failure part-way through leaves a prefix that is genuinely
+    deleted and a suffix that is genuinely untouched.
+
+    Ownership is checked per document rather than once for the list, for the
+    reason `documents:download` gives: a caller can put any id in a JSON array,
+    and a bulk endpoint that trusts the array is how one tenant destroys
+    another's letters.
+    """
+    if not body.document_ids:
+        raise error("NO_DOCUMENTS", "Select at least one document to delete.", 422)
+    # Deduplicated, because the same id twice would report one deletion and one
+    # "not found" for a document the caller selected once.
+    ids = list(dict.fromkeys(body.document_ids))
+    if len(ids) > MAX_BULK_DOCUMENTS:
+        raise error(
+            "TOO_MANY_DOCUMENTS",
+            f"{len(ids)} documents were selected; this endpoint deletes at most "
+            f"{MAX_BULK_DOCUMENTS} at a time. Each one is a cascade to its versions, its "
+            "lineage and its file on disk.",
+            422,
+        )
+
+    deleted, refused = [], []
+    blobs = 0
+    for document_id in ids:
+        gd = db.get(GeneratedDocument, document_id)
+        if not gd or gd.org_id != user.org_id:
+            # 404 semantics, per document: a cross-tenant id is indistinguishable
+            # from one that never existed, which is what the tenancy rule wants.
+            refused.append({"document_id": document_id, "code": "DOCUMENT_NOT_FOUND",
+                            "filename": None,
+                            "reason": "This document no longer exists."})
+            continue
+
+        project = db.get(Project, gd.project_id)
+        filename = _download_filename(db, gd) if project else None
+        if gd.status == "approved":
+            refused.append({
+                "document_id": document_id, "code": "DOCUMENT_APPROVED",
+                "filename": filename,
+                "reason": ("Approved, so it was left alone. Withdraw the approval first, which "
+                           "records who withdrew it."),
+            })
+            continue
+
+        project_id = gd.project_id
+        try:
+            manifest = delete_generated_document(db, org_id=user.org_id, document_id=document_id)
+            log_audit(db, user, "Deleted generated document", "generated_document", document_id,
+                      project_id=project_id, severity="warning",
+                      target=f"{filename} (bulk of {len(ids)})" if filename else None)
+            db.commit()
+        except Exception:  # noqa: BLE001 - one bad document must not strand the rest
+            # The audit row and the commit are inside this try, not after it. A
+            # commit that fails -- SQLite "database is locked", a Postgres
+            # deadlock, a dropped connection -- escaped the loop as a 500 and
+            # threw away the response that was supposed to name everything
+            # already destroyed. Saying what happened is this endpoint's whole
+            # contract, and it cannot lose that on the one path where the record
+            # matters most.
+            db.rollback()
+            log.exception("bulk delete failed for document %s", document_id)
+
+            # Deliberately NOT reported as "left alone".
+            # `delete_generated_document` unlinks the rendered files before its
+            # final flush, so a failure past that point leaves rows the rollback
+            # restored and files it cannot. The document is then neither deleted
+            # nor untouched, and calling it either would be a claim somebody
+            # acts on. The exception text is not returned either: an OS error
+            # carries the absolute storage path and a SQLAlchemy one carries
+            # SQL, while every other refusal in this router is authored prose.
+            refused.append({
+                "document_id": document_id, "code": "DELETE_INCOMPLETE",
+                "filename": filename,
+                "reason": ("This document could not be removed cleanly. Its record was kept, "
+                           "but its file may already be gone -- open it to check, and tell an "
+                           "administrator if it will not download."),
+            })
+            continue
+
+        blobs += len(manifest.blobs)
+        deleted.append({"document_id": document_id, "filename": filename})
+
+    return {
+        "requested": len(ids),
+        "deleted": deleted,
+        "refused": refused,
+        "blobs_deleted": blobs,
+    }
 
 
 @router.get("/documents/{document_id}/versions")
@@ -647,6 +844,34 @@ def _as_pdf(docx_path: str, language: str) -> str:
     return result.pdf_path
 
 
+def _require_downloadable(dv: DocumentVersion, gd: GeneratedDocument) -> None:
+    """Refuse to hand over the bytes of a document nobody has signed.
+
+    Hiding the button is not the gate. `POST /documents:download` takes a JSON
+    array, `GET .../download` is a plain GET, and `POST .../download-url` mints a
+    link that is then followed with no credential at all -- every one of them is
+    reachable from a terminal, so every one of them asks here.
+
+    The *version*, not the parent row. `GeneratedDocument.status` mirrors only
+    the current version -- `refresh_status` says so in as many words -- and a
+    superseded v1 of a letter that was later signed is not a signed letter.
+    Downloading is addressed by version id, so it must ask the version.
+
+    Reviewing a document deliberately does not go through this: `GET
+    /document-versions/{id}` and `GET .../text` both still answer for a draft,
+    because the person deciding whether to approve has to be able to read it.
+    """
+    if dv.status not in DOWNLOADABLE:
+        raise error(
+            "DOCUMENT_NOT_APPROVED",
+            "This document has not been approved, so it cannot be downloaded. Approve it first -- "
+            "downloading is how a letter leaves the building, and an unapproved one leaving is "
+            "what approval exists to prevent.",
+            409,
+            {"document_id": gd.id, "version_id": dv.id, "status": dv.status},
+        )
+
+
 @router.post("/document-versions/{version_id}/download-url", status_code=201)
 def create_download_url(version_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Mint a short-lived, single-use link to this document (§16).
@@ -660,6 +885,9 @@ def create_download_url(version_id: str, db: Session = Depends(get_db), user: Us
     dv, gd = owned_document_version(db, version_id, user)
     if not dv.blob_path:
         raise error("VERSION_NOT_FOUND", "Document version not found", 404)
+    # Before the grant, not after. A link that exists is a link that can be
+    # followed, and the handler that follows it has no user to check.
+    _require_downloadable(dv, gd)
 
     grant = issue_download_grant(version_id=dv.id, org_id=gd.org_id, user_id=user.id)
     log_audit(db, user, "Requested a document download link", "document_version", dv.id, gd.project_id, "info")
@@ -685,6 +913,10 @@ def download_document_version(version_id: str, format: str = "docx", db: Session
         raise error("VERSION_NOT_FOUND", "Document version not found", 404)
     if format not in ("docx", "pdf"):
         raise error("UNSUPPORTED_FORMAT", f"{format!r} is not a format this endpoint serves. Use docx or pdf.", 422)
+    # After the format check, so an unknown format is still answered as one; and
+    # before `_as_pdf`, so a document that may not leave costs no LibreOffice
+    # subprocess to refuse.
+    _require_downloadable(dv, gd)
 
     source = str(abs_path(dv.blob_path))
     if format == "pdf":
@@ -741,6 +973,17 @@ def download_documents(body: BulkDownload, db: Session = Depends(get_db), user: 
             dv = db.get(DocumentVersion, gd.current_version_id) if gd.current_version_id else None
             if dv is None or not dv.blob_path:
                 failed.append(f"{document_id}: no saved version to download")
+                continue
+            # Skipped and listed, not refused whole -- the same call the bulk
+            # delete above makes, for the same reason. A selection of forty where
+            # one is unapproved must not become nothing, or people learn to
+            # approve documents to make a button work. Select only unapproved
+            # ones and `written == 0` still raises NOTHING_TO_DOWNLOAD below,
+            # naming this reason: refusing the whole request, reached honestly.
+            if dv.status not in DOWNLOADABLE:
+                failed.append(
+                    f"{_download_filename(db, gd, body.format)}: not approved "
+                    f"(currently {dv.status}), so it was left out")
                 continue
             source = str(abs_path(dv.blob_path))
             if not os.path.exists(source):

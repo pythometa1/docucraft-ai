@@ -40,6 +40,9 @@ from app.models import (
     TemplateVersion, User, now, uid,
 )
 from app.ownership import owned_blueprint, owned_project, owned_template_file
+# The same approval the compile path makes, so a republished template goes
+# live rather than leaving the project on the manifest approved before the edit.
+from app.routers.manifests import try_auto_approve
 from app.security import error, get_current_user
 from app.storage import abs_path, save_bytes
 from app.templates import blueprint as bp
@@ -122,24 +125,185 @@ class FromTemplateRequest(BaseModel):
     progress_token: str | None = None
 
 
+def _blueprint_for_template(db: Session, *, org_id: str, template_file_id: str):
+    """The live blueprint already reading this template, if there is one.
+
+    `TemplateBlueprint.template_file_id` carries no unique constraint and nothing
+    queried by it, so `:from-template` minted a new blueprint -- and paid for a
+    fresh agentic compile -- on every call. Two clicks of an Edit button meant two
+    blueprints on one file, each able to emit onto it. Newest wins, because
+    duplicates can already exist from before this looked.
+    """
+    return db.scalars(
+        select(TemplateBlueprint)
+        .where(TemplateBlueprint.org_id == org_id,
+               TemplateBlueprint.template_file_id == template_file_id,
+               TemplateBlueprint.deleted_at.is_(None))
+        .order_by(TemplateBlueprint.updated_at.desc())
+    ).first()
+
+
+class _ManifestReading:
+    """A stored manifest in the shape `objects_from_compile` reads.
+
+    `lift.objects_from_compile` and `lift.mark_instructions` reach for `fields`,
+    `conditions`, `blocks` and `delete_always` by `getattr` and nothing else --
+    which is exactly what `TemplateManifest` stores. So a template that has
+    already been read can be opened for editing with no model call at all, and
+    `tests/test_blueprint_lift.py` has been passing a four-attribute stub for
+    precisely this reason since it was written.
+    """
+
+    def __init__(self, m: TemplateManifest):
+        self.fields = m.fields or []
+        self.conditions = m.conditions or []
+        self.blocks = m.blocks or []
+        self.delete_always = m.delete_always or []
+        self.compiled_by = m.compiled_by
+        self.confidence = m.confidence
+
+    def __bool__(self) -> bool:
+        return bool(self.fields or self.conditions)
+
+
+def _existing_reading(db: Session, template_file_id: str, org_id: str):
+    """The newest manifest that actually read something, or None.
+
+    "Actually read something" is the whole condition. A failed compile stores a
+    manifest with no fields and no conditions, and a blueprint built from one
+    could never be published: `_lint_current` turns every assertion fault into a
+    blocker, so each unclaimed placeholder would block, and the author would have
+    to hand-write the entire reading before the Publish button would work. Better
+    to spend the compile.
+    """
+    for m in db.scalars(
+        select(TemplateManifest)
+        .where(TemplateManifest.org_id == org_id,
+               TemplateManifest.template_file_id == template_file_id)
+        .order_by(TemplateManifest.version_no.desc())
+    ).all():
+        reading = _ManifestReading(m)
+        if reading:
+            return m, reading
+    return None, None
+
+
+def _blueprint_from_reading(db: Session, user: User, *, template_file, version, path: str,
+                            compiled, source: str, name: str | None = None,
+                            summary: str | None = None, blocking_note: str | None = None) -> dict:
+    """Place a reading onto the document and store it as a blueprint's first version.
+
+    Everything here is deterministic -- `read_body`, `objects_from_compile` and
+    `mark_instructions` make no model call -- which is what lets the same code
+    serve a fresh compile and a manifest that was compiled weeks ago.
+
+    `compiled` is anything carrying `fields` / `conditions` / `blocks` /
+    `delete_always`: a `CompiledManifest` from the compiler, or `_ManifestReading`
+    over a stored row.
+    """
+    document_body, read_notes = read_body(path)
+    objects, findings = objects_from_compile(document_body, compiled)
+    document_body, cleaned = mark_instructions(document_body, compiled)
+
+    findings = list(findings) + [
+        {"code": "content_not_modelled", "severity": "advisory", "detail": note,
+         "object_id": None, "paragraph_index": None}
+        for note in read_notes
+    ]
+    if blocking_note:
+        findings.append({
+            "code": "compile_did_not_converge", "severity": "blocking",
+            "detail": blocking_note, "object_id": None, "paragraph_index": None})
+
+    row = TemplateBlueprint(
+        org_id=user.org_id, project_id=template_file.project_id,
+        name=name or template_file.name, kind="legacy", status="draft",
+        source_template_version_id=version.id, template_file_id=template_file.id,
+        created_by=user.id,
+    )
+    db.add(row)
+    db.flush()
+
+    first = TemplateBlueprintVersion(
+        blueprint_id=row.id, org_id=row.org_id, version_no=1,
+        body=document_body, objects=objects, findings=findings,
+        provenance={
+            "kind": "legacy",
+            "source_template_version_id": version.id,
+            "compiled_by": getattr(compiled, "compiled_by", None),
+            "confidence": getattr(compiled, "confidence", None),
+            "instructions_cleaned": cleaned,
+            # Which of the three paths produced this, so a reader can tell a
+            # placement of an old reading from a fresh one without guessing.
+            "read_from": source,
+        },
+        created_by=user.id,
+        change_summary=summary or (
+            f"Read from {template_file.name}; {cleaned} author instruction(s) removed."),
+    )
+    db.add(first)
+    db.flush()
+    row.current_version_id = first.id
+
+    log_audit(db, user, "Created a template blueprint from an upload", "template_blueprint",
+              row.id, template_file.project_id, "info", template_file.name)
+    db.commit()
+    db.refresh(row)
+    db.refresh(first)
+    return {**_blueprint_out(row, first), "version": _version_out(first)}
+
+
 @router.post("/template-blueprints:from-template", status_code=201)
 def from_template(body: FromTemplateRequest, db: Session = Depends(get_db),
                   user: User = Depends(get_current_user)):
-    """Compile an uploaded template and hand back something editable.
+    """Hand back something editable for an uploaded template.
 
-    The compile is the model's one job here and it has already been built and
-    tested; what this adds is the placement, which is deterministic. If the
-    compile cannot run -- no key configured -- that is reported rather than
-    worked around, because a blueprint built from an empty reading would look
-    exactly like one built from a good reading of a template with nothing in it.
+    Three ways to get there, cheapest first, because the expensive one is very
+    expensive: a full agentic compile is one model call per chunk plus a
+    reconcile plus up to twelve review rounds, and §18 budgets it five minutes at
+    p95. Paying that to open an editor -- especially on a template whose compile
+    has *just failed*, where it may fail again the same way -- is not something a
+    button on a project page can do.
+
+      1. A blueprint already reading this template  ->  return it.
+      2. A manifest that already read it            ->  place it, no model call.
+      3. Nothing has read it yet                    ->  compile.
+
+    Step 2 is the one that makes this usable. The reading and the placement were
+    always separate jobs: the compile decides what the template means, and
+    `objects_from_compile` decides where those meanings sit in the document --
+    deterministically, from data the manifest already stores. Re-deriving the
+    meaning to redo the placement was only ever an accident of how this endpoint
+    was written first.
+
+    Step 3 still refuses rather than working around a missing model, because a
+    blueprint built from an empty reading looks exactly like one built from a
+    good reading of a template that asks for nothing.
     """
     template_file = owned_template_file(db, body.template_file_id, user)
+
+    existing = _blueprint_for_template(
+        db, org_id=user.org_id, template_file_id=template_file.id)
+    if existing is not None:
+        current = _current_version(db, existing)
+        if current is not None:
+            return {**_blueprint_out(existing, current), "version": _version_out(current)}
+
     version = db.get(TemplateVersion, template_file.current_version_id)
     if version is None:
         raise error("TEMPLATE_NOT_PARSED",
                     "This template has not been parsed yet, so there is nothing to read.", 409)
 
     path = str(abs_path(version.blob_path))
+
+    manifest_row, reading = _existing_reading(db, template_file.id, user.org_id)
+    if reading is not None:
+        return _blueprint_from_reading(
+            db, user, template_file=template_file, version=version, path=path,
+            compiled=reading, source=f"manifest:{manifest_row.id}",
+            summary=(f"Read from {template_file.name}, using the reading already compiled "
+                     f"for manifest v{manifest_row.version_no}."))
+
     progress = CompileProgress(body.progress_token, org_id=user.org_id,
                                project_id=template_file.project_id, user_id=user.id)
 
@@ -173,56 +337,17 @@ def from_template(body: FromTemplateRequest, db: Session = Depends(get_db),
             f"({outcome.reason or 'no reason recorded'}). The template is still uploaded; "
             "try again.", 502)
 
-    document_body, read_notes = read_body(path)
-    objects, findings = objects_from_compile(document_body, outcome.manifest)
-    document_body, cleaned = mark_instructions(document_body, outcome.manifest)
-
-    findings = list(findings) + [
-        {"code": "content_not_modelled", "severity": "advisory", "detail": note,
-         "object_id": None, "paragraph_index": None}
-        for note in read_notes
-    ]
+    unconverged = None
     if not outcome.ok:
         reason = outcome.reason or "no reason recorded"
-        findings.append({
-            "code": "compile_did_not_converge", "severity": "blocking",
-            "detail": (
-                f"The reading of this template did not settle ({reason}). What is here is the "
-                "best reading reached; check it before publishing."),
-            "object_id": None, "paragraph_index": None})
+        unconverged = (
+            f"The reading of this template did not settle ({reason}). What is here is the "
+            "best reading reached; check it before publishing.")
 
-    row = TemplateBlueprint(
-        org_id=user.org_id, project_id=template_file.project_id,
-        name=body.name or template_file.name, kind="legacy", status="draft",
-        source_template_version_id=version.id, template_file_id=template_file.id,
-        created_by=user.id,
-    )
-    db.add(row)
-    db.flush()
-
-    first = TemplateBlueprintVersion(
-        blueprint_id=row.id, org_id=row.org_id, version_no=1,
-        body=document_body, objects=objects, findings=findings,
-        provenance={
-            "kind": "legacy",
-            "source_template_version_id": version.id,
-            "compiled_by": outcome.manifest.compiled_by,
-            "confidence": outcome.manifest.confidence,
-            "instructions_cleaned": cleaned,
-        },
-        created_by=user.id,
-        change_summary=f"Read from {template_file.name}; {cleaned} author instruction(s) removed.",
-    )
-    db.add(first)
-    db.flush()
-    row.current_version_id = first.id
-
-    log_audit(db, user, "Created a template blueprint from an upload", "template_blueprint",
-              row.id, template_file.project_id, "info", template_file.name)
-    db.commit()
-    db.refresh(row)
-    db.refresh(first)
-    return {**_blueprint_out(row, first), "version": _version_out(first)}
+    return _blueprint_from_reading(
+        db, user, template_file=template_file, version=version, path=path,
+        compiled=outcome.manifest, source="compile", name=body.name,
+        summary=None, blocking_note=unconverged)
 
 
 @router.get("/template-blueprint-kits")
@@ -343,13 +468,17 @@ def from_library(request: FromLibraryRequest, db: Session = Depends(get_db),
 # ---- reading ----
 
 @router.get("/template-blueprints")
-def list_blueprints(project_id: str | None = None, db: Session = Depends(get_db),
-                    user: User = Depends(get_current_user)):
+def list_blueprints(project_id: str | None = None, template_file_id: str | None = None,
+                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     query = select(TemplateBlueprint).where(
         TemplateBlueprint.org_id == user.org_id, TemplateBlueprint.deleted_at.is_(None))
     if project_id:
         owned_project(db, project_id, user)
         query = query.where(TemplateBlueprint.project_id == project_id)
+    if template_file_id:
+        # So a caller holding a template can ask "is one of these already open?"
+        # without pulling the org's whole list and filtering client-side.
+        query = query.where(TemplateBlueprint.template_file_id == template_file_id)
     rows = db.scalars(query.order_by(TemplateBlueprint.updated_at.desc())).all()
     return {"items": [_blueprint_out(r, _current_version(db, r)) for r in rows]}
 
@@ -607,23 +736,71 @@ def download_blueprint(blueprint_id: str, db: Session = Depends(get_db),
 def delete_blueprint(blueprint_id: str, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
     row = owned_blueprint(db, blueprint_id, user)
-    published = db.scalars(
-        select(TemplateManifest.id).where(
-            TemplateManifest.org_id == user.org_id,
-            TemplateManifest.template_file_id == row.template_file_id,
-            TemplateManifest.status == "approved")
-    ).first()
+    # Guarded on the id being set, not just compared to it. Both sides are
+    # nullable, and SQLAlchemy renders `== None` as `IS NULL` -- so for a
+    # blueprint that has never been published this asked "does this org hold any
+    # approved manifest with no template file at all?", which is a real row shape
+    # (`template_file_id` is nullable and manifests are created that way) and has
+    # nothing to do with this blueprint. An unpublished draft could therefore be
+    # refused because of an unrelated manifest somewhere else in the org.
+    published = None
+    if row.template_file_id:
+        published = db.scalars(
+            select(TemplateManifest.id).where(
+                TemplateManifest.org_id == user.org_id,
+                TemplateManifest.template_file_id == row.template_file_id,
+                TemplateManifest.status == "approved")
+        ).first()
     if published:
         raise error(
             "BLUEPRINT_IN_USE",
             "An approved manifest was published from this template, and documents generated from "
-            "it name the version it came from. Archive it instead.", 409)
+            "it name the version it came from. Archive it instead, which takes it off the list "
+            "and leaves everything generated from it alone.",
+            409, {"archive_with": f"/template-blueprints/{row.id}:archive"})
 
     row.deleted_at = now()
     log_audit(db, user, "Deleted a template blueprint", "template_blueprint", row.id,
               row.project_id, "warning", row.name)
     db.commit()
     return {"status": "deleted"}
+
+
+@router.post("/template-blueprints/{blueprint_id}:archive")
+def archive_blueprint(blueprint_id: str, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """Take a published template off the list without pretending anything is gone.
+
+    `:delete` refuses a template something was published from, and has told the
+    reader to "archive it instead" since it was written -- while `status` carried
+    an `archived` value nothing ever set and no endpoint existed to reach it. So
+    the one route out of that refusal was a sentence describing a button that was
+    never built, which is worse than no advice at all.
+
+    It matters more now than it did. A compile approves its own manifest where it
+    may, so almost every template that has been read has an approved manifest and
+    lands on that refusal -- where before, with manifests mostly sitting in
+    `draft`, it was rare enough to go unnoticed.
+
+    Deliberately not a delete. The emitted template, its versions, the manifests
+    compiled from it and every document already generated all stay exactly as
+    they are, because letters that have gone out name the version they came from.
+    This hides the authoring draft, and says so.
+    """
+    row = owned_blueprint(db, blueprint_id, user)
+    if row.deleted_at is not None:
+        raise error("BLUEPRINT_NOT_FOUND", "This template has already been removed.", 404)
+
+    row.status = "archived"
+    # The same stamp `:delete` writes, because "off the list" is one behaviour
+    # and `list_blueprints` filters on exactly this. `status` is what records
+    # which of the two happened.
+    row.deleted_at = now()
+    row.updated_at = now()
+    log_audit(db, user, "Archived a template blueprint", "template_blueprint", row.id,
+              row.project_id, "warning", row.name)
+    db.commit()
+    return {"status": "archived"}
 
 
 # ---- the gate ----
@@ -659,6 +836,58 @@ class PublishRequest(BaseModel):
     #: same idiom as `POST /template-manifests/{id}/warnings:resolve`: a finding
     #: leaves the way by being answered, not by being ignored.
     dispositions: list[str] = []
+    #: Read the published document again with the compiler instead of carrying
+    #: the blueprint's own reading forward.
+    #:
+    #: The two are answering different questions. Ordinary publish trusts the
+    #: objects the blueprint holds -- fast, deterministic, no model call -- and
+    #: therefore cannot proceed while those objects fail to account for the
+    #: document, because the manifest it would write *is* those objects.
+    #:
+    #: But a blueprint's reading goes stale exactly when it is most useful. Edit
+    #: a template to repair a placeholder the compiler could not claim, and the
+    #: objects still do not claim it: the document is fixed and the reading is
+    #: not, so publish refuses on a template that is now correct. That is a real
+    #: dead end, and the way out is to stop carrying the old reading and let the
+    #: compiler read what was actually written.
+    recompile: bool = False
+
+
+def _recompile_published(db: Session, user: User, row: TemplateBlueprint, path: str):
+    """Read the document that is about to be published, with the compiler.
+
+    The same call the project's own Compile button makes, on the bytes this
+    publish is about to write. It exists because a blueprint's reading and its
+    document drift apart in exactly the case the editor is for: you open a
+    template to repair a placeholder the compiler could not claim, you repair it,
+    and the objects still do not claim it -- so the ordinary publish refuses a
+    template that is now correct.
+
+    Refusing here rather than half-publishing is deliberate: the caller runs this
+    before `emit_blueprint`, so a compile that cannot read the document leaves the
+    customer's template untouched instead of appending a version whose manifest
+    never arrived.
+    """
+    progress = CompileProgress(None, org_id=user.org_id,
+                               project_id=row.project_id, user_id=user.id)
+    try:
+        with timed(db, org_id=user.org_id, operation=AGENTIC_COMPILE):
+            outcome = compile_agentic_template(
+                path,
+                llm_policy=llm_policy_for(
+                    db, user.org_id, project_id=row.project_id, user_id=user.id,
+                    subject_type="template_blueprint", subject_id=row.id),
+                progress=progress)
+    except LLMNotConfiguredError:  # pragma: no cover - the compiler catches its own
+        raise error("LLM_NOT_CONFIGURED", NO_MODEL_MESSAGE, 503)
+
+    if outcome.manifest.compiled_by in ("llm_unavailable", "llm_failed"):
+        raise error(
+            "TEMPLATE_NOT_READ",
+            "The edited template was written, but the model did not return a usable reading of it "
+            f"({outcome.reason or 'no reason recorded'}). Nothing was published; try again, or "
+            "publish without re-reading.", 502)
+    return outcome
 
 
 @router.post("/template-blueprints/{blueprint_id}:publish", status_code=201)
@@ -675,46 +904,102 @@ def publish(blueprint_id: str, request: PublishRequest | None = None,
     before would fill the span to the left of every slot for the rest of its
     paragraph. Measuring again on the far side is the only version of this that
     is safe.
+
+    It is measured on a *copy*, though, and that part is new. `emit_blueprint`
+    commits, so writing the real version first meant a publish this function then
+    refused had already appended a `TemplateVersion` to the customer's template
+    and moved `current_version_id` onto it -- a rejected publish that silently
+    changed which file the project generates from. The bytes are deterministic
+    for a given body, so linting a throwaway copy answers exactly the same
+    question and leaves nothing behind when the answer is no.
     """
+    import tempfile
+    from pathlib import Path
+
     row = owned_blueprint(db, blueprint_id, user)
     version = _require_version(db, row)
     dispositions = (request.dispositions if request else []) or []
+    recompile = bool(request.recompile) if request else False
 
+    base_version = None
+    if row.source_template_version_id:
+        base_version = db.get(TemplateVersion, row.source_template_version_id)
+        if base_version is None:
+            raise error("TEMPLATE_NOT_FOUND", "The template this was read from is gone.", 404)
+
+    payload = _write_docx(version.body, base_version)
+
+    with tempfile.TemporaryDirectory() as workspace:
+        probe = str(Path(workspace) / "candidate.docx")
+        Path(probe).write_bytes(payload)
+
+        published_body, _notes = read_body(probe)
+        objects, reslot_findings = reslot_against(version.objects, published_body)
+
+        report = _lint_current(db, row, version, emitted_path=probe, objects=objects)
+        report.findings.extend(
+            LintFinding(f["code"], f["severity"], f["detail"], object_id=f.get("object_id"),
+                        paragraph_index=f.get("paragraph_index"))
+            for f in reslot_findings)
+
+        # The gate guards the manifest this is about to write *from these
+        # objects*. When the compiler is going to read the document again, the
+        # objects are not what ships, so gating on them would refuse a template
+        # that is now correct for a reading that is merely out of date.
+        if not recompile and not report.can_publish(dispositions):
+            raise error(
+                "BLUEPRINT_NOT_PUBLISHABLE",
+                "This template would not produce correct documents yet. "
+                + "; ".join(f.detail for f in report.blocking[:3]),
+                422, details={"lint": report.as_dict(), "can_recompile": True})
+
+        if recompile:
+            # Read it before anything is written, for the same reason the lint
+            # runs on a copy: a publish that cannot produce a manifest must leave
+            # the customer's template exactly as it was.
+            compiled = _recompile_published(db, user, row, probe)
+
+    # Only now is anything written. `emit_blueprint` re-derives the same bytes
+    # from the same body; `emit`'s own round-trip check asserts that on every
+    # call, which is what makes linting the copy equivalent to linting this.
     emitted = emit_blueprint(blueprint_id, db=db, user=user)
     emitted_version = db.get(TemplateVersion, emitted["template_version_id"])
-    path = str(abs_path(emitted_version.blob_path))
 
-    published_body, _notes = read_body(path)
-    objects, reslot_findings = reslot_against(version.objects, published_body)
-
-    report = _lint_current(db, row, version, emitted_path=path, objects=objects)
-    report.findings.extend(
-        LintFinding(f["code"], f["severity"], f["detail"], object_id=f.get("object_id"),
-                    paragraph_index=f.get("paragraph_index"))
-        for f in reslot_findings)
-
-    if not report.can_publish(dispositions):
-        raise error(
-            "BLUEPRINT_NOT_PUBLISHABLE",
-            "This template would not produce correct documents yet. "
-            + "; ".join(f.detail for f in report.blocking[:3]),
-            422, details={"lint": report.as_dict()})
-
-    envelope = ManifestEnvelope(
-        manifest_id=uid(), manifest_version=1, status="DRAFT", organization_id=row.org_id,
-        template_version_id=emitted_version.id, objects=objects)
-    columns = to_row_values(envelope, objects_column=True).columns
-    columns["version_no"] = 1 + max(db.scalars(
+    next_version_no = 1 + max(db.scalars(
         select(TemplateManifest.version_no).where(
             TemplateManifest.org_id == row.org_id,
             TemplateManifest.template_file_id == row.template_file_id)).all(), default=0)
 
-    manifest = TemplateManifest(
-        **columns, template_file_id=row.template_file_id,
-        delete_always=[], compiled_by=f"blueprint:{row.id}", confidence=1.0,
-        prescan_summary={"published_from_blueprint": row.id,
-                         "blueprint_version_no": version.version_no},
-        created_by=user.id)
+    if recompile:
+        # Straight from the compiler, exactly as the project's own Compile button
+        # would produce it -- same code, same shape, same confidence -- so the
+        # manifest that ships is a reading of the bytes that shipped.
+        manifest = TemplateManifest(
+            org_id=row.org_id, template_file_id=row.template_file_id,
+            template_version_id=emitted_version.id, version_no=next_version_no,
+            status="draft", fields=compiled.manifest.fields,
+            conditions=compiled.manifest.conditions, blocks=compiled.manifest.blocks,
+            delete_always=compiled.manifest.delete_always,
+            confidence=compiled.manifest.confidence,
+            compiled_by=compiled.manifest.compiled_by,
+            prescan_summary={**(compiled.manifest.prescan_summary or {}),
+                             "published_from_blueprint": row.id,
+                             "blueprint_version_no": version.version_no,
+                             "read_again_after_publish": True},
+            compile_transcript=compiled.transcript_dicts(),
+            created_by=user.id)
+    else:
+        envelope = ManifestEnvelope(
+            manifest_id=uid(), manifest_version=1, status="DRAFT", organization_id=row.org_id,
+            template_version_id=emitted_version.id, objects=objects)
+        columns = to_row_values(envelope, objects_column=True).columns
+        columns["version_no"] = next_version_no
+        manifest = TemplateManifest(
+            **columns, template_file_id=row.template_file_id,
+            delete_always=[], compiled_by=f"blueprint:{row.id}", confidence=1.0,
+            prescan_summary={"published_from_blueprint": row.id,
+                             "blueprint_version_no": version.version_no},
+            created_by=user.id)
     db.add(manifest)
     db.flush()
 
@@ -723,13 +1008,27 @@ def publish(blueprint_id: str, request: PublishRequest | None = None,
     row.status = "published"
     row.updated_at = now()
 
+    # The manifest above is written as a draft, and an unapproved manifest cannot
+    # generate anything -- so without this a republished template leaves the
+    # project still filling documents from the manifest approved *before* the edit.
+    # The edit would look applied and do nothing, which is the exact failure the
+    # editor's "this is still a draft" panel used to warn about. Approving it here
+    # is the same call the compile path makes, and declines in the same two cases.
+    template_file = db.get(TemplateFile, row.template_file_id) if row.template_file_id else None
+    approval_blocked_reason = try_auto_approve(db, user, manifest, template_file)
+
     log_audit(db, user, "Published a template from a blueprint", "template_blueprint", row.id,
               row.project_id, "info", f"manifest {manifest.id}")
+    if approval_blocked_reason is not None:
+        log_audit(db, user, "Published manifest left unapproved", "template_manifest", manifest.id,
+                  row.project_id, "warning", approval_blocked_reason[:200])
     db.commit()
     return {
         "blueprint_id": row.id,
         "template_version_id": emitted_version.id,
         "manifest_id": manifest.id,
+        "manifest_status": manifest.status,
+        "approval_blocked_reason": approval_blocked_reason,
         "lint": report.as_dict(),
     }
 

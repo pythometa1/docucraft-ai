@@ -5,6 +5,7 @@ literal engine for legacy colour-coded templates like the Hospira/Pfizer
 offer letter this was built and verified against.
 """
 
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -40,7 +41,7 @@ from app.generation.source_template import build_workbook, filename_for
 from app.compile_progress import DETERMINISTIC, EMBEDDING, MODEL, RETRIEVAL, CompileProgress
 from app.compiler.agentic_compiler import compile_template as compile_agentic_template
 from app.compiler.mapping_agent import _paragraph_texts
-from app.authz import APPROVE_MANIFEST, check_manifest_approval, require
+from app.authz import APPROVE_MANIFEST, check_manifest_approval, has_capability, require
 from app.compiler.confidence import Band
 from app.expressions.plain_english import annotate_conditions, strip_derived
 from app.manifests.validator import validate_manifest
@@ -55,6 +56,8 @@ from app.manifests.diff import diff_manifests
 from app.manifests.models import envelope_from_row, to_row_values
 from app.storage import abs_path, save_upload
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(tags=["template-manifests"])
 
 
@@ -64,6 +67,90 @@ def _validatable(m) -> dict:
         "fields": m.fields, "conditions": m.conditions, "blocks": m.blocks,
         "delete_always": m.delete_always, "status": m.status,
     }
+
+
+def _coverage_warnings(db: Session, m: TemplateManifest) -> list[dict]:
+    """Placeholders still in the template that this manifest does not account for.
+
+    Answering the question "why did I only find out after a batch?".
+
+    The compile loop already runs this check every round, and a placeholder it
+    cannot cover parks the compile as failed -- so in the ordinary case nothing
+    reaches here. What reaches here is the manifest compiled *before* the check
+    could see split placeholders, and any manifest edited by hand afterwards.
+    Those were approvable with no warning at all, and the first sign of trouble
+    was every row of a batch coming back "Leftover placeholder brackets".
+
+    Reported as a warning rather than a failure, and the distinction is
+    deliberate. `validate_manifest` already refuses to approve a manifest with an
+    undispositioned warning, so this is seen and must be answered -- but it is
+    answered by a person, who can record that a placeholder lives inside a block
+    their data always deletes. A hard blocker would be asserting something this
+    cannot prove without the source rows, and a false blocker is how people learn
+    to click past a gate.
+
+    Best effort: a template whose file has gone is not a reason to refuse to
+    render the validation screen.
+    """
+    from app.compiler.assertions import uncovered_placeholders
+    from app.templates.parsers.docx_prescan import prescan
+
+    tv = db.get(TemplateVersion, m.template_version_id) if m.template_version_id else None
+    if tv is None or not tv.blob_path:
+        return []
+    path = abs_path(tv.blob_path)
+    if not os.path.exists(str(path)):
+        return []
+    try:
+        scan = prescan(str(path))
+    except Exception:  # noqa: BLE001 - an unreadable template is its own problem
+        log.warning("could not pre-scan %s for coverage warnings", tv.blob_path, exc_info=True)
+        return []
+
+    faults, split = uncovered_placeholders(scan, _validatable(m))
+    return [
+        *[
+            {
+                "code": "uncovered_placeholder",
+                "paragraph_index": a.paragraph_index,
+                "message": (
+                    f"{a.detail} Until it is claimed, every document generated from this template "
+                    "fails its QA check with 'Leftover placeholder brackets'."
+                ),
+            }
+            for a in faults
+        ],
+        # The ones no compile round can fix. They matter more here than the
+        # claimable ones, because the reviewer is the only person who can act on
+        # them -- so they belong on the screen even though the loop ignores them.
+        *split,
+    ]
+
+
+def _all_warnings(db: Session, m: TemplateManifest) -> list[dict]:
+    """What the compile recorded, plus what is still true of the template now.
+
+    Both the validation screen and `:approve` call this, because a warning the
+    screen shows and the approval does not is a gate nobody can pass, and one the
+    approval enforces and the screen does not is a 409 out of nowhere.
+    """
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for w in [*(m.warnings or []), *_coverage_warnings(db, m)]:
+        # Deduplicated, and the compile's own record wins because it comes first.
+        #
+        # The two sources overlap by design: `collect_with_warnings` stores what
+        # the compile found, and `_coverage_warnings` re-derives it from the
+        # template so a manifest compiled before the check existed, or edited by
+        # hand afterwards, is still covered. Concatenating them showed every
+        # warning a template still has twice -- the reviewer saw "4 places" for
+        # two placeholders, listed as 15, 19, 15, 19.
+        key = (w.get("code"), w.get("paragraph_index"), w.get("evidence"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(w)
+    return out
 
 
 def _manifest_out(m: TemplateManifest) -> dict:
@@ -157,6 +244,146 @@ def _compile_evidence(db: Session, org_id: str, paragraph_texts: list[str]) -> l
         return []
 
 
+
+# ---------------------------------------------------------------- approval, shared
+
+def _approval_blockers(db: Session, user: User, m: TemplateManifest) -> tuple[str, str, dict] | None:
+    """Everything that must hold before a manifest may be approved, except the
+    four-eyes rule.
+
+    Split out of `:approve` because there are now two callers -- the endpoint,
+    and the compile that approves its own output when it is safe to. Written
+    twice they would drift, and the half that drifted would be the one nobody
+    calls by hand.
+
+    Returns an `error(...)`-ready `(code, message, details)`, or None when there
+    is nothing in the way. Four eyes is deliberately *not* checked here: it has a
+    side effect (it records the attempt as a first approval) that only makes
+    sense when a person pressed a button.
+    """
+    failures = validate_manifest(
+        # The whole stored shape, not three of its keys.
+        #
+        # `delete_always` was missing, and `orphaned_fields` -- the check whose
+        # entire job is "this field sits only in paragraphs the compile deletes"
+        # -- reads it. With the key absent it saw nothing deleted and could never
+        # fire, at the one moment it exists for. `status` was missing for the same
+        # reason and let a failed compile be approved.
+        _validatable(m),
+        warnings=_all_warnings(db, m), dispositions=m.warning_dispositions,
+    )
+    if failures:
+        return (
+            "MANIFEST_INVALID",
+            "This manifest cannot be approved until these are resolved: "
+            + "; ".join(f.detail for f in failures[:5])
+            + (f" (and {len(failures) - 5} more)" if len(failures) > 5 else ""),
+            {"failures": [f.as_dict() for f in failures]},
+        )
+
+    # §13's fourth band: "Block | < 0.50, or any veto | The manifest cannot be
+    # locked until a human resolves it." confidence.py computes the band and
+    # stamps it on every suggestion; until now nothing read it back, so the
+    # band that exists specifically to stop a lock stopped nothing. A blocked
+    # suggestion is resolved by a reviewer binding the object (which moves the
+    # row off `pending`), not by re-running the compiler.
+    blocked = db.scalars(
+        select(SuggestionLog).where(
+            SuggestionLog.org_id == user.org_id,
+            SuggestionLog.manifest_id == m.id,
+            SuggestionLog.band == Band.BLOCK.value,
+            SuggestionLog.reviewer_decision == "pending",
+        )
+    ).all()
+    if blocked:
+        names = sorted({row.object_id for row in blocked})
+        return (
+            "MANIFEST_HAS_BLOCKED_MAPPINGS",
+            "These mappings scored below the block threshold or hit a veto, and need a human "
+            "decision before this manifest can be approved: " + ", ".join(names[:5])
+            + (f" (and {len(names) - 5} more)" if len(names) > 5 else ""),
+            {"blocked_objects": names},
+        )
+
+    return None
+
+
+def _record_approval(db: Session, user: User, m: TemplateManifest) -> list[TemplateManifest]:
+    """Stamp the approval and retire whatever it replaces. Does not commit.
+
+    Assumes every check has already passed -- it is the write half of an approval,
+    not a decision about one.
+    """
+    # Exactly one approved manifest per template. Without this a template
+    # accumulated approved manifests and "which one does production run?" had no
+    # answer -- generation simply used whichever id the caller happened to hold.
+    superseded: list[TemplateManifest] = []
+    if m.template_file_id:
+        superseded = list(db.scalars(
+            select(TemplateManifest).where(
+                TemplateManifest.template_file_id == m.template_file_id,
+                TemplateManifest.status == "approved",
+                TemplateManifest.id != m.id,
+            )
+        ).all())
+        for previous in superseded:
+            previous.status = "superseded"
+
+    m.status = "approved"
+    m.approved_by = user.id
+    m.approved_at = datetime.now(timezone.utc)
+    m.approvals = [*(m.approvals or []), {"user_id": user.id, "at": m.approved_at.isoformat()}]
+    return superseded
+
+
+def try_auto_approve(
+    db: Session, user: User, m: TemplateManifest, template_file: TemplateFile | None,
+) -> str | None:
+    """Approve a freshly compiled manifest, when the person who compiled it may.
+
+    A compiled template that nobody has approved cannot generate anything
+    (`bindings.py` refuses it), and asking every user to press Approve on their
+    own compile was bookkeeping rather than a decision. So the compile approves
+    its own output -- but only where doing so does not walk through a control
+    that exists on purpose.
+
+    Two cases it must decline, and both are real:
+
+    **The caller cannot approve.** `compile-manifest` requires no capability at
+    all; `:approve` requires APPROVE_MANIFEST, and `mapper` is a role defined by
+    holding the first and not the second (see `authz.capabilities_of`). Approving
+    on their behalf would hand every mapper an approval right by way of an upload
+    button.
+
+    **The template is legally binding.** §16 asks for four eyes there, and
+    `check_manifest_approval` refuses when the compiler and the approver are the
+    same person -- which self-approval makes true by construction. There is no
+    version of "compile approves itself" that satisfies a rule whose whole
+    content is that two people must be involved.
+
+    Returns None when the manifest was approved, or a sentence for the caller to
+    show explaining why it was not. Does not commit; the caller does.
+    """
+    if not has_capability(user, APPROVE_MANIFEST):
+        return (
+            f"Your role ({user.role_key}) cannot approve a template manifest, so this one is "
+            "waiting for sign-off. Ask somebody who can approve it to do so before generating."
+        )
+
+    if template_file is not None and template_file.legally_binding:
+        return (
+            "This template is marked legally binding, so it needs two different people: whoever "
+            "compiled it cannot also approve it. Ask a second reviewer to sign it off."
+        )
+
+    blocker = _approval_blockers(db, user, m)
+    if blocker:
+        return blocker[1]
+
+    _record_approval(db, user, m)
+    return None
+
+
 @router.post("/templates/{template_file_id}/compile-manifest", status_code=201)
 def compile_manifest_endpoint(
     template_file_id: str,
@@ -241,6 +468,33 @@ def compile_manifest_endpoint(
     db.add(manifest)
     db.flush()
 
+    # Ask the finished manifest what it did *not* claim, and keep the answer.
+    #
+    # `_coverage_warnings` re-reads the template and reports every bracket token
+    # no field accounts for. Each one is a specific, already-known future: the
+    # fill engine leaves the literal text in place and QA blocks the document
+    # with "Leftover placeholder brackets". Three canary rows fail, the batch
+    # stops, and the reader finds out four steps and one spreadsheet later.
+    #
+    # It was computed on demand and stored nowhere, so the only screens that
+    # could see it were the ones that called the validation endpoint. Persisting
+    # it here means the fact is attached to the template from the moment it is
+    # read -- which is the moment somebody can still do something about it, and
+    # the only moment they are looking at the template rather than at a batch.
+    #
+    # Deduplicated against whatever the compiler already recorded, on the same
+    # key `_all_warnings` uses, so a warning both sources found is not shown
+    # twice.
+    try:
+        seen = {(w.get("code"), w.get("paragraph_index"), w.get("evidence"))
+                for w in (manifest.warnings or [])}
+        extra = [w for w in _coverage_warnings(db, manifest)
+                 if (w.get("code"), w.get("paragraph_index"), w.get("evidence")) not in seen]
+        if extra:
+            manifest.warnings = [*(manifest.warnings or []), *extra]
+    except Exception:  # noqa: BLE001 - the manifest is the deliverable, not the audit of it
+        log.warning("could not derive coverage warnings for %s", manifest.id, exc_info=True)
+
     # §10: "template field context and business meaning" is one of the things
     # the doc says to embed, and it is what makes the next template in the
     # estate bind itself -- `<Reporting To>` finding `New Manager Name` is §10's
@@ -257,6 +511,22 @@ def compile_manifest_endpoint(
     except Exception:  # noqa: BLE001 - the manifest is the deliverable, not the index
         pass
 
+    # Approve it here, if this person may. Nothing generates from an unapproved
+    # manifest, and a separate Approve button on your own compile was bookkeeping
+    # rather than a decision -- but `try_auto_approve` declines rather than walking
+    # through the capability check or the four-eyes rule, and says why. The reason
+    # travels back on the response so the screen can ask for the sign-off it needs
+    # instead of showing a mapping step that would refuse to generate.
+    approval_blocked_reason = None
+    if outcome.ok:
+        approval_blocked_reason = try_auto_approve(db, user, manifest, tf)
+        if approval_blocked_reason is None:
+            log_audit(db, user, "Approved template manifest (on compile)", "template_manifest",
+                      manifest.id, tf.project_id, "success", f"{tf.name} v{version_no}")
+        else:
+            log_audit(db, user, "Compiled manifest left unapproved", "template_manifest",
+                      manifest.id, tf.project_id, "warning", approval_blocked_reason[:200])
+
     log_audit(
         db, user, "Compiled template manifest", "template_manifest", manifest.id, tf.project_id,
         "success" if outcome.ok else "failure",
@@ -265,7 +535,7 @@ def compile_manifest_endpoint(
     db.commit()
     db.refresh(manifest)
     progress.finish()
-    return _manifest_out(manifest)
+    return {**_manifest_out(manifest), "approval_blocked_reason": approval_blocked_reason}
 
 
 @router.get("/template-manifests/{manifest_id}")
@@ -361,13 +631,17 @@ def manifest_validation(manifest_id: str, db: Session = Depends(get_db), user: U
         # fire, at the one moment it exists for. `status` was missing for the same
         # reason and let a failed compile be approved.
         _validatable(m),
-        warnings=m.warnings, dispositions=m.warning_dispositions,
+        warnings=_all_warnings(db, m), dispositions=m.warning_dispositions,
     )
     return {
         "manifest_id": m.id, "status": m.status,
         "can_approve": not failures and m.status != "approved",
         "failures": [f.as_dict() for f in failures],
-        "warnings": m.warnings,
+        # The merged set, not just the stored one. A warning that blocks approval
+        # but is absent from this list is a gate with no handle: the screen has
+        # nothing to render and nothing to disposition, and the reviewer sees
+        # only a failure telling them to resolve something they cannot find.
+        "warnings": _all_warnings(db, m),
         "warning_dispositions": m.warning_dispositions,
     }
 
@@ -406,61 +680,20 @@ def resolve_warning(manifest_id: str, body: WarningDisposition, db: Session = De
 @router.post("/template-manifests/{manifest_id}:approve")
 def approve_manifest(manifest_id: str, db: Session = Depends(get_db), user: User = Depends(require(APPROVE_MANIFEST))):
     m = owned_manifest(db, manifest_id, user)
+    template_file = db.get(TemplateFile, m.template_file_id) if m.template_file_id else None
 
     # Approval is the gate, so it is the place to check that what is being
     # approved can actually run. Setting the status and writing an audit line
     # about it is not a check.
-    failures = validate_manifest(
-        # The whole stored shape, not three of its keys.
-        #
-        # `delete_always` was missing, and `orphaned_fields` -- the check whose
-        # entire job is "this field sits only in paragraphs the compile deletes"
-        # -- reads it. With the key absent it saw nothing deleted and could never
-        # fire, at the one moment it exists for. `status` was missing for the same
-        # reason and let a failed compile be approved.
-        _validatable(m),
-        warnings=m.warnings, dispositions=m.warning_dispositions,
-    )
-    if failures:
-        raise error(
-            "MANIFEST_INVALID",
-            "This manifest cannot be approved until these are resolved: "
-            + "; ".join(f.detail for f in failures[:5])
-            + (f" (and {len(failures) - 5} more)" if len(failures) > 5 else ""),
-            409,
-            {"failures": [f.as_dict() for f in failures]},
-        )
-
-    # §13's fourth band: "Block | < 0.50, or any veto | The manifest cannot be
-    # locked until a human resolves it." confidence.py computes the band and
-    # stamps it on every suggestion; until now nothing read it back, so the
-    # band that exists specifically to stop a lock stopped nothing. A blocked
-    # suggestion is resolved by a reviewer binding the object (which moves the
-    # row off `pending`), not by re-running the compiler.
-    blocked = db.scalars(
-        select(SuggestionLog).where(
-            SuggestionLog.org_id == user.org_id,
-            SuggestionLog.manifest_id == m.id,
-            SuggestionLog.band == Band.BLOCK.value,
-            SuggestionLog.reviewer_decision == "pending",
-        )
-    ).all()
-    if blocked:
-        names = sorted({row.object_id for row in blocked})
-        raise error(
-            "MANIFEST_HAS_BLOCKED_MAPPINGS",
-            "These mappings scored below the block threshold or hit a veto, and need a human "
-            "decision before this manifest can be approved: " + ", ".join(names[:5])
-            + (f" (and {len(names) - 5} more)" if len(names) > 5 else ""),
-            409,
-            {"blocked_objects": names},
-        )
+    blocker = _approval_blockers(db, user, m)
+    if blocker:
+        code, message, details = blocker
+        raise error(code, message, 409, details)
 
     # §16 separation of duties. Only reaches past the capability check for a
     # template flagged legally binding, where the doc asks for four eyes: a
     # different person from whoever compiled it, and a second distinct approval
     # already on record.
-    template_file = db.get(TemplateFile, m.template_file_id) if m.template_file_id else None
     decision = check_manifest_approval(
         approver_id=user.id,
         compiled_by_id=m.created_by,
@@ -477,27 +710,9 @@ def approve_manifest(manifest_id: str, db: Session = Depends(get_db), user: User
         db.commit()
         raise error("FOUR_EYES_REQUIRED", decision.reason, 409)
 
-    # Exactly one approved manifest per template. Without this a template
-    # accumulated approved manifests and "which one does production run?" had no
-    # answer -- generation simply used whichever id the caller happened to hold.
-    superseded: list[TemplateManifest] = []
-    if m.template_file_id:
-        superseded = list(db.scalars(
-            select(TemplateManifest).where(
-                TemplateManifest.template_file_id == m.template_file_id,
-                TemplateManifest.status == "approved",
-                TemplateManifest.id != m.id,
-            )
-        ).all())
-        for previous in superseded:
-            previous.status = "superseded"
-
-    m.status = "approved"
-    m.approved_by = user.id
-    m.approved_at = datetime.now(timezone.utc)
-    m.approvals = [*(m.approvals or []), {"user_id": user.id, "at": m.approved_at.isoformat()}]
-    tf = template_file
-    log_audit(db, user, "Approved template manifest", "template_manifest", m.id, tf.project_id if tf else None, "success")
+    superseded = _record_approval(db, user, m)
+    log_audit(db, user, "Approved template manifest", "template_manifest", m.id,
+              template_file.project_id if template_file else None, "success")
     db.commit()
     return {"status": "approved", "superseded": [p.id for p in superseded]}
 
@@ -760,18 +975,36 @@ class GenerateFromManifestRequest(BaseModel):
 @router.post("/template-manifests/{manifest_id}/generate", status_code=201)
 def generate_from_manifest(manifest_id: str, body: GenerateFromManifestRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     m = owned_manifest(db, manifest_id, user)
-    # The batch path has always refused an unapproved manifest; this one did
-    # not, so the same manifest that could not run over a spreadsheet could
-    # still produce a real, stored, downloadable letter one record at a time.
-    # Production executes approved mappings only, by whichever door.
-    if m.status != "approved":
-        raise error(
-            "MANIFEST_NOT_APPROVED",
-            "Only an approved manifest can generate documents. Review and approve it first.",
-            409,
-        )
     tv = db.get(TemplateVersion, m.template_version_id)
     tf = db.get(TemplateFile, m.template_file_id) if m.template_file_id else None
+    # The same two checks the batch path makes, and for the same reason they have
+    # to stay in step: this endpoint produces a real, stored, downloadable letter
+    # one record at a time, so a rule enforced over a spreadsheet and not here is
+    # a rule with a door next to it. What they ask is "could the compiler read
+    # this template?", not "has somebody signed it" -- see `generate_batch` for
+    # why the second question stopped being a precondition for the first.
+    if m.status == "failed":
+        raise error(
+            "MANIFEST_NOT_READ",
+            "The compiler could not produce a usable reading of this template, so there is nothing "
+            "to fill from. Read the template again from its row on the Template stage.",
+            409,
+        )
+    if m.status in ("superseded", "deprecated"):
+        raise error(
+            "MANIFEST_RETIRED",
+            "This reading of the template has been replaced by a newer one, so generating from it "
+            "would produce documents from a version the project has moved off. Use the current "
+            "manifest for this template.",
+            409,
+        )
+    if tf is not None and tf.legally_binding and m.status != "approved":
+        raise error(
+            "MANIFEST_NOT_APPROVED",
+            "This template is marked legally binding, so it needs sign-off from two different "
+            "people before it can generate. Ask a reviewer to approve its manifest.",
+            409,
+        )
     project_id = body.project_id or (tf.project_id if tf else None)
     if not project_id:
         raise error("PROJECT_REQUIRED", "project_id is required when the manifest isn't tied to a project template", 400)

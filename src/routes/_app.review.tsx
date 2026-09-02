@@ -17,10 +17,19 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
-  CheckCircle2, ClipboardCheck, FileText, Loader2, MessageSquare, Pencil, ShieldAlert, X,
+  ArrowUpRight,
+  CheckCircle2,
+  ClipboardCheck,
+  FileText,
+  Loader2,
+  MessageSquare,
+  Pencil,
+  X,
 } from "lucide-react";
 import { api, type DocumentReview, type QueueItem, type ReviewComment, type ReviewTask } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { WORKFLOW_LABELS } from "@/lib/types";
+import type { WorkflowStatus } from "@/lib/types";
 import { StatusChip, ReasonDialog } from "@/components/review-bar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +37,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+import { FadeIn, Stagger, StaggerItem } from "@/components/motion";
 
 export const Route = createFileRoute("/_app/review")({
   head: () => ({
@@ -78,11 +88,34 @@ function ReviewQueue() {
     tasks: items.filter((i) => i.kind === "unit_task").length,
   }), [items]);
 
+  // The queue carries `project_id` but not the project's name, so it is joined
+  // here against the list the store already holds rather than widening the
+  // payload. A project the reader cannot see is named honestly rather than
+  // rendered as a blank heading.
+  const projects = useStore((s) => s.projects);
+  const loadProjects = useStore((s) => s.loadProjects);
+  useEffect(() => { void loadProjects().catch(() => {}); }, [loadProjects]);
+  const projectName = (id: string | null) => {
+    if (!id) return "Not tied to a project";
+    return projects.find((p) => p.id === id)?.name ?? "Another project";
+  };
+
+  const grouped = useMemo(() => {
+    const map = new Map<string | null, QueueItem[]>();
+    // Insertion order preserves the server's ranking, which is a judgement made
+    // once and centrally -- re-sorting here would quietly override it.
+    for (const item of items) {
+      const key = item.project_id ?? null;
+      map.set(key, [...(map.get(key) ?? []), item]);
+    }
+    return [...map.entries()];
+  }, [items]);
+
   return (
     <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
-      <div className="flex items-start justify-between flex-wrap gap-4">
+      <FadeIn className="flex items-start justify-between flex-wrap gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Review queue</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-gradient">Review queue</h1>
           <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
             Everything waiting for a person: documents somebody read and objected to, and values the
             engine stopped on rather than guessed. A wrong number in a regulated document is worse
@@ -106,9 +139,9 @@ function ReviewQueue() {
             </button>
           ))}
         </div>
-      </div>
+      </FadeIn>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <Stagger className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           ["Documents objected to", counts.reviews],
           ["Questions from the engine", counts.tasks],
@@ -117,15 +150,15 @@ function ReviewQueue() {
             ? `${Math.round((summary.resolved / (summary.open + summary.resolved)) * 100)}%`
             : "—"],
         ].map(([label, value]) => (
-          <div key={String(label)} className="rounded-xl border border-border bg-card p-4">
+          <StaggerItem key={String(label)} className="rounded-xl surface-raised p-4">
             <div className="text-xs text-muted-foreground uppercase tracking-wider">{label}</div>
             <div className="text-2xl font-semibold mt-1 tabular-nums">{value}</div>
-          </div>
+          </StaggerItem>
         ))}
-      </div>
+      </Stagger>
 
       <div className="grid lg:grid-cols-[380px_1fr] gap-5">
-        <div className="rounded-xl border border-border bg-card overflow-hidden flex flex-col max-h-[72vh]">
+        <div className="rounded-xl surface-raised overflow-hidden flex flex-col max-h-[72vh]">
           <div className="px-4 py-3 border-b border-border text-xs uppercase tracking-wider text-muted-foreground">
             {items.length} item{items.length === 1 ? "" : "s"}
           </div>
@@ -144,41 +177,77 @@ function ReviewQueue() {
                 </p>
               </div>
             )}
-            {items.map((item) => (
-              <button
-                key={`${item.kind}:${item.id}`}
-                onClick={() => setSelected(item)}
-                className={cn(
-                  "w-full text-left px-4 py-3 hover:bg-accent/40",
-                  selected?.kind === item.kind && selected?.id === item.id && "bg-accent/60",
-                )}
-              >
-                <div className="flex items-center gap-2 mb-1 flex-wrap">
-                  {item.kind === "document_review" ? (
-                    <Badge variant="outline" className="text-[10px] text-purple border-purple/40 bg-purple/10">
-                      <MessageSquare className="h-3 w-3 mr-1" /> document
-                    </Badge>
-                  ) : (
-                    <Badge variant="outline" className={cn("text-[10px]", KIND_TONE[item.task_kind ?? ""])}>
-                      {item.task_kind}
-                    </Badge>
-                  )}
-                  {/* The document's own state, so a blocked letter does not look
-                      identical to a clean one in the list. */}
-                  {item.document_status && item.document_status !== "draft" && (
-                    <StatusChip status={item.document_status} className="text-[10px] px-2 py-0" />
-                  )}
-                  {item.unit_id && (
-                    <code className="text-[11px] font-mono text-muted-foreground truncate">{item.unit_id}</code>
-                  )}
+            {/* Grouped by project. The queue is one flat list across the whole
+                workspace, and an inbox of forty items from six projects is one a
+                reader has to sort in their head before they can start. The
+                project name is joined here rather than added to the payload --
+                the queue already carries `project_id`, and the store already has
+                the names. */}
+            {grouped.map(([projectId, group]) => (
+              <div key={projectId ?? "none"}>
+                <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-1.5 backdrop-blur">
+                  <span className="truncate text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    {projectName(projectId)}
+                  </span>
+                  <span className="text-[11px] tabular-nums text-muted-foreground">{group.length}</span>
                 </div>
-                <div className="text-sm line-clamp-2">{item.title}</div>
-                {item.requested_by_name && (
-                  <div className="text-[11px] text-muted-foreground mt-1">
-                    Raised by {item.requested_by_name}
-                  </div>
-                )}
-              </button>
+                {group.map((item) => (
+                  <button
+                    key={`${item.kind}:${item.id}`}
+                    onClick={() => setSelected(item)}
+                    className={cn(
+                      "w-full border-b border-border px-4 py-3 text-left hover:bg-accent/40",
+                      selected?.kind === item.kind && selected?.id === item.id && "bg-accent/60",
+                    )}
+                  >
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      {item.kind === "document_review" ? (
+                        <Badge variant="outline" className="text-[10px] text-purple border-purple/40 bg-purple/10">
+                          <MessageSquare className="h-3 w-3 mr-1" /> document
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className={cn("text-[10px]", KIND_TONE[item.task_kind ?? ""])}>
+                          {item.task_kind}
+                        </Badge>
+                      )}
+                      {/* The document's own state, so a blocked letter does not look
+                          identical to a clean one in the list. */}
+                      {item.document_status && item.document_status !== "draft" && (
+                        <StatusChip status={item.document_status} className="text-[10px] px-2 py-0" />
+                      )}
+                      {/* And where its owner has put it, which is the other axis.
+                          A letter somebody has already cancelled is a different
+                          thing to pick up from one still being worked on, and
+                          without this the queue cannot tell them apart. */}
+                      {item.workflow_status && item.workflow_status !== "work_in_progress" && (
+                        <span className="rounded-full border border-border px-1.5 py-0 text-[10px] text-muted-foreground">
+                          {WORKFLOW_LABELS[item.workflow_status as WorkflowStatus] ?? item.workflow_status}
+                        </span>
+                      )}
+                      {item.unit_id && (
+                        <code className="text-[11px] font-mono text-muted-foreground truncate">{item.unit_id}</code>
+                      )}
+                    </div>
+                    <div className="text-sm line-clamp-2">{item.title}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+                      {item.requested_by_name && <span>Raised by {item.requested_by_name}</span>}
+                      {/* Straight to the document, from the row. Reviewing means
+                          reading the thing being objected to, and making that a
+                          navigation puzzle is how objections stop being answered. */}
+                      {item.document_id && item.project_id && (
+                        <Link
+                          to="/projects/$id/edit/$docId"
+                          params={{ id: item.project_id, docId: item.document_id }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="inline-flex items-center gap-1 font-medium text-brand hover:underline"
+                        >
+                          Open the document <ArrowUpRight className="h-3 w-3" />
+                        </Link>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
             ))}
           </div>
         </div>
@@ -218,7 +287,7 @@ function ReviewDetail({ reviewId, onDone }: { reviewId: string; onDone: () => vo
 
   if (!review) {
     return (
-      <div className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground flex items-center gap-2">
+      <div className="rounded-xl surface-raised p-6 text-sm text-muted-foreground flex items-center gap-2">
         <Loader2 className="h-4 w-4 animate-spin" /> Loading…
       </div>
     );
@@ -251,7 +320,7 @@ function ReviewDetail({ reviewId, onDone }: { reviewId: string; onDone: () => vo
   };
 
   return (
-    <div className="rounded-xl border border-border bg-card p-6 space-y-5">
+    <div className="rounded-xl surface-raised p-6 space-y-5">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-2 flex-wrap">
@@ -466,7 +535,7 @@ function TaskDetailLoader({ taskId, onDone }: { taskId: string; onDone: () => vo
 
   if (error) {
     return (
-      <div className="rounded-xl border border-border bg-card p-6 text-sm space-y-2">
+      <div className="rounded-xl surface-raised p-6 text-sm space-y-2">
         <p className="text-destructive">{error}</p>
         <Button variant="outline" size="sm" onClick={() => void load()}>Try again</Button>
       </div>
@@ -474,7 +543,7 @@ function TaskDetailLoader({ taskId, onDone }: { taskId: string; onDone: () => vo
   }
   if (!task) {
     return (
-      <div className="rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground flex items-center gap-2">
+      <div className="rounded-xl surface-raised p-6 text-sm text-muted-foreground flex items-center gap-2">
         <Loader2 className="h-4 w-4 animate-spin" /> Loading…
       </div>
     );
@@ -527,7 +596,7 @@ function TaskDetail({ task, onDone }: { task: ReviewTask; onDone: () => void | P
   const context = task.context ?? {};
 
   return (
-    <div className="rounded-xl border border-border bg-card p-6 space-y-5">
+    <div className="rounded-xl surface-raised p-6 space-y-5">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <Badge variant="outline" className={cn("text-[10px] mb-2", KIND_TONE[task.kind])}>{task.kind}</Badge>

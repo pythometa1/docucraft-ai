@@ -98,14 +98,14 @@ function TeamPage() {
     <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
       <div className="flex items-start justify-between flex-wrap gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Team</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-gradient">Team</h1>
           <p className="text-sm text-muted-foreground mt-1">{members.length} member{members.length === 1 ? "" : "s"}.</p>
         </div>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {ROLES.map((r) => (
-          <div key={r.role} className="rounded-xl border border-border bg-card p-5">
+          <div key={r.role} className="rounded-xl surface-raised p-5">
             <div className="flex items-center gap-2">
               <Shield className="h-4 w-4 text-muted-foreground" />
               <span className="text-sm font-semibold">{r.role}</span>
@@ -116,7 +116,7 @@ function TeamPage() {
         ))}
       </div>
 
-      <div className="rounded-xl border border-border bg-card">
+      <div className="rounded-xl surface-raised">
         <div className="p-4 border-b border-border flex items-center gap-3">
           <Input
             placeholder="Search members by name, email, function…"

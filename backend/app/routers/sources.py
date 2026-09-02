@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -134,6 +135,64 @@ def preview_chunks(version_id: str, page: int = 1, page_size: int = 20, db: Sess
     stmt = select(SourceChunk).where(SourceChunk.source_version_id == version_id).order_by(SourceChunk.chunk_index)
     rows = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
     return {"items": [{"chunk_index": c.chunk_index, "element_type": c.element_type, "heading_path": c.heading_path, "text": c.text} for c in rows]}
+
+
+class BulkSourceDelete(BaseModel):
+    source_ids: list[str]
+
+
+MAX_BULK_SOURCES = 50
+
+
+@router.post("/sources:delete")
+def delete_sources(body: BulkSourceDelete, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """Remove several source uploads, and say what happened to each.
+
+    The same `deleted_at` stamp `DELETE /sources/{id}` applies, and it carries the
+    same known limitation: the stamp does not reach the chunks, the embeddings or
+    what the mapping memory learned from the columns. `retention.delete_source_file`
+    is the cascade that does, and it runs on the sweep. Selecting ten uploads
+    instead of one does not change that, and pretending otherwise here would be a
+    worse answer than the honest one -- see §17 of APPLICATION_FLOW.
+
+    Ownership is checked per source, for the reason every bulk endpoint here
+    checks it per item: a caller can put any id in a JSON array, and one that
+    trusts the array is how one tenant reaches another's.
+
+    **One commit for the whole request.** Unlike `documents:delete`, which unlinks
+    files from disk and so must commit per document, this is a timestamp on rows:
+    the request is atomic, and a failure leaves the workspace as it was.
+    """
+    from datetime import datetime, timezone
+
+    if not body.source_ids:
+        raise error("NO_SOURCES", "Select at least one source file to delete.", 422)
+    ids = list(dict.fromkeys(body.source_ids))
+    if len(ids) > MAX_BULK_SOURCES:
+        raise error(
+            "TOO_MANY_SOURCES",
+            f"{len(ids)} source files were selected; this endpoint removes at most "
+            f"{MAX_BULK_SOURCES} at a time.",
+            422,
+        )
+
+    stamped = datetime.now(timezone.utc)
+    deleted, refused = [], []
+    for source_id in ids:
+        sf = db.get(SourceFile, source_id)
+        if not sf or sf.org_id != user.org_id or sf.deleted_at is not None:
+            refused.append({"source_id": source_id, "code": "SOURCE_NOT_FOUND",
+                            "name": None, "reason": "This source file no longer exists."})
+            continue
+        sf.deleted_at = stamped
+        log_audit(db, user, "Deleted source file", "source_file", source_id,
+                  project_id=sf.project_id, severity="warning",
+                  target=f"{sf.name} (bulk of {len(ids)})")
+        deleted.append({"source_id": source_id, "name": sf.name})
+
+    db.commit()
+    return {"requested": len(ids), "deleted": deleted, "refused": refused}
 
 
 @router.delete("/sources/{source_id}")

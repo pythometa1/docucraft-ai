@@ -123,7 +123,7 @@ function Landing() {
           </div>
           <div className="grid md:grid-cols-3 gap-4">
             {FEATURES.map((f) => (
-              <div key={f.title} className="rounded-xl border border-border bg-surface p-6 hover:border-border-strong transition-colors">
+              <div key={f.title} className="rounded-xl surface-raised p-6 hover:border-border-strong transition-colors">
                 <div className="h-10 w-10 rounded-lg bg-brand/10 border border-brand/20 flex items-center justify-center mb-4">
                   <f.icon className="h-5 w-5 text-brand" />
                 </div>
@@ -141,7 +141,7 @@ function Landing() {
           <h2 className="text-3xl md:text-4xl font-bold tracking-tight mb-14">Built for every team</h2>
           <div className="grid md:grid-cols-3 gap-4">
             {USE_CASES.map((u) => (
-              <div key={u.title} className="rounded-xl border border-border bg-surface p-6">
+              <div key={u.title} className="rounded-xl surface-raised p-6">
                 <u.icon className="h-6 w-6 text-purple mb-4" />
                 <h3 className="font-semibold mb-2">{u.title}</h3>
                 <p className="text-sm text-muted-foreground">{u.desc}</p>
@@ -157,7 +157,7 @@ function Landing() {
           <h2 className="text-3xl md:text-4xl font-bold tracking-tight mb-14">How it works</h2>
           <div className="grid md:grid-cols-4 gap-4">
             {STEPS.map((s, i) => (
-              <div key={s.title} className="relative rounded-xl border border-border bg-surface p-6">
+              <div key={s.title} className="relative rounded-xl surface-raised p-6">
                 <div className="text-xs text-muted-foreground font-mono mb-3">Step {i + 1}</div>
                 <s.icon className="h-6 w-6 text-brand mb-3" />
                 <h3 className="font-semibold mb-2">{s.title}</h3>
@@ -230,7 +230,7 @@ function HeroIllustration() {
   return (
     <div className="relative aspect-square max-w-md ml-auto">
       <div className="absolute inset-0 rounded-3xl bg-gradient-to-br from-brand/20 via-purple/15 to-transparent blur-2xl" />
-      <div className="relative rounded-2xl border border-border bg-surface/70 backdrop-blur-md p-6 shadow-2xl">
+      <div className="relative rounded-2xl surface-raised/70 backdrop-blur-md p-6 shadow-2xl">
         <div className="flex items-center gap-2 mb-4">
           <div className="h-2 w-2 rounded-full bg-destructive/70" />
           <div className="h-2 w-2 rounded-full bg-warning/70" />

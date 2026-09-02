@@ -1021,3 +1021,283 @@ def test_a_review_on_a_superseded_version_does_not_move_the_document(app_client,
 
     assert app_client.delete(f"{API}/documents/{party['document_id']}",
                              headers=_auth(party["reviewer_token"])).status_code == 409
+
+
+# ---------------------------------------------------- deleting several at once
+#
+# Selecting forty letters and deleting them is one gesture on the screen and
+# forty independent deletions on the server. These are the rules that make the
+# difference safe: refusals are per document and come back as data, and a
+# document nobody may delete does not stop the ones they may.
+
+def _make_documents(party, count, *, status="draft", start=95500):
+    """`count` documents in the party's project, returning their ids."""
+    db = SessionLocal()
+    made = []
+    try:
+        for i in range(count):
+            doc = GeneratedDocument(
+                org_id=party["org_id"], project_id=party["project_id"],
+                display_id=start + i, language="en", status=status)
+            db.add(doc)
+            db.flush()
+            version = DocumentVersion(
+                document_id=doc.id, org_id=party["org_id"], version_no=1,
+                blob_path=None, status=status, created_by=party["author_id"])
+            db.add(version)
+            db.flush()
+            doc.current_version_id = version.id
+            made.append(doc.id)
+        db.commit()
+    finally:
+        db.close()
+    return made
+
+
+def _alive(document_ids):
+    db = SessionLocal()
+    try:
+        return {d.id for d in db.query(GeneratedDocument).filter(
+            GeneratedDocument.id.in_(document_ids)).all()}
+    finally:
+        db.close()
+
+
+def test_several_documents_go_in_one_request(app_client, party):
+    ids = _make_documents(party, 3)
+    response = app_client.post(f"{API}/documents:delete", json={"document_ids": ids},
+                               headers=_auth(party["reviewer_token"]))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["requested"] == 3
+    assert {d["document_id"] for d in body["deleted"]} == set(ids)
+    assert body["refused"] == []
+    assert _alive(ids) == set()
+
+
+def test_an_approved_document_is_refused_without_stopping_the_others(app_client, party):
+    """The rule that makes bulk delete usable.
+
+    Failing the whole request because one selected letter is signed means the
+    reviewer clears the checkbox and retries -- or revokes an approval to get the
+    button to work, which is the outcome the approval guard exists to prevent.
+    """
+    keep, *rest = _make_documents(party, 3, start=95600)
+    db = SessionLocal()
+    try:
+        db.get(GeneratedDocument, keep).status = "approved"
+        db.commit()
+    finally:
+        db.close()
+
+    body = app_client.post(f"{API}/documents:delete",
+                           json={"document_ids": [keep, *rest]},
+                           headers=_auth(party["reviewer_token"])).json()
+
+    assert {d["document_id"] for d in body["deleted"]} == set(rest)
+    assert [r["document_id"] for r in body["refused"]] == [keep]
+    assert body["refused"][0]["code"] == "DOCUMENT_APPROVED"
+    # Named, so the dialog can say which one was left and why.
+    assert body["refused"][0]["filename"]
+    assert "Withdraw the approval" in body["refused"][0]["reason"]
+    assert _alive([keep, *rest]) == {keep}
+
+
+def test_another_tenants_document_is_neither_deleted_nor_acknowledged(
+        app_client, party, two_orgs):
+    """Ownership is checked per document, not once for the list. A bulk endpoint
+    that trusts the array is how one tenant destroys another's letters."""
+    _token_a, _project_a, token_b, _project_b = two_orgs
+    ids = _make_documents(party, 2, start=95700)
+
+    body = app_client.post(f"{API}/documents:delete", json={"document_ids": ids},
+                           headers=_auth(token_b)).json()
+
+    assert body["deleted"] == []
+    # Indistinguishable from an id that never existed, which is what the tenancy
+    # rule wants -- a cross-tenant probe learns nothing.
+    assert {r["code"] for r in body["refused"]} == {"DOCUMENT_NOT_FOUND"}
+    assert _alive(ids) == set(ids)
+
+
+def test_an_id_that_is_not_a_document_is_reported_rather_than_raising(app_client, party):
+    ids = _make_documents(party, 1, start=95800)
+    body = app_client.post(f"{API}/documents:delete",
+                           json={"document_ids": [*ids, "no-such-document"]},
+                           headers=_auth(party["reviewer_token"])).json()
+    assert [d["document_id"] for d in body["deleted"]] == ids
+    assert [r["document_id"] for r in body["refused"]] == ["no-such-document"]
+
+
+def test_the_same_document_twice_is_deleted_once(app_client, party):
+    """Otherwise the second pass reports "no longer exists" for a document the
+    caller selected once, which reads as a failure."""
+    ids = _make_documents(party, 1, start=95900)
+    body = app_client.post(f"{API}/documents:delete",
+                           json={"document_ids": ids + ids},
+                           headers=_auth(party["reviewer_token"])).json()
+    assert body["requested"] == 1
+    assert len(body["deleted"]) == 1 and body["refused"] == []
+
+
+def test_an_empty_selection_is_refused(app_client, party):
+    response = app_client.post(f"{API}/documents:delete", json={"document_ids": []},
+                               headers=_auth(party["reviewer_token"]))
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["code"] == "NO_DOCUMENTS"
+
+
+def test_too_many_at_once_is_refused_before_anything_is_destroyed(app_client, party):
+    ids = _make_documents(party, 2, start=96100)
+    response = app_client.post(
+        f"{API}/documents:delete",
+        json={"document_ids": ids + [f"pad-{i}" for i in range(200)]},
+        headers=_auth(party["reviewer_token"]))
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["code"] == "TOO_MANY_DOCUMENTS"
+    assert _alive(ids) == set(ids), "the cap must be checked before any deletion runs"
+
+
+def test_every_deletion_is_in_the_audit_record_individually(app_client, party):
+    """One row per document, the same as the single-document endpoint writes.
+    A bulk gesture must not become a single line that hides what it destroyed."""
+    from app.models import AuditLog
+
+    ids = _make_documents(party, 3, start=96200)
+    app_client.post(f"{API}/documents:delete", json={"document_ids": ids},
+                    headers=_auth(party["reviewer_token"]))
+
+    db = SessionLocal()
+    try:
+        rows = db.query(AuditLog).filter(
+            AuditLog.entity_id.in_(ids),
+            AuditLog.event == "Deleted generated document").all()
+        assert len(rows) == 3
+        assert all("bulk of 3" in (r.target or "") for r in rows)
+    finally:
+        db.close()
+
+
+def test_the_cascade_is_the_same_one_a_single_delete_runs(app_client, party):
+    """Versions, reviews, comments and parked questions all go -- the bulk path
+    calls `delete_generated_document`, it does not reimplement it."""
+    ids = _make_documents(party, 1, start=96300)
+    db = SessionLocal()
+    try:
+        doc = db.get(GeneratedDocument, ids[0])
+        review = DocumentReview(org_id=party["org_id"], document_id=doc.id,
+                                document_version_id=doc.current_version_id,
+                                state="open", reason="wrong", requested_by=party["author_id"],
+                                authored_by=party["author_id"])
+        db.add(review)
+        db.flush()
+        db.add(ReviewComment(org_id=party["org_id"], review_id=review.id,
+                             author_id=party["author_id"], body="here",
+                             quoted_text="GBP 48,000"))
+        db.add(ReviewTask(org_id=party["org_id"], project_id=party["project_id"],
+                          unit_id="u1", kind="calculation", question="?",
+                          context={"available": {"salary": "48000"}}, status="open",
+                          document_version_id=doc.current_version_id))
+        db.commit()
+        version_id = doc.current_version_id
+    finally:
+        db.close()
+
+    app_client.post(f"{API}/documents:delete", json={"document_ids": ids},
+                    headers=_auth(party["reviewer_token"]))
+
+    db = SessionLocal()
+    try:
+        assert db.query(DocumentVersion).filter(DocumentVersion.id == version_id).all() == []
+        assert db.query(DocumentReview).filter(
+            DocumentReview.document_version_id == version_id).all() == []
+        assert db.query(ReviewTask).filter(
+            ReviewTask.document_version_id == version_id).all() == []
+    finally:
+        db.close()
+
+
+def test_a_document_that_fails_mid_delete_is_not_reported_as_left_alone(
+        app_client, party, monkeypatch):
+    """It is neither deleted nor untouched, and saying either would be a claim
+    the customer acts on.
+
+    `delete_generated_document` unlinks the rendered files before its final
+    flush, so a failure after that point leaves rows the rollback restored and
+    files it cannot. The honest answer is its own outcome.
+    """
+    from app.routers import generation as gen
+
+    good, bad = _make_documents(party, 2, start=96400)
+    real = gen.delete_generated_document
+
+    def explode(db, *, org_id, document_id):
+        if document_id == bad:
+            raise OSError(f"[Errno 13] Permission denied: '/srv/documind/storage/{document_id}.docx'")
+        return real(db, org_id=org_id, document_id=document_id)
+
+    monkeypatch.setattr(gen, "delete_generated_document", explode)
+
+    body = app_client.post(f"{API}/documents:delete", json={"document_ids": [good, bad]},
+                           headers=_auth(party["reviewer_token"])).json()
+
+    # The healthy one still went: one bad document does not strand the rest.
+    assert [d["document_id"] for d in body["deleted"]] == [good]
+    assert _alive([good]) == set()
+
+    refusal = body["refused"][0]
+    assert refusal["document_id"] == bad
+    assert refusal["code"] == "DELETE_INCOMPLETE"
+    # Not "left alone" -- the file may be gone even though the row came back.
+    assert "may already be gone" in refusal["reason"]
+    # And the raw exception is not handed to the client: an OS error carries the
+    # absolute storage path, a SQLAlchemy one carries SQL.
+    assert "/srv/documind" not in refusal["reason"]
+    assert "Errno" not in refusal["reason"]
+
+    # Clean up the row the rollback restored.
+    db = SessionLocal()
+    try:
+        db.query(DocumentVersion).filter(DocumentVersion.document_id == bad).delete()
+        db.query(GeneratedDocument).filter(GeneratedDocument.id == bad).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_a_commit_failure_does_not_discard_the_report_of_what_was_destroyed(
+        app_client, party, monkeypatch):
+    """The audit row and the commit sit inside the per-document try.
+
+    They used to sit after it, so a commit failure escaped the loop as a 500 --
+    throwing away the response that was supposed to name everything already
+    destroyed, on the one path where that record matters most.
+    """
+    from app.routers import generation as gen
+
+    good, bad = _make_documents(party, 2, start=96500)
+    real = gen.log_audit
+
+    def explode(db, user, event, entity_type, entity_id=None, *a, **k):
+        if entity_id == bad:
+            raise RuntimeError("database is locked")
+        return real(db, user, event, entity_type, entity_id, *a, **k)
+
+    monkeypatch.setattr(gen, "log_audit", explode)
+
+    response = app_client.post(f"{API}/documents:delete",
+                               json={"document_ids": [good, bad]},
+                               headers=_auth(party["reviewer_token"]))
+
+    assert response.status_code == 200, "a failure on one document must not 500 the request"
+    body = response.json()
+    assert [d["document_id"] for d in body["deleted"]] == [good]
+    assert body["refused"][0]["document_id"] == bad
+
+    db = SessionLocal()
+    try:
+        db.query(DocumentVersion).filter(DocumentVersion.document_id == bad).delete()
+        db.query(GeneratedDocument).filter(GeneratedDocument.id == bad).delete()
+        db.commit()
+    finally:
+        db.close()

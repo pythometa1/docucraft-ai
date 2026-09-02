@@ -1,7 +1,16 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle, ArrowRight, Braces, FileText, GitBranch, Loader2, Plus, Search, Sparkles, Wand2,
+  AlertTriangle,
+  ArrowRight,
+  Braces,
+  FileText,
+  GitBranch,
+  Loader2,
+  Plus,
+  Search,
+  Sparkles,
+  Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -11,7 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BlueprintImportDialog } from "@/components/blueprint-import-dialog";
 import { BlueprintKitDialog } from "@/components/blueprint-kit-dialog";
-import { cn } from "@/lib/utils";
+import { FadeIn, Stagger, StaggerItem } from "@/components/motion";
 import type { Blueprint } from "@/lib/types";
 
 export const Route = createFileRoute("/_app/templates")({
@@ -58,9 +67,9 @@ function TemplatesPage() {
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-5 p-6 lg:p-8">
-      <div className="flex flex-wrap items-start justify-between gap-4">
+      <FadeIn className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Templates</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-gradient">Templates</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
             Put a legacy <code className="text-xs">.docx</code> in and it is pre-scanned and
             compiled: placeholders, author instructions and conditional sections are identified for
@@ -72,14 +81,15 @@ function TemplatesPage() {
           <Button variant="outline" onClick={() => setKitOpen(true)} className="gap-2">
             <Plus className="h-4 w-4" /> Start from scratch
           </Button>
-          <Button onClick={() => setImportOpen(true)} className="gap-2">
+          <Button onClick={() => setImportOpen(true)} className="gap-2 sheen">
+            <span aria-hidden className="sheen-layer" />
             <Wand2 className="h-4 w-4" /> Read a legacy template
           </Button>
         </div>
-      </div>
+      </FadeIn>
 
       {/* What the colours mean — the same three the pre-scanner classifies runs into. */}
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-border bg-card p-4 text-sm">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl surface-raised p-4 text-sm">
         <span className="mr-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
           How a template is read
         </span>
@@ -99,15 +109,15 @@ function TemplatesPage() {
       ) : list.length === 0 ? (
         <EmptyState onImport={() => setImportOpen(true)} filtered={q.length > 0} />
       ) : (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <Stagger className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {list.map((b) => (
+            <StaggerItem key={b.id}>
             <button
-              key={b.id}
               onClick={() => navigate({ to: "/templates/$blueprintId", params: { blueprintId: b.id } })}
-              className="rounded-xl border border-border bg-card p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/40"
+              className="group h-full w-full rounded-xl surface-raised p-4 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/50 hover:glow-soft"
             >
               <div className="flex items-start gap-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-purple-500/20">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/25 to-purple/25 transition-transform duration-200 group-hover:scale-105">
                   <FileText className="h-4 w-4 text-primary" />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -122,8 +132,9 @@ function TemplatesPage() {
                 </div>
               </div>
             </button>
+            </StaggerItem>
           ))}
-        </div>
+        </Stagger>
       )}
 
       {legacy.length > 0 && (

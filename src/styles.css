@@ -289,3 +289,129 @@
     radial-gradient(circle at 85% 30%, oklch(0.72 0.2 300 / 0.16), transparent 50%),
     radial-gradient(circle at 50% 90%, oklch(0.72 0.18 340 / 0.14), transparent 55%);
 }
+
+/* ---------------------------------------------------------------------------
+   The surface vocabulary.
+
+   Every panel in this app was the same string typed out again --
+   `rounded-xl border border-border bg-surface` -- across roughly ten thousand
+   lines of route markup, which is why the product had no way to change how a
+   panel looks. These are that string, named, plus the depth it never had.
+
+   Defined for both themes rather than derived from one. The dark values are
+   built for a near-black ground where a hairline highlight along the top edge is
+   what reads as "raised"; on white that same highlight is invisible and a soft
+   shadow is what does the work, so the light values are chosen against the light
+   surface rather than being the dark ones lightened.
+   --------------------------------------------------------------------------- */
+
+/* Deliberately sets no `border-radius`. Every caller already carries its own
+   `rounded-*`, and baking one in here would have this utility silently restyle
+   the geometry of a hundred panels the moment it was swapped in. */
+@utility surface-raised {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  box-shadow:
+    0 1px 2px oklch(0 0 0 / 0.28),
+    0 8px 24px -12px oklch(0 0 0 / 0.45);
+}
+
+.light .surface-raised {
+  box-shadow:
+    0 1px 2px oklch(0.2 0.02 270 / 0.06),
+    0 8px 24px -14px oklch(0.2 0.02 270 / 0.14);
+}
+
+/* The translucent one, for anything that floats over content: headers, the
+   command palette, a sheet. `backdrop-filter` is what makes it read as glass
+   rather than as a flat tint, and the top-edge highlight is what stops it
+   reading as a hole. */
+@utility surface-glass {
+  background-color: color-mix(in oklab, var(--color-surface) 72%, transparent);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid color-mix(in oklab, var(--color-border-strong) 70%, transparent);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.06),
+    0 16px 40px -20px oklch(0 0 0 / 0.55);
+}
+
+.light .surface-glass {
+  background-color: color-mix(in oklab, var(--color-surface) 82%, transparent);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.9),
+    0 16px 40px -24px oklch(0.2 0.02 270 / 0.18);
+}
+
+/* The halo on something active or focused. Two shadows rather than a border, so
+   applying it never moves the element by a pixel. */
+@utility glow-brand {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--color-brand) 55%, transparent),
+    0 0 24px -4px color-mix(in oklab, var(--color-brand) 45%, transparent);
+}
+
+@utility glow-soft {
+  box-shadow: 0 0 32px -12px color-mix(in oklab, var(--color-brand) 60%, transparent);
+}
+
+/* A very low-alpha grid over the page ground. At these alphas it is not a
+   pattern anybody looks at -- it is what stops a large flat area reading as
+   empty. Sized in rem so it does not crawl when the user zooms. */
+@utility grid-noise {
+  background-image:
+    linear-gradient(color-mix(in oklab, var(--color-border) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in oklab, var(--color-border) 55%, transparent) 1px, transparent 1px);
+  background-size: 3rem 3rem;
+  background-position: -1px -1px;
+}
+
+/* A slow highlight travelling across a primary action. Deliberately long and
+   low-contrast: it should register as the surface catching the light, not as
+   something demanding to be clicked.
+
+   `prefers-reduced-motion` is honoured below, where it matters most -- a sweep
+   that never stops is exactly the kind of thing that setting exists for. */
+@utility sheen {
+  position: relative;
+  overflow: hidden;
+}
+
+@utility sheen-layer {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 35%,
+    oklch(1 0 0 / 0.16) 50%,
+    transparent 65%
+  );
+  transform: translateX(-100%);
+  animation: dm-sheen 5.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes dm-sheen {
+  0%, 55% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheen-layer {
+    animation: none;
+    opacity: 0;
+  }
+
+  /* Everything else too. The app uses framer-motion for stage and list
+     transitions; this is the belt to its braces, and covers the CSS animations
+     `tw-animate-css` brings with the Radix components. */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -70,6 +70,3 @@ def field_on_missing(field: dict) -> str:
     return BLOCK if field.get("required") else BLANK
 
 
-def is_missing(value) -> bool:
-    """Whether a resolved value counts as missing. `""` deliberately does not."""
-    return value is None

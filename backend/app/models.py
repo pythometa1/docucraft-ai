@@ -297,6 +297,19 @@ class GeneratedDocument(Base):
     language: Mapped[str] = mapped_column(String, default="en")
     current_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="draft")
+    #: Where a person says this document is in *their* process, as opposed to
+    #: what the engine and the reviewers say about it.
+    #:
+    #: Only `work_in_progress`, `completed` and `cancelled` are ever stored --
+    #: they are the three a person can assert. `approved` and `blocked` are facts
+    #: about the document that this column must not be able to claim: `approved`
+    #: is a signature (the approve endpoint writes `status`, `approved_by`,
+    #: `approved_at` and an audit row), and `blocked` is the fill engine's QA
+    #: verdict. Both are layered over this on read by
+    #: `generation.workflow_status.effective`, so the two columns cannot
+    #: disagree: each has exactly one writer, and neither derives from the other.
+    workflow_status: Mapped[str] = mapped_column(
+        String, default="work_in_progress", server_default="work_in_progress")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 

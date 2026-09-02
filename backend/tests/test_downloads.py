@@ -25,7 +25,15 @@ def _auth(token):
 
 @pytest.fixture()
 def a_document(app_client, two_orgs):
-    """A stored document version with a real file behind it."""
+    """A stored, approved document version with a real file behind it.
+
+    Approved because downloading now requires it: an unapproved letter leaving
+    the building is what approval exists to prevent, so every egress path refuses
+    one. These tests are about the grant mechanism -- minting, burning, tenancy,
+    audit -- and an unapproved fixture would make every one of them fail on a
+    rule they are not testing. `an_unapproved_document` below is the fixture for
+    the rule itself.
+    """
     _token_a, project_a, *_ = two_orgs
     db = SessionLocal()
     try:
@@ -38,6 +46,38 @@ def a_document(app_client, two_orgs):
 
         doc = GeneratedDocument(
             org_id=project.org_id, project_id=project.id, display_id=71001, language="en",
+        )
+        db.add(doc)
+        db.flush()
+        version = DocumentVersion(
+            document_id=doc.id, org_id=doc.org_id, version_no=1, blob_path=rel,
+            status="approved", created_by=user.id,
+        )
+        db.add(version)
+        db.flush()
+        doc.current_version_id = version.id
+        doc.status = "approved"
+        db.commit()
+        return version.id, doc.org_id, user.id
+    finally:
+        db.close()
+
+
+@pytest.fixture()
+def an_unapproved_document(app_client, two_orgs):
+    """The same thing, unsigned. What the gate is for."""
+    _token_a, project_a, *_ = two_orgs
+    db = SessionLocal()
+    try:
+        project = db.get(Project, project_a)
+        user = db.scalar(select(User).where(User.org_id == project.org_id))
+
+        rel = f"generated/{project.id}/unapproved-download-test.docx"
+        os.makedirs(str(abs_path(rel).parent), exist_ok=True)
+        abs_path(rel).write_bytes(b"PK\x03\x04 not really a docx, but a real file")
+
+        doc = GeneratedDocument(
+            org_id=project.org_id, project_id=project.id, display_id=71002, language="en",
         )
         db.add(doc)
         db.flush()

@@ -156,7 +156,7 @@ flowchart TB
 
 | Component | Responsibility | Technology |
 |---|---|---|
-| Frontend | Project pipeline UI, Document Mapping, Template Studio, review inbox, document review, dashboard, analytics and quality | React 19, TanStack Start/Router, Tailwind CSS v4, Zustand, TipTap, Recharts |
+| Frontend | Project pipeline UI, Document Mapping, the template editor, review inbox, document review, dashboard, analytics and quality | React 19, TanStack Start/Router, Tailwind CSS v4, Zustand, TipTap, Recharts |
 | Core API | Auth, CRUD, validation, orchestration | FastAPI, SQLAlchemy 2.x, Alembic |
 | Database | System of record — every entity in the product, plus embeddings | PostgreSQL 17 + pgvector, row-level security |
 | Cache / rate limiting | Token-bucket rate limiting, JWT revocation on logout, short-lived download grants | Redis 7 |
@@ -225,9 +225,9 @@ erDiagram
 | | Template file (`template_files`) | Blueprint (`template_blueprints`) | ~~Template library~~ |
 |---|---|---|---|
 | Scope | One project | One project | Org-wide |
-| Authored in | Microsoft Word (uploaded) | The Template Studio, or Word, or both | ~~DocuMind's token editor~~ |
+| Authored in | Microsoft Word (uploaded) | The template editor, or Word, or both | ~~DocuMind's token editor~~ |
 | Understood via | Heading tree / jinja variables / colour-run manifest | The same colour-run manifest — a blueprint emits a real `.docx` | ~~Inline coloured tokens~~ |
-| Used by | Document Mapping and Template Studio, via a compiled manifest | Publishes *into* the left-hand column: a template version and its manifest | ~~The Templates page~~ |
+| Used by | Document Mapping, via a compiled manifest | Publishes *into* the left-hand column: a template version and its manifest | ~~The Templates page~~ |
 
 The third column is **retired**. Its editor produced HTML with `<span data-token>`
 markers, and the fill engine works on OOXML runs addressed by position — so a
@@ -279,10 +279,10 @@ TemplateAI/
 ├── docker-compose.yml            # pgvector/pg17 + redis + migrate(owner role) + api(app role)
 ├── src/                          # Frontend (React + TanStack Start)
 │   ├── routes/                   # File-based routes: login, dashboard, project pipeline,
-│   │                             #   template studio, document editor, templates, review,
+│   │                             #   template editor, document editor, templates, review,
 │   │                             #   chat, analytics, team, audit log, settings
 │   ├── components/
-│   │   ├── document-mapping.tsx  #   THE PRIMARY WORKFLOW: compile -> approve -> map -> generate
+│   │   ├── document-mapping.tsx  #   THE PRIMARY WORKFLOW: map columns -> generate
 │   │   ├── app-shell.tsx, create-project-sheet.tsx
 │   │   ├── template-editor.tsx   #   token UI for natively-authored templates
 │   │   └── template-conversion-wizard.tsx, status-badge.tsx, ui/
@@ -418,10 +418,10 @@ Then, on one project:
 
 1. **Stage 1 — Template.** Upload a `.docx`. A legacy colour-coded template (blue placeholder runs, red instructions, `MERGEFIELD` codes) is the case this was built for.
 2. **Stage 2 — Sources.** Upload the `.csv`/`.xlsx` whose rows will become documents.
-3. **Stage 3 — Document Mapping.** Compile → review the conditions in plain English and approve → map fields to columns → generate. This is the whole product; the four steps are one screen.
-4. **Stage 4 — Documents.** Download individually, or take the whole batch as a ZIP from step 4.
+3. **Stage 3 — Document Mapping.** Map fields to columns, then generate. Two steps, because the template was already read at upload and generating from it does not wait on a signature. Anything the compiler was unsure about is listed beside the Generate button as advice — those are the places a document is most likely to come back with a QA failure — rather than as a gate in front of it.
+4. **Stage 4 — Documents.** Where the batch's progress and its failures are shown, and where each letter is worked through a lane — work in progress, completed, approved, blocked, cancelled. **Only an approved document can be downloaded**, individually or as a ZIP.
 
-Steps 1 and 3 also have a full-screen per-template equivalent, **Template Studio**, reached from "Open in Studio" on a template row — same four steps, plus a preview of the template as the compiler saw it.
+There is no separate Template Studio. There was, reached from "Open in Studio" on a template row, and it offered the same compile/review/bind/generate steps a second time — two screens with the same name doing overlapping jobs. Templates are read at upload; the words of a template are edited in the template editor at `/templates/$blueprintId`.
 
 ### 11.5 Language models
 
@@ -468,7 +468,7 @@ There is no offline stub. Without a usable key those endpoints answer `503 LLM_N
 
 ## 13. Current Status & Roadmap
 
-**Working today**: the full frontend — sign-in, dashboard, the four-stage project pipeline with **Document Mapping** as its centre, Template Studio, the document editor, a unified review inbox (documents somebody objected to alongside the values the engine parked), chat, analytics with real token and USD figures, a quality screen carrying §22's metrics and §18's timing targets, team and audit log — wired to a real backend running on PostgreSQL 17 + pgvector and Redis, with row-level security enforced by a non-bypassing application role. The deterministic compile → approve → bind → generate path is complete end to end, including plain-English condition review, confidence-banded binding suggestions, batch generation with a canary gate, and QA gates that block a document rather than shipping one with a placeholder still in it.
+**Working today**: the full frontend — sign-in, dashboard, the four-stage project pipeline with **Document Mapping** as its centre, the template editor, the document editor, a unified review inbox (documents somebody objected to alongside the values the engine parked), chat, analytics with real token and USD figures, a quality screen carrying §22's metrics and §18's timing targets, team and audit log — wired to a real backend running on PostgreSQL 17 + pgvector and Redis, with row-level security enforced by a non-bypassing application role. The deterministic read → bind → generate path is complete end to end — a template is compiled when it is uploaded, and generating from it needs no approval step: what the engine checks is that the reading is usable and current, not that somebody signed it. The one exception is a template flagged legally binding, where §16's four-eyes rule still applies. Also complete: plain-English condition review, confidence-banded binding suggestions, batch generation with a canary gate, and QA gates that block a document rather than shipping one with a placeholder still in it.
 
 **Removed, deliberately**: the earlier "draft + mapping wizard" pipeline and the section-mapping RAG generator behind it. It had no manifest, so it filled nothing, and it stood in front of the path that works. Every `/drafts/…` endpoint went with it.
 

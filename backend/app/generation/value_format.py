@@ -18,7 +18,7 @@ not.
 from datetime import date, datetime
 
 from babel import Locale, UnknownLocaleError
-from babel.dates import format_date
+from babel.dates import format_date, format_time
 from babel.numbers import format_currency, format_decimal, format_percent
 
 from app.expressions.token_parser import _as_number
@@ -129,11 +129,43 @@ def format_value(value, field: dict | None = None, locale: str = DEFAULT_LOCALE)
             return _format_number(value, field, locale)
         if field_type == "date":
             return _format_date(value, field, locale)
+        # A date is a date whatever the manifest called the field.
+        #
+        # The branch above only runs when the *compiler* typed the field as a
+        # date, and it frequently does not -- a column it read as a string still
+        # arrives here as a `datetime`, because openpyxl returns real datetimes
+        # for date-formatted cells. The fallthrough was `str(value)`, which for a
+        # midnight datetime renders "2026-09-01 00:00:00" into the letter:
+        #
+        #   变动将于2026-09-01 00:00:00生效
+        #
+        # Nobody writes a date that way in a document, and the field's declared
+        # type is the compiler's opinion while the value's type is a fact. So the
+        # fact decides.
+        if isinstance(value, (date, datetime)):
+            return _format_datetime_like(value, field, locale)
     except Exception:
         # Never let a formatting edge case break a generation.
         return str(value)
 
     return str(value)
+
+
+def _format_datetime_like(value, field: dict, locale: str) -> str:
+    """A date or datetime on a field nobody typed as a date.
+
+    A midnight datetime is a date that happens to be carried in a datetime --
+    every date-formatted spreadsheet cell is one -- so it renders as a date.
+
+    A datetime with an actual time on it is not, and silently dropping the time
+    would be inventing a fact rather than formatting one. Those keep their time,
+    written in the locale's own short form rather than as an ISO timestamp with
+    seconds. A template that genuinely wants a timestamp still gets one; what it
+    no longer gets is `00:00:00`.
+    """
+    if isinstance(value, datetime) and (value.hour or value.minute or value.second or value.microsecond):
+        return f"{_format_date(value.date(), field, locale)} {format_time(value, format='short', locale=locale)}"
+    return _format_date(value, field, locale)
 
 
 def _grouping_pattern(locale: str, decimals: int) -> str:

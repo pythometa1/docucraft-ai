@@ -180,6 +180,7 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/template-blueprints/{blueprint_id}/lint"},
     {"method": "GET", "path": "/template-blueprints/{blueprint_id}/docx"},
     {"method": "POST", "path": "/template-blueprints/{blueprint_id}:publish", "body": {}},
+    {"method": "POST", "path": "/template-blueprints/{blueprint_id}:archive"},
     {"method": "POST", "path": "/template-blueprints/{blueprint_id}/copilot",
      "body": {"message": "rename the salary field"}},
     {"method": "POST", "path": "/template-blueprints/{blueprint_id}/operations",
@@ -194,6 +195,8 @@ ROUTES: list[dict] = [
 
     {"method": "GET", "path": "/documents/{document_id}"},
     {"method": "DELETE", "path": "/documents/{document_id}"},
+    {"method": "PATCH", "path": "/documents/{document_id}/workflow",
+     "body": {"workflow_status": "completed"}},
     {"method": "GET", "path": "/documents/{document_id}/versions"},
     {"method": "GET", "path": "/document-versions/{version_id}"},
     {"method": "GET", "path": "/document-versions/{version_id}/citations"},

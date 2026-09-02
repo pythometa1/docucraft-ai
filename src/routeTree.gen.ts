@@ -23,7 +23,6 @@ import { Route as AppAuditLogRouteImport } from './routes/_app.audit-log'
 import { Route as AppAnalyticsRouteImport } from './routes/_app.analytics'
 import { Route as AppTemplatesBlueprintIdRouteImport } from './routes/_app.templates_.$blueprintId'
 import { Route as AppProjectsIdRouteImport } from './routes/_app.projects.$id'
-import { Route as AppProjectsIdStudioTemplateIdRouteImport } from './routes/_app.projects.$id_.studio.$templateId'
 import { Route as AppProjectsIdEditDocIdRouteImport } from './routes/_app.projects.$id_.edit.$docId'
 
 const LoginRoute = LoginRouteImport.update({
@@ -95,12 +94,6 @@ const AppProjectsIdRoute = AppProjectsIdRouteImport.update({
   path: '/projects/$id',
   getParentRoute: () => AppRoute,
 } as any)
-const AppProjectsIdStudioTemplateIdRoute =
-  AppProjectsIdStudioTemplateIdRouteImport.update({
-    id: '/projects/$id_/studio/$templateId',
-    path: '/projects/$id/studio/$templateId',
-    getParentRoute: () => AppRoute,
-  } as any)
 const AppProjectsIdEditDocIdRoute = AppProjectsIdEditDocIdRouteImport.update({
   id: '/projects/$id_/edit/$docId',
   path: '/projects/$id/edit/$docId',
@@ -122,7 +115,6 @@ export interface FileRoutesByFullPath {
   '/projects/$id': typeof AppProjectsIdRoute
   '/templates/$blueprintId': typeof AppTemplatesBlueprintIdRoute
   '/projects/$id/edit/$docId': typeof AppProjectsIdEditDocIdRoute
-  '/projects/$id/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -139,7 +131,6 @@ export interface FileRoutesByTo {
   '/projects/$id': typeof AppProjectsIdRoute
   '/templates/$blueprintId': typeof AppTemplatesBlueprintIdRoute
   '/projects/$id/edit/$docId': typeof AppProjectsIdEditDocIdRoute
-  '/projects/$id/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -158,7 +149,6 @@ export interface FileRoutesById {
   '/_app/projects/$id': typeof AppProjectsIdRoute
   '/_app/templates_/$blueprintId': typeof AppTemplatesBlueprintIdRoute
   '/_app/projects/$id_/edit/$docId': typeof AppProjectsIdEditDocIdRoute
-  '/_app/projects/$id_/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -177,7 +167,6 @@ export interface FileRouteTypes {
     | '/projects/$id'
     | '/templates/$blueprintId'
     | '/projects/$id/edit/$docId'
-    | '/projects/$id/studio/$templateId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -194,7 +183,6 @@ export interface FileRouteTypes {
     | '/projects/$id'
     | '/templates/$blueprintId'
     | '/projects/$id/edit/$docId'
-    | '/projects/$id/studio/$templateId'
   id:
     | '__root__'
     | '/'
@@ -212,7 +200,6 @@ export interface FileRouteTypes {
     | '/_app/projects/$id'
     | '/_app/templates_/$blueprintId'
     | '/_app/projects/$id_/edit/$docId'
-    | '/_app/projects/$id_/studio/$templateId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -321,13 +308,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppProjectsIdRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/projects/$id_/studio/$templateId': {
-      id: '/_app/projects/$id_/studio/$templateId'
-      path: '/projects/$id/studio/$templateId'
-      fullPath: '/projects/$id/studio/$templateId'
-      preLoaderRoute: typeof AppProjectsIdStudioTemplateIdRouteImport
-      parentRoute: typeof AppRoute
-    }
     '/_app/projects/$id_/edit/$docId': {
       id: '/_app/projects/$id_/edit/$docId'
       path: '/projects/$id/edit/$docId'
@@ -351,7 +331,6 @@ interface AppRouteChildren {
   AppProjectsIdRoute: typeof AppProjectsIdRoute
   AppTemplatesBlueprintIdRoute: typeof AppTemplatesBlueprintIdRoute
   AppProjectsIdEditDocIdRoute: typeof AppProjectsIdEditDocIdRoute
-  AppProjectsIdStudioTemplateIdRoute: typeof AppProjectsIdStudioTemplateIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
@@ -367,7 +346,6 @@ const AppRouteChildren: AppRouteChildren = {
   AppProjectsIdRoute: AppProjectsIdRoute,
   AppTemplatesBlueprintIdRoute: AppTemplatesBlueprintIdRoute,
   AppProjectsIdEditDocIdRoute: AppProjectsIdEditDocIdRoute,
-  AppProjectsIdStudioTemplateIdRoute: AppProjectsIdStudioTemplateIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

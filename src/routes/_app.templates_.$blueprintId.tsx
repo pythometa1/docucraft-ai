@@ -1,5 +1,5 @@
 /**
- * The Template Studio: the document, and what the engine understood about it.
+ * The template editor: the document, and what the engine understood about it.
  *
  * Deliberately not a rich-text editor. The whole pipeline addresses text by
  * `(paragraph_index, span_index)` and tells a placeholder from a static run by
@@ -16,8 +16,20 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle, ArrowLeft, CheckCircle2, Download, FileText, History, Info,
-  Loader2, MessageSquare, RotateCcw, Save, Send, ShieldCheck, X,
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  Download,
+  History,
+  Info,
+  Sparkles,
+  Loader2,
+  MessageSquare,
+  RotateCcw,
+  Save,
+  Send,
+  Trash2,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -26,6 +38,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 import type {
   Blueprint, BlueprintBlock, BlueprintBody, BlueprintParagraph, BlueprintSegment,
@@ -35,11 +51,27 @@ import type {
 // `templates_` rather than `templates`: the trailing underscore is TanStack
 // Router's way of saying "do not nest me inside that route". Without it this
 // registers as a child of the templates list page, which renders no `<Outlet />`
-// -- so navigating here showed the list again and the studio never appeared,
-// with no error anywhere to say why. The same convention the project routes
-// already use for `$id_.edit` and `$id_.studio`.
+// -- so navigating here showed the list again and the editor never appeared,
+// with no error anywhere to say why. The same convention the project route
+// already uses for `$id_.edit`.
 export const Route = createFileRoute("/_app/templates_/$blueprintId")({
-  component: StudioPage,
+  /** Where the user came from, when they came from a project.
+   *
+   *  Optional, because this screen is also reached from the flat Templates list
+   *  and has to keep working with no origin at all. When it is present the Back
+   *  link goes home instead of to a list the user was never on, and publishing
+   *  returns them to the project rather than leaving them on the editor of a
+   *  template they have finished with. */
+  validateSearch: (search: Record<string, unknown>): { project?: string; template?: string } => {
+    // Keys are omitted rather than set to undefined: a validator that always
+    // returns both makes them *required* at every call site, and the three
+    // existing links from the flat Templates list have no project to name.
+    const out: { project?: string; template?: string } = {};
+    if (typeof search.project === "string") out.project = search.project;
+    if (typeof search.template === "string") out.template = search.template;
+    return out;
+  },
+  component: TemplateEditorPage,
 });
 
 /** The same three roles the pre-scanner classifies runs into, and their colours. */
@@ -100,8 +132,9 @@ function withSegment(
   return { ...body, blocks: replaceIn(body.blocks, path) };
 }
 
-function StudioPage() {
+function TemplateEditorPage() {
   const { blueprintId } = Route.useParams();
+  const { project: fromProject } = Route.useSearch();
   const navigate = useNavigate();
 
   const [blueprint, setBlueprint] = useState<Blueprint | null>(null);
@@ -112,6 +145,13 @@ function StudioPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [versions, setVersions] = useState<any[]>([]);
   const [showVersions, setShowVersions] = useState(false);
+  /** Asked before publishing when the lint panel has blocking findings, because
+   *  re-reading skips the server's own gate on them. */
+  const [confirmPublish, setConfirmPublish] = useState(false);
+  /** The model could not read the edited template. Nothing was published, and
+   *  the fallback the server's message names is offered from here. */
+  const [readFailure, setReadFailure] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const load = useCallback(async () => {
     const bp = await api.getBlueprint(blueprintId);
@@ -157,7 +197,7 @@ function StudioPage() {
     try {
       await api.saveBlueprint(blueprintId, {
         body,
-        change_summary: "Edited in the template studio.",
+        change_summary: "Edited in the template editor.",
         expected_version_no: blueprint.version_no ?? undefined,
       });
       toast.success("Saved");
@@ -183,18 +223,72 @@ function StudioPage() {
     } finally { setBusy(null); }
   };
 
-  const publish = async () => {
-    setBusy("publish");
+  /**
+   * Write the edited template and have the compiler read it again.
+   *
+   * `recompile` is the default rather than a second button, because it is what
+   * makes an edit take effect. The blueprint's own objects are a reading of the
+   * document as it was *before* the edit; publishing from them writes a manifest
+   * that describes the old wording, which is how you repair a placeholder and
+   * watch nothing change. Re-reading means the manifest that ships is a reading
+   * of the bytes that shipped.
+   *
+   * Two things follow from that and are handled below rather than hidden:
+   *
+   * `recompile` skips the publishability lint gate -- deliberately, on the
+   * server: the objects are not what ships on this path, so refusing on them
+   * would refuse a template that is now correct for a reading that is merely out
+   * of date. Which means this button is not lint-gated, so a blocking finding is
+   * confirmed here instead.
+   *
+   * And re-reading needs a language model, so it can fail with `TEMPLATE_NOT_READ`
+   * when one is unreachable. The server's own message tells the reader to publish
+   * without re-reading, so that route has to exist: `fallback` is it, and it *is*
+   * lint-gated.
+   */
+  const publish = async (recompile = true) => {
+    setBusy(recompile ? "publish" : "fallback");
     try {
-      const result = await api.publishBlueprint(blueprintId);
+      const result = await api.publishBlueprint(blueprintId, [], recompile);
       setLint(result.lint);
-      toast.success("Published", {
-        description: "The template and the manifest that fills it are both written.",
-      });
-      await load();
+      setConfirmPublish(false);
+      setReadFailure(null);
+
+      // Compiling approves its own reading where it may, and publishing takes
+      // the same path -- so in the ordinary case the new version is live the
+      // moment this returns. Where it could not (a role without the capability,
+      // or a legally binding template) the server says why, and repeating that
+      // here is the difference between "published" and "published, and still not
+      // the version your project generates from".
+      const pending = (result as any)?.approval_blocked_reason as string | null | undefined;
+      toast.success(
+        recompile ? "Template regenerated — updated version published" : "Published",
+        {
+          description: pending
+            ? `${pending} Until then, generation still uses the previous version.`
+            : "The template and the manifest that fills it are both live.",
+          duration: pending ? 10000 : 5000,
+        },
+      );
+
+      // Back to where they came from. Finishing an edit is finishing with this
+      // screen, and leaving the user on it after a successful publish is leaving
+      // them to work out for themselves that it is over.
+      if (fromProject) {
+        navigate({ to: "/projects/$id", params: { id: fromProject } });
+      } else {
+        navigate({ to: "/templates" });
+      }
+      return;
     } catch (e: any) {
       const report = e?.details?.lint as LintReport | undefined;
       if (report) setLint(report);
+      if (e?.code === "TEMPLATE_NOT_READ" || e?.code === "LLM_NOT_CONFIGURED") {
+        // Nothing was published -- the server compiles before it writes, so the
+        // template is exactly as it was. Offer the route its own message names.
+        setReadFailure(e?.message ?? String(e));
+        return;
+      }
       toast.error("Not ready to publish", {
         description: e?.message ?? String(e), duration: 10000,
       });
@@ -216,9 +310,19 @@ function StudioPage() {
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <Link to="/templates" className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-            <ArrowLeft className="h-3 w-3" /> Templates
-          </Link>
+          {fromProject ? (
+            <Link
+              to="/projects/$id"
+              params={{ id: fromProject }}
+              className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <ArrowLeft className="h-3 w-3" /> Back to project
+            </Link>
+          ) : (
+            <Link to="/templates" className="mb-1 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+              <ArrowLeft className="h-3 w-3" /> Templates
+            </Link>
+          )}
           <h1 className="truncate text-2xl font-semibold tracking-tight">{blueprint.name}</h1>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <Badge variant="outline">v{blueprint.version_no}</Badge>
@@ -246,16 +350,73 @@ function StudioPage() {
             {busy === "save" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
             {dirty ? "Save" : "Saved"}
           </Button>
-          <Button size="sm" variant={blocking.length ? "outline" : "default"} onClick={publish}
-                  disabled={busy != null || dirty} className="gap-1.5">
-            {busy === "publish" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-            Publish
+          {/* One action, where there were two.
+              The old pair was "Publish" and, for legacy templates only,
+              "Publish & re-read" -- and the first of them wrote a manifest
+              describing the wording as it was before the edit. Re-reading is
+              what makes an edit take effect, so it is not an option. */}
+          <Button size="sm" className="gap-1.5"
+                  onClick={() => (blocking.length ? setConfirmPublish(true) : publish(true))}
+                  disabled={busy != null || dirty}
+                  title="Write the edited template, have the compiler read it again, and publish the result">
+            {busy === "publish" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+            Publish &amp; regenerate updated template
           </Button>
         </div>
       </div>
 
+      {/* Re-reading skips the server's publishability gate on purpose -- the
+          objects are not what ships -- so a blocking finding has to be confirmed
+          here or it is not raised at all. */}
+      <AlertDialog open={confirmPublish} onOpenChange={(o) => { if (busy == null) setConfirmPublish(o); }}>
+        <AlertDialogContent className="border-border bg-surface">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Publish with {blocking.length} unresolved {blocking.length === 1 ? "finding" : "findings"}?
+            </AlertDialogTitle>
+            <AlertDialogDescription className="whitespace-pre-line">
+              {"The compiler reads the document again on the way out, so these may no longer apply — "
+               + "they describe the reading this template is carrying now, not the one that will ship. "
+               + "But nothing checks them again, so if they are real they will reach the letters.\n\n"
+               + blocking.slice(0, 3).map((f) => f.detail).join("\n")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy != null}>Go back</AlertDialogCancel>
+            <AlertDialogAction disabled={busy != null}
+                               onClick={(e) => { e.preventDefault(); void publish(true); }}>
+              {busy != null ? "Publishing…" : "Publish anyway"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* The compile runs before anything is written, so this means the template
+          is exactly as it was. The server's own message says to publish without
+          re-reading; that has to be reachable, and it is lint-gated. */}
+      <AlertDialog open={readFailure != null} onOpenChange={(o) => { if (!o && busy == null) setReadFailure(null); }}>
+        <AlertDialogContent className="border-border bg-surface">
+          <AlertDialogHeader>
+            <AlertDialogTitle>The edited template could not be read</AlertDialogTitle>
+            <AlertDialogDescription className="whitespace-pre-line">
+              {`${readFailure ?? ""}\n\nNothing was published — your template is exactly as it was. `
+               + "You can publish without re-reading, which ships the reading this editor is carrying "
+               + "rather than a fresh one. Every check runs on that path, so it refuses if the reading "
+               + "no longer matches the document."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy != null}>Leave it</AlertDialogCancel>
+            <AlertDialogAction disabled={busy != null}
+                               onClick={(e) => { e.preventDefault(); void publish(false); }}>
+              {busy === "fallback" ? "Publishing…" : "Publish without re-reading"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {showVersions && (
-        <div className="rounded-xl border border-border bg-card p-4">
+        <div className="rounded-xl surface-raised p-4">
           <p className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">History</p>
           <div className="divide-y divide-border">
             {versions.map((v) => (
@@ -286,7 +447,7 @@ function StudioPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
         {/* The document */}
-        <div className="max-h-[calc(100vh-260px)] overflow-auto rounded-xl border border-border bg-card p-6">
+        <div className="max-h-[calc(100vh-260px)] overflow-auto rounded-xl surface-raised p-6">
           {paragraphs.map(({ index, block, inTable, path }) => {
             const found = findingsByParagraph.get(index) ?? [];
             return (
@@ -328,7 +489,7 @@ function StudioPage() {
 
         {/* Inspector + findings */}
         <div className="space-y-4">
-          <div className="rounded-xl border border-border bg-card p-4">
+          <div className="rounded-xl surface-raised p-4">
             <p className="mb-3 text-xs uppercase tracking-wider text-muted-foreground">Selected run</p>
             {!selectedSegment ? (
               <p className="text-sm text-muted-foreground">
@@ -387,17 +548,39 @@ function StudioPage() {
           <CopilotPanel blueprintId={blueprintId} versionNo={blueprint.version_no ?? 1}
                         onApplied={load} />
 
-          <div className="rounded-xl border border-border bg-card p-4">
+          <div className="rounded-xl surface-raised p-4">
             <div className="mb-3 flex items-center justify-between">
               <p className="text-xs uppercase tracking-wider text-muted-foreground">Will this work?</p>
               {lint && (lint.can_publish
-                ? <span className="inline-flex items-center gap-1 text-xs text-emerald-500">
-                    <CheckCircle2 className="h-3.5 w-3.5" /> ready
+                ? <span
+                    className="inline-flex items-center gap-1 text-xs text-emerald-500"
+                    title="These checks read the blueprint. Publishing runs a stricter set against the document it writes, so it can still refuse."
+                  >
+                    {/* Not "ready": this pass writes no document, and the check
+                        that asks an emitted file what is still wrong only runs
+                        at publish. Saying ready here and refusing there is the
+                        contradiction that made the refusal look like a bug. */}
+                    <CheckCircle2 className="h-3.5 w-3.5" /> nothing flagged here
                   </span>
                 : <span className="inline-flex items-center gap-1 text-xs text-destructive">
                     <AlertTriangle className="h-3.5 w-3.5" /> {lint.blocking} blocking
                   </span>)}
             </div>
+            {/* Said where the blocking findings are actually read, because a
+                refusal with no alternative reads as "this template cannot be
+                published" -- which is false when the document is fine and only
+                the reading is out of date. */}
+            {blueprint.kind === "legacy" && (
+              <div className="mb-3 rounded-lg border border-border bg-background/40 p-2.5 text-xs">
+                <p className="text-muted-foreground">
+                  These checks read the blueprint, not the finished file. Publishing has the
+                  compiler read the document it writes and builds the manifest from <em>that</em>,
+                  so a finding here describes the reading this editor is carrying rather than the
+                  one that will ship — and one you have already fixed in the document may still be
+                  listed. They are worth reading before you publish, not worth being stopped by.
+                </p>
+              </div>
+            )}
             {!lint?.findings.length ? (
               <p className="text-sm text-muted-foreground">
                 Nothing to flag. Every placeholder is claimed, every condition reads something, and
@@ -429,16 +612,141 @@ function StudioPage() {
           {blueprint.status === "published" && (
             <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 text-xs">
               <p className="mb-1 flex items-center gap-1.5 font-medium text-emerald-500">
-                <FileText className="h-3.5 w-3.5" /> Published
+                <CheckCircle2 className="h-3.5 w-3.5" /> Published
               </p>
+              {/* This used to say the manifest was still a draft and point at a
+                  screen to go and approve it on. Publishing now approves what it
+                  writes, so the warning is no longer true -- and where it cannot
+                  approve (a role without the capability, a legally binding
+                  template) the publish toast says so at the moment it happens,
+                  which is where that belongs. */}
               <p className="text-muted-foreground">
-                A template version and the manifest that fills it are both written. Bind it to a
-                spreadsheet from the project's Document Mapping tab to generate documents.
+                The template and the manifest that fills it are both live. Documents generated from
+                this project use this version.
               </p>
             </div>
           )}
+
+          <DeleteTemplatePanel
+            blueprintId={blueprintId}
+            name={blueprint.name}
+            open={deleteOpen}
+            onOpenChange={setDeleteOpen}
+            onGone={() => navigate(
+              fromProject
+                ? { to: "/projects/$id", params: { id: fromProject } }
+                : { to: "/templates" },
+            )}
+          />
         </div>
       </div>
+    </div>
+  );
+}
+
+
+/**
+ * Remove this template, under the chat that edits it.
+ *
+ * Two outcomes, and the difference is worth being honest about rather than
+ * hiding behind one word. A template nothing has been published from is deleted:
+ * it comes off the list and the retention sweep destroys the file later. One
+ * that *has* been published is refused, because letters already sent name the
+ * version they came from -- and for those the server offers an archive, which
+ * takes it off the list and leaves everything generated from it alone.
+ *
+ * The refusal is the common case now, not the rare one: compiling approves its
+ * own reading, so almost every template that has been read has an approved
+ * manifest. So rather than showing the user a 409 and stopping, this asks the
+ * question again with the honest answer attached.
+ */
+function DeleteTemplatePanel({ blueprintId, name, open, onOpenChange, onGone }: {
+  blueprintId: string;
+  name: string;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onGone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  /** Set when the server refused the delete because something was published
+   *  from this template. Carries the reason it gave. */
+  const [inUse, setInUse] = useState<string | null>(null);
+
+  const run = async (archive: boolean) => {
+    setBusy(true);
+    try {
+      if (archive) {
+        await api.archiveBlueprint(blueprintId);
+        toast.success("Template archived", {
+          description: `${name} is off the list. Everything generated from it is unchanged.`,
+        });
+      } else {
+        await api.deleteBlueprint(blueprintId);
+        toast.success("Template deleted", { description: name });
+      }
+      onOpenChange(false);
+      onGone();
+    } catch (e: any) {
+      if (!archive && e?.code === "BLUEPRINT_IN_USE") {
+        // Not an error to report and stop on -- it is the answer to a question
+        // the user has not been asked yet.
+        setInUse(e?.message ?? "Something has been published from this template.");
+        return;
+      }
+      toast.error(archive ? "Could not archive this template" : "Could not delete this template", {
+        description: e?.message ?? String(e),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-destructive/25 bg-destructive/5 p-4">
+      <p className="mb-1 flex items-center gap-1.5 text-xs font-medium text-destructive">
+        <Trash2 className="h-3.5 w-3.5" /> Remove this template
+      </p>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Takes it off the Templates list. Anything already generated from it is kept.
+      </p>
+      <Button variant="outline" size="sm"
+              className="w-full gap-2 border-destructive/40 text-destructive hover:bg-destructive/10"
+              onClick={() => { setInUse(null); onOpenChange(true); }}>
+        <Trash2 className="h-3.5 w-3.5" /> Delete template
+      </Button>
+
+      <AlertDialog open={open} onOpenChange={(o) => { if (!busy) { onOpenChange(o); if (!o) setInUse(null); } }}>
+        <AlertDialogContent className="border-border bg-surface">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {inUse ? `Archive “${name}” instead?` : `Delete “${name}”?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="whitespace-pre-line">
+              {inUse
+                ? `${inUse}\n\nArchiving takes it off the Templates list and changes nothing else: `
+                  + "the template, its versions and every document generated from it stay exactly "
+                  + "as they are. Documents already sent keep working."
+                : "This removes the template from the list. Anything already compiled or generated "
+                  + "from it is kept, and the file itself is destroyed later by the retention sweep, "
+                  + "on the schedule your organisation set."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={busy}
+              className={cn("bg-destructive text-destructive-foreground hover:bg-destructive/90")}
+              // Radix closes on action click; the dialog stays up while the
+              // request is in flight so the disabled state is visible, a second
+              // click cannot fire it, and the refusal above can replace the
+              // question in place rather than after a close and a reopen.
+              onClick={(e) => { e.preventDefault(); void run(inUse != null); }}
+            >
+              {busy ? "Working…" : inUse ? "Archive it" : "Delete template"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -504,7 +812,7 @@ function CopilotPanel({ blueprintId, versionNo, onApplied }: {
   }
 
   return (
-    <div className="rounded-xl border border-border bg-card p-4">
+    <div className="rounded-xl surface-raised p-4">
       <div className="mb-3 flex items-center justify-between">
         <p className="text-xs uppercase tracking-wider text-muted-foreground">Co-pilot</p>
         <button onClick={() => setOpen(false)} className="text-muted-foreground hover:text-foreground">

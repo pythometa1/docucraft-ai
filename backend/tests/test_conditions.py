@@ -167,3 +167,112 @@ def test_a_condition_that_reads_nothing_is_rejected():
 
     assert _expression_is_executable("1 == 1") is False
     assert _expression_is_executable("'x' == 'x'") is False
+
+
+# ------------------------------------------------- a condition named after its input
+
+def test_a_condition_named_after_a_column_it_reads_does_not_depend_on_itself():
+    """The China letter, which failed every row with an error about internals.
+
+    `<Work Location/City Location>` compiles to two conditions, one per branch,
+    and the natural name for each is the identifier that decides it. So the
+    condition `city_location` has the expression
+    `city_location != '' and city_location != work_location`: the id names the
+    branch, the identifier names the source column, and they are the same word.
+
+    Reading that identifier as a unit reference made the condition its own
+    dependency, and every row failed with "Circular dependency between manifest
+    units: city_location -> city_location" -- for a manifest that was correct.
+    """
+    from app.generation.resolution_engine import _topological_order, _unit_dependencies
+
+    manifest = {
+        "fields": [{"id": "date", "type": "date"}],
+        "conditions": [
+            {"id": "city_location",
+             "expression": "city_location != '' and city_location != work_location",
+             "keeps_blocks": ["blk_0_city_location"]},
+            {"id": "work_location",
+             "expression": "city_location == '' or city_location == work_location",
+             "keeps_blocks": ["blk_1_work_location"]},
+        ],
+    }
+
+    units, deps = _unit_dependencies(manifest)
+    assert deps["city_location"] == set()
+    assert deps["work_location"] == set()
+    # And it orders, rather than raising.
+    assert set(_topological_order(units, deps)) == {"date", "city_location", "work_location"}
+
+
+def test_an_identifier_naming_a_computed_field_is_still_a_dependency():
+    """The fix must not cost the ordering it exists to provide: a condition that
+    reads a computed field has to be evaluated after that field."""
+    from app.generation.resolution_engine import _topological_order, _unit_dependencies
+
+    manifest = {
+        "fields": [
+            {"id": "pro_rata", "kind": "computed", "formula": "salary * fraction"},
+            {"id": "salary", "type": "number"},
+        ],
+        "conditions": [{"id": "bonus_block", "expression": "pro_rata > 1000"}],
+    }
+    units, deps = _unit_dependencies(manifest)
+    assert deps["bonus_block"] == {"pro_rata"}
+    order = _topological_order(units, deps)
+    assert order.index("pro_rata") < order.index("bonus_block")
+
+
+def test_depends_on_still_orders_one_condition_after_another():
+    """Expression identifiers no longer reach conditions, so `depends_on` is the
+    only way to say it -- which is what it was always for."""
+    from app.generation.resolution_engine import _topological_order, _unit_dependencies
+
+    manifest = {
+        "fields": [],
+        "conditions": [
+            {"id": "first", "expression": "region == 'CN'"},
+            {"id": "second", "expression": "region != ''", "depends_on": ["first"]},
+        ],
+    }
+    units, deps = _unit_dependencies(manifest)
+    assert deps["second"] == {"first"}
+    assert _topological_order(units, deps).index("first") < \
+        _topological_order(units, deps).index("second")
+
+
+def test_a_condition_cannot_depend_on_itself_even_when_asked_to():
+    """`depends_on: [its own id]` is a manifest nobody can satisfy. Dropping it
+    is better than refusing to generate: the intent is unambiguous and there is
+    nothing an operator could do with the error."""
+    from app.generation.resolution_engine import _topological_order, _unit_dependencies
+
+    manifest = {
+        "fields": [],
+        "conditions": [{"id": "loop", "expression": "x == 1", "depends_on": ["loop"]}],
+    }
+    units, deps = _unit_dependencies(manifest)
+    assert deps["loop"] == set()
+    assert _topological_order(units, deps) == ["loop"]
+
+
+def test_a_genuine_cycle_is_still_refused():
+    """The guard has to keep working. Two computed fields feeding each other
+    cannot be resolved in any order, and silently picking one would produce a
+    document filled from a value that was never computed."""
+    import pytest as _pytest
+
+    from app.generation.resolution_engine import (
+        CyclicDependencyError, _topological_order, _unit_dependencies,
+    )
+
+    manifest = {
+        "fields": [
+            {"id": "a", "kind": "computed", "formula": "b + 1"},
+            {"id": "b", "kind": "computed", "formula": "a + 1"},
+        ],
+        "conditions": [],
+    }
+    units, deps = _unit_dependencies(manifest)
+    with _pytest.raises(CyclicDependencyError, match="Circular dependency"):
+        _topological_order(units, deps)

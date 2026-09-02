@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { Download, Filter, Search, FileText, UserCog, ShieldCheck, Trash2, Upload, CheckCircle2, LogIn, Sparkles } from "lucide-react";
+import { Download, Filter, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -44,7 +44,7 @@ function AuditLogPage() {
     <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
       <div className="flex items-start justify-between flex-wrap gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Audit Log</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-gradient">Audit Log</h1>
           <p className="text-sm text-muted-foreground mt-1">Immutable, compliance-grade trail of every workspace action. Retained 7 years.</p>
         </div>
         <div className="flex gap-2">
@@ -60,14 +60,14 @@ function AuditLogPage() {
           { label: "Generations", value: String(ENTRIES.filter((e) => e.action.toLowerCase().includes("generat")).length) },
           { label: "Warnings", value: String(ENTRIES.filter((e) => e.severity === "warning").length) },
         ].map((s) => (
-          <div key={s.label} className="rounded-xl border border-border bg-card p-4">
+          <div key={s.label} className="rounded-xl surface-raised p-4">
             <div className="text-xs text-muted-foreground uppercase tracking-wider">{s.label}</div>
             <div className="text-2xl font-semibold mt-1 tabular-nums">{s.value}</div>
           </div>
         ))}
       </div>
 
-      <div className="rounded-xl border border-border bg-card">
+      <div className="rounded-xl surface-raised">
         <div className="p-4 border-b border-border flex items-center gap-3">
           <div className="relative flex-1 max-w-md">
             <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />

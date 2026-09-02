@@ -68,7 +68,7 @@ function QualityPage() {
   if (denied) {
     return (
       <div className="p-6 lg:p-8 max-w-3xl mx-auto">
-        <div className="rounded-xl border border-border bg-card p-8 text-center space-y-2">
+        <div className="rounded-xl surface-raised p-8 text-center space-y-2">
           <ShieldCheck className="h-8 w-8 mx-auto text-muted-foreground" />
           <h1 className="text-lg font-semibold">Not your numbers to read</h1>
           <p className="text-sm text-muted-foreground max-w-md mx-auto">
@@ -86,7 +86,7 @@ function QualityPage() {
       <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Quality</h1>
+            <h1 className="text-2xl font-semibold tracking-tight text-gradient">Quality</h1>
             <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
               How often this system is wrong, how often a person has to step in, and how long it
               takes. Measured from what actually ran — a metric with nothing behind it says so
@@ -112,7 +112,7 @@ function QualityPage() {
         </div>
 
         {loading && (
-          <div className="rounded-xl border border-border bg-card p-10 text-sm text-muted-foreground flex items-center justify-center gap-2">
+          <div className="rounded-xl surface-raised p-10 text-sm text-muted-foreground flex items-center justify-center gap-2">
             <Loader2 className="h-4 w-4 animate-spin" /> Measuring…
           </div>
         )}
@@ -197,7 +197,7 @@ const SLO_TONE: Record<string, string> = {
 
 function SloTable({ slos }: { slos: QualityReport["slos"] }) {
   return (
-    <div className="rounded-xl border border-border bg-card overflow-hidden">
+    <div className="rounded-xl surface-raised overflow-hidden">
       <div className="px-4 py-3 border-b border-border">
         <h2 className="text-sm font-semibold">How long things take</h2>
         <p className="mt-1 flex items-start gap-1.5 text-xs text-muted-foreground">
@@ -282,7 +282,7 @@ function Calibration({ calibration }: { calibration: QualityReport["calibration"
   const bands = Object.entries(calibration.by_band);
 
   return (
-    <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+    <div className="rounded-xl surface-raised p-4 space-y-3">
       <div className="flex items-center gap-2">
         <h2 className="text-sm font-semibold">Confidence calibration</h2>
         <span className={cn(

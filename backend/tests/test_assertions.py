@@ -564,3 +564,126 @@ def test_a_red_run_inside_a_hyperlink_is_not_reported_as_surviving():
         spans = [_Span()]
 
     assert A.surviving_instructions(_Scan(), _manifest()) == []
+
+
+# ------------------------------------------- a placeholder Word split in half
+
+class _Span:
+    def __init__(self, paragraph_index, span_index, text):
+        self.paragraph_index = paragraph_index
+        self.span_index = span_index
+        self.text = text
+
+
+class _Scan:
+    def __init__(self, spans):
+        self.spans = spans
+
+
+def test_a_placeholder_split_across_runs_is_a_warning_and_never_a_fault():
+    """The Chinese master, and the compile it used to kill.
+
+    Word splits a run wherever formatting or a spell-check mark changes, and
+    around CJK text it does it constantly. The real file reads
+
+        span 0: '\u6211\u8c28\u4ee3\u8868\u8f89\u745e\u4e2d\u56fd\uff0c\u5411\u60a8\u786e\u8ba4\u56e0<'
+        span 1: 'Transaction Action Reason'
+        span 2: '>\u800c\u4ea7\u751f\u7684\u4ee5\u4e0b\u53d8\u52a8...'
+
+    which is one placeholder to a reader and none to any single span.
+
+    It has to be *reported* -- nothing will fill it, so every document keeps the
+    literal text. But it must not be a fault, because no correction can clear it:
+    `_locate` finds a slot with `needle in span.text`, one span at a time, so a
+    claim on a split token is dropped as unlocatable; and the fill engine
+    replaces inside a single run, so it could not be filled even if it stuck.
+    Measured: 9 fields merged, then three rounds each applying three corrections
+    against the same two faults, ending `llm_unconverged` with an empty manifest
+    on a template that had been read correctly.
+    """
+    from app.compiler.assertions import uncovered_placeholders
+
+    scan = _Scan([
+        _Span(15, 0, "We confirm the change arising from <"),
+        _Span(15, 1, "Transaction Action Reason"),
+        _Span(15, 2, "> which takes effect on "),
+    ])
+    faults, warnings = uncovered_placeholders(scan, {"fields": [], "conditions": []})
+
+    assert faults == [], "a split placeholder must not drive the compile loop"
+    assert [w["code"] for w in warnings] == ["W-SPLIT-PLACEHOLDER"]
+    assert warnings[0]["paragraph_index"] == 15
+    assert warnings[0]["evidence"] == "<Transaction Action Reason>"
+    assert "split across several runs" in warnings[0]["message"]
+
+
+def test_a_whole_placeholder_in_one_run_is_still_a_fault():
+    """The claimable case keeps driving the loop -- that is what makes the
+    compiler correct its own misses."""
+    from app.compiler.assertions import UNCOVERED_PLACEHOLDER, uncovered_placeholders
+
+    scan = _Scan([_Span(3, 0, "Dated <Date>.")])
+    faults, warnings = uncovered_placeholders(scan, {"fields": [], "conditions": []})
+
+    assert [a.check for a in faults] == [UNCOVERED_PLACEHOLDER]
+    assert warnings == []
+
+
+def test_a_split_placeholder_a_field_does_claim_is_not_reported():
+    """Joining must not turn a covered placeholder into a fault."""
+    from app.compiler.assertions import uncovered_placeholders
+
+    scan = _Scan([
+        _Span(19, 0, "Salary CNY<"),
+        _Span(19, 1, "Pay Rate Monthly>"),
+    ])
+    manifest = {
+        "fields": [{"id": "pay_rate_monthly",
+                    "slots": [{"text": "<Pay Rate Monthly>", "paragraph_index": 19}]}],
+        "conditions": [],
+    }
+    assert uncovered_placeholders(scan, manifest)[0] == []
+
+
+def test_a_placeholder_answered_by_conditions_rather_than_a_field_is_not_a_fault():
+    """`<Work Location/City Location>` is one placeholder offering a choice
+    between two, and the right reading is two conditions keeping one branch
+    each. No field ever claims it, and it is fully accounted for.
+
+    Reporting it would be the expensive kind of wrong: the writer cannot satisfy
+    the fault without inventing a field that should not exist, so the loop runs
+    to its ceiling and parks a correctly-read template as `llm_unconverged`.
+    """
+    from app.compiler.assertions import uncovered_placeholders
+
+    scan = _Scan([_Span(21, 0, "Your work location is <Work Location/City Location>.")])
+    manifest = {
+        "fields": [],
+        "conditions": [
+            {"id": "city_location", "expression": "city_location != ''",
+             "compiled_from": "<Work Location/City Location>"},
+            {"id": "work_location", "expression": "city_location == ''",
+             "compiled_from": "<Work Location/City Location>"},
+        ],
+    }
+    assert uncovered_placeholders(scan, manifest)[0] == []
+
+
+def test_a_token_that_is_not_a_placeholder_is_still_ignored():
+    """A ruled line for someone to hand-write on is not a field, and demanding
+    one would make the loop unsatisfiable."""
+    from app.compiler.assertions import uncovered_placeholders
+
+    scan = _Scan([_Span(4, 0, "Signed: <__________________>  <>")])
+    assert uncovered_placeholders(scan, {"fields": [], "conditions": []})[0] == []
+
+
+def test_one_paragraph_reports_a_repeated_placeholder_once():
+    from app.compiler.assertions import uncovered_placeholders
+
+    scan = _Scan([
+        _Span(7, 0, "<Name> and again <"),
+        _Span(7, 1, "Name>"),
+    ])
+    found, _split = uncovered_placeholders(scan, {"fields": [], "conditions": []})
+    assert len(found) == 1

@@ -104,7 +104,7 @@ function AnalyticsPage() {
       <div className="mx-auto max-w-[1400px] space-y-5 p-6 lg:p-8">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
+            <h1 className="text-2xl font-semibold tracking-tight text-gradient">Analytics</h1>
             <p className="mt-1 text-sm text-muted-foreground">
               What was produced, how long it took, and what the model calls cost.
             </p>
@@ -371,7 +371,7 @@ function StatTile({ stat }: { stat: Stat }) {
     : compact(stat.value);
 
   return (
-    <div className="rounded-xl border border-border bg-card p-4">
+    <div className="rounded-xl surface-raised p-4">
       <div className="flex items-start justify-between gap-2">
         <span className="text-xs uppercase tracking-wider text-muted-foreground">{stat.label}</span>
         <Tooltip>
@@ -412,7 +412,7 @@ function Panel({ title, subtitle, children }: {
   title: string; subtitle?: string; children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-4">
+    <div className="rounded-xl surface-raised p-4">
       <div className="mb-3">
         <h2 className="text-sm font-medium">{title}</h2>
         {subtitle && <p className="text-[11px] text-muted-foreground">{subtitle}</p>}

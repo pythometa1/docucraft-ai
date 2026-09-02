@@ -11,7 +11,7 @@
 
 import type {
   AnalyticsKpis, AnalyticsRange, Blueprint, BlueprintBody, BlueprintVersion, CompileReport,
-  CostReport, LintReport, QualityReport, TopTemplates, TrendSeries,
+  CostReport, LintReport, QualityReport, SettableWorkflowStatus, TopTemplates, TrendSeries,
 } from "@/lib/types";
 
 const API_URL = (import.meta as any).env?.VITE_API_URL ?? "http://localhost:8000/api/v1";
@@ -193,6 +193,19 @@ export const api = {
   patchProject: (id: string, body: any) => request<any>("PATCH", `/projects/${id}`, { json: body }),
   archiveProject: (id: string) => request<any>("POST", `/projects/${id}/archive`),
   deleteProject: (id: string) => request<any>("DELETE", `/projects/${id}`),
+  /** Several at once. Partial by design: an id that is already gone comes back
+   *  in `refused`, and the rest are still removed. Like the single-project
+   *  delete this is a `deleted_at` stamp, not a drop -- §16 leaves the
+   *  destruction of blobs and embeddings to the retention sweep. */
+  deleteProjects: (projectIds: string[]) =>
+    request<BulkDeleteResult<"project_id">>("POST", "/projects:delete",
+      { json: { project_ids: projectIds } }),
+  deleteTemplates: (templateIds: string[]) =>
+    request<BulkDeleteResult<"template_id">>("POST", "/templates:delete",
+      { json: { template_ids: templateIds } }),
+  deleteSources: (sourceIds: string[]) =>
+    request<BulkDeleteResult<"source_id">>("POST", "/sources:delete",
+      { json: { source_ids: sourceIds } }),
 
   listTemplates: (projectId: string) => request<{ items: any[] }>("GET", `/projects/${projectId}/templates`),
   uploadTemplate: (projectId: string, file: File, name?: string) => {
@@ -219,6 +232,16 @@ export const api = {
   listProjectDocuments: (projectId: string) => request<{ items: any[] }>("GET", `/projects/${projectId}/documents`),
   getDocument: (documentId: string) => request<any>("GET", `/documents/${documentId}`),
   deleteDocument: (documentId: string) => request<any>("DELETE", `/documents/${documentId}`),
+  /** Move a document along someone's own lane.
+   *
+   *  Only the three a person may assert are accepted. `approved` and `blocked`
+   *  are refused by the server with an explanation, because a signature is the
+   *  approve action's to record and a QA verdict is the fill engine's -- so the
+   *  select that calls this offers three options, not five. */
+  setDocumentWorkflow: (documentId: string, workflowStatus: SettableWorkflowStatus) =>
+    request<any>("PATCH", `/documents/${documentId}/workflow`, {
+      json: { workflow_status: workflowStatus },
+    }),
   getDocumentVersion: (versionId: string) =>
     request<{
       id: string; html_content: string; status: string;
@@ -249,6 +272,16 @@ export const api = {
     if (!res.ok) throw await downloadError(res, format);
     return URL.createObjectURL(await res.blob());
   },
+
+  /** Delete several at once. Partial by design: an approved document comes back
+   *  in `refused` with the reason, and the rest are still deleted. */
+  deleteDocuments: (documentIds: string[]) =>
+    request<{
+      requested: number;
+      deleted: { document_id: string; filename: string | null }[];
+      refused: { document_id: string; code: string; filename: string | null; reason: string }[];
+      blobs_deleted: number;
+    }>("POST", "/documents:delete", { json: { document_ids: documentIds } }),
 
   async downloadDocuments(documentIds: string[], format: "docx" | "pdf" = "docx"): Promise<string> {
     const token = ensureAuth();
@@ -346,8 +379,9 @@ export const api = {
   /* ---- Template authoring ----
    * Put a legacy .docx in, get an editable template back, hand-edit it, publish
    * it as something the fill engine can execute. */
-  listBlueprints: (projectId?: string) =>
-    request<{ items: Blueprint[] }>("GET", "/template-blueprints", { query: { project_id: projectId } }),
+  listBlueprints: (projectId?: string, templateFileId?: string) =>
+    request<{ items: Blueprint[] }>("GET", "/template-blueprints",
+      { query: { project_id: projectId, template_file_id: templateFileId } }),
   getBlueprint: (id: string) => request<Blueprint>("GET", `/template-blueprints/${id}`),
   listBlueprintVersions: (id: string) =>
     request<{ items: { id: string; version_no: number; change_summary: string | null; created_at: string; finding_count: number; manifest_id: string | null }[] }>(
@@ -359,10 +393,22 @@ export const api = {
   revertBlueprint: (id: string, versionNo: number) =>
     request<BlueprintVersion>("POST", `/template-blueprints/${id}:revert-to`, { json: { version_no: versionNo } }),
   lintBlueprint: (id: string) => request<LintReport>("GET", `/template-blueprints/${id}/lint`),
-  publishBlueprint: (id: string, dispositions: string[] = []) =>
+  /** `recompile` publishes the document and then lets the compiler read it,
+   *  instead of shipping the blueprint's own objects. Slower — a real compile —
+   *  but it is the way out when the reading has gone stale against a document
+   *  that has since been fixed. */
+  publishBlueprint: (id: string, dispositions: string[] = [], recompile = false) =>
     request<{ blueprint_id: string; template_version_id: string; manifest_id: string; lint: LintReport }>(
-      "POST", `/template-blueprints/${id}:publish`, { json: { dispositions } }),
+      "POST", `/template-blueprints/${id}:publish`, { json: { dispositions, recompile } }),
   deleteBlueprint: (id: string) => request<{ status: string }>("DELETE", `/template-blueprints/${id}`),
+  /** Take a published template off the list without claiming anything is gone.
+   *
+   *  `deleteBlueprint` refuses with `BLUEPRINT_IN_USE` once a manifest has been
+   *  approved from the template -- which, now that compiling approves its own
+   *  reading, is nearly every template that has been read. This is the route out
+   *  of that refusal the error message has always pointed at. */
+  archiveBlueprint: (id: string) =>
+    request<{ status: string }>("POST", `/template-blueprints/${id}:archive`),
   blueprintKits: () =>
     request<{ items: { id: string; name: string; description: string; field_count: number; paragraph_count: number }[] }>(
       "GET", "/template-blueprint-kits"),
@@ -494,6 +540,18 @@ export const api = {
     request<DocumentReview>("POST", `/reviews/${reviewId}:assign`, { json: { user_id: userId } }),
 };
 
+/** What every bulk delete answers with. The id field is named for what it
+ *  identifies, so a caller cannot accidentally read a project id off a document
+ *  result; `name` is what to show the user about a row that was refused. */
+export type BulkDeleteResult<K extends string> = {
+  requested: number;
+  deleted: ({ [P in K]: string } & { name?: string | null; filename?: string | null })[];
+  refused: ({ [P in K]: string } & {
+    code: string; reason: string; name?: string | null; filename?: string | null;
+  })[];
+  blobs_deleted?: number;
+};
+
 export type BindingSuggestion = {
   field_id: string;
   column: string | null;
@@ -606,6 +664,9 @@ export type QueueItem = {
   document_id?: string;
   document_version_id: string | null;
   document_status: string | null;
+  /** Where the document's owner has put it, which is the other axis. Null for a
+   *  queue row that is not about a document. */
+  workflow_status: string | null;
   requested_by_name?: string | null;
   assigned_to?: string | null;
   task_kind?: "calculation" | "condition" | "binding" | "narrative";

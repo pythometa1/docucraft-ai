@@ -929,7 +929,23 @@ SOFFICE_CANDIDATES = (
 
 # Scripts whose glyphs come from a font pack that is not installed by default.
 CJK_SCRIPT_LANGUAGES = ("zh", "ja", "ko")
-CJK_FONT_HINTS = ("noto sans cjk", "noto serif cjk", "source han", "simsun", "msmincho", "malgun")
+# Linux, Windows *and* macOS. The list used to name only the first two, so on a
+# Mac -- which ships PingFang, Heiti, Songti and Hiragino -- `cjk_fonts_installed`
+# reported no CJK fonts at all while `fc-list` was reporting forty-eight of them.
+CJK_FONT_HINTS = (
+    "noto sans cjk", "noto serif cjk", "source han", "simsun", "msmincho", "malgun",
+    "pingfang", "heiti", "songti", "stsong", "stheiti", "hiragino", "yu gothic", "meiryo",
+)
+
+
+def _cjk_chars(text: str) -> set:
+    """The CJK ideographs in a string. Kana and Hangul come along for the ride."""
+    return {
+        ch for ch in text
+        if "一" <= ch <= "鿿"      # CJK unified ideographs
+        or "぀" <= ch <= "ヿ"      # hiragana + katakana
+        or "가" <= ch <= "힯"      # hangul syllables
+    }
 
 RENDER_TIMEOUT_SECONDS = 120
 
@@ -1003,8 +1019,122 @@ def render_pdf(docx_path: str | Path, out_dir: str | Path, language: str = "en")
             f"LibreOffice produced no PDF (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:400]}"
         )
 
+    _refuse_if_script_was_lost(docx_path, pdf)
+
     notes.append(
         "Page breaks are LibreOffice's. Word is the authority on pagination for the .docx, "
         "which this preview does not modify."
     )
     return PreviewResult(pdf_path=str(pdf), renderer=soffice, notes=notes)
+
+
+def _refuse_if_script_was_lost(docx_path: str | Path, pdf: Path) -> None:
+    """Read the PDF back and refuse it if the conversion ate the letter.
+
+    A missing font does not make LibreOffice fail. It makes it substitute, and
+    the substitute has no Chinese glyphs, so every ideograph in the document
+    comes out as the same wrong character:
+
+        隐隐隐 Gao Yan隐
+        隐隐隐隐隐隐隐隐隐隐隐隐隐隐 Promotion 隐隐隐隐隐隐隐隐隐隐隐隐隐
+
+    Exit code zero, a plausible file size, a PDF that opens. The Latin text is
+    perfect, which is what makes it convincing -- the name, the salary and the
+    dates are all correct and every word around them is destroyed.
+
+    The guard that was supposed to catch this could not, three times over. It
+    keyed on the document's declared `language`, and this letter is Chinese
+    content generated under a project tagged `en`. Its font list knew only Linux
+    and Windows names, so a Mac with forty-eight CJK fonts reported none. And it
+    only ever appended a *note*, which the download endpoint discards.
+
+    So this asks the question directly instead of predicting the answer: the
+    source has CJK, does the output? It costs one PDF text extraction, it cannot
+    false-positive on a host where the conversion works, and it catches every
+    cause rather than the one cause somebody thought of -- missing font, broken
+    fallback, bad substitution map.
+
+    Raises `PreviewUnavailable`, which the API already turns into a 503 naming
+    what is missing. Refusing is the right answer: a letter whose entire body is
+    one repeated glyph is not a preview with a caveat, it is a wrong document
+    that looks like a right one, and handing it to somebody to send is worse
+    than handing them nothing.
+    """
+    try:
+        from docx import Document
+        from pypdf import PdfReader
+    except ImportError:  # pragma: no cover - both are hard dependencies
+        return
+
+    try:
+        source = Document(str(docx_path))
+        source_text = "\n".join(p.text for p in source.paragraphs)
+        for table in source.tables:
+            for row in table.rows:
+                source_text += "\n" + "\n".join(c.text for c in row.cells)
+    except Exception:  # noqa: BLE001 - an unreadable source is not this check's business
+        return
+
+    wanted = _cjk_chars(source_text)
+    if not wanted:
+        return
+
+    try:
+        rendered = "\n".join((page.extract_text() or "") for page in PdfReader(str(pdf)).pages)
+    except Exception:  # noqa: BLE001 - a PDF we cannot read back is not proof of anything
+        return
+
+    got = _cjk_chars(rendered)
+    # Compared as *distinct* characters, not as a count. Tofu substitution
+    # preserves the character count exactly -- one wrong glyph per right one --
+    # so a length check sees nothing wrong. What collapses is the variety.
+    kept = len(wanted & got) / len(wanted)
+    if kept >= 0.5:
+        return
+
+    missing_fonts = _requested_fonts_not_installed(docx_path)
+    detail = (
+        f" The template asks for {', '.join(sorted(missing_fonts))}, which "
+        f"{'is' if len(missing_fonts) == 1 else 'are'} not installed on this host."
+        if missing_fonts else ""
+    )
+    raise PreviewUnavailable(
+        "This document's Chinese, Japanese or Korean text did not survive the PDF conversion — "
+        f"only {kept:.0%} of its characters came through, and the rest were replaced with a "
+        f"placeholder glyph.{detail} The .docx is correct and unaffected; download that instead, "
+        "or install the font on the machine running the API and try again."
+    )
+
+
+def _requested_fonts_not_installed(docx_path: str | Path) -> set:
+    """Which fonts the .docx asks for that this host does not have.
+
+    Best effort, and only ever used to make the refusal above more specific --
+    naming `MingLiU` is the difference between a message somebody can act on and
+    one they can only forward.
+    """
+    import re
+    import zipfile
+
+    fc = shutil.which("fc-list")
+    if not fc:
+        return set()
+    try:
+        installed = subprocess.run(
+            [fc, "--format", "%{family}\n"], capture_output=True, text=True, timeout=20).stdout.lower()
+        with zipfile.ZipFile(str(docx_path)) as z:
+            xml = "".join(
+                z.read(name).decode("utf8", "replace")
+                for name in ("word/document.xml", "word/styles.xml") if name in z.namelist())
+    except (OSError, subprocess.SubprocessError, zipfile.BadZipFile, KeyError):
+        return set()
+
+    requested = set()
+    for attr in ("eastAsia", "ascii", "hAnsi", "cs"):
+        requested |= set(re.findall(rf'w:{attr}="([^"]+)"', xml))
+    # `w:eastAsia` also carries language tags like "zh-CN" in some producers,
+    # and a language tag is not a missing font.
+    return {
+        f for f in requested
+        if f.lower() not in installed and not re.fullmatch(r"[a-z]{2}-[A-Z]{2}", f)
+    }

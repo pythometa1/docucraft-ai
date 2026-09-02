@@ -218,7 +218,7 @@ export function TextDocumentEditor({
 
       {/* ------------------------------------------------------------- panel */}
       <aside className="space-y-3">
-        <div className="rounded-lg border border-border bg-card p-4">
+        <div className="rounded-lg surface-raised p-4">
           <h3 className="flex items-center gap-2 text-sm font-semibold">
             <Sparkles className="h-4 w-4 text-brand" /> Edit with AI
           </h3>
@@ -309,7 +309,7 @@ export function TextDocumentEditor({
         </div>
 
         {pending.length > 0 && (
-          <div className="rounded-lg border border-border bg-card p-4">
+          <div className="rounded-lg surface-raised p-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">Unsaved changes</h3>
               <button

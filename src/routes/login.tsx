@@ -49,7 +49,7 @@ function Login() {
           <span className="text-lg font-semibold">DocuMind AI</span>
         </div>
 
-        <form onSubmit={onSubmit} className="rounded-xl border border-border bg-card p-6 space-y-4">
+        <form onSubmit={onSubmit} className="rounded-xl surface-raised p-6 space-y-4">
           <div>
             <h1 className="text-xl font-semibold">Sign in</h1>
             <p className="text-sm text-muted-foreground mt-1">Use the account created during setup.</p>

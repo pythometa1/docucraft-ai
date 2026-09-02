@@ -126,10 +126,6 @@ class BlueprintError(ValueError):
 
 # ---- the body ----
 
-def empty_body() -> dict:
-    return {"blocks": [], "sect_pr_from": None}
-
-
 def paragraph(segments=(), *, style: str | None = None) -> dict:
     return {"kind": "paragraph", "style": style, "segments": [dict(s) for s in segments]}
 

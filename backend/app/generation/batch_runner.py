@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app.tenancy import adopt_org_of_user, release_org_scope
 from app.metrics import SINGLE_DOCX_RENDER, record_qa_findings, timed
+from app.generation.workflow_status import WORK_IN_PROGRESS
 from app.models import (
     Counter, DocumentVersion, GeneratedDocument, GenerationJob, ManifestGeneration,
     Project, ReviewTask, TemplateManifest, TemplateVersion,
@@ -163,6 +164,14 @@ def run_row(
     gen_doc = GeneratedDocument(
         org_id=manifest.org_id, project_id=project.id, draft_id=None,
         display_id=display_id, language=language, status=status,
+        # The QA/review axis is `status`, decided just above. This is the other
+        # one, and every new document starts in the same place on it: nobody has
+        # picked it up yet. Deliberately not derived from `status` -- a blocked
+        # document's *workflow* state is still "untouched", and `effective`
+        # reports the block over the top of it without overwriting anything.
+        # Written explicitly rather than left to the column default, because this
+        # is the line that would have to change if the default ever moved.
+        workflow_status=WORK_IN_PROGRESS,
     )
     db.add(gen_doc)
     db.flush()
