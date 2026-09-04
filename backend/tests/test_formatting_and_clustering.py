@@ -191,3 +191,63 @@ def test_a_value_that_is_not_a_date_is_untouched():
     assert format_value("Promotion") == "Promotion"
     assert format_value("2026-09-01") == "2026-09-01"
     assert format_value(42) == "42"
+
+
+# ------------------------------------------- a spreadsheet date is read as a date
+
+def test_a_date_cell_is_read_without_the_midnight_it_never_had():
+    """Where the `00:00:00` actually came from.
+
+    openpyxl returns a real `datetime` for a date-formatted cell, and
+    `_clean_cell` ran `str()` over it -- so `2026-09-01 00:00:00` entered the
+    pipeline as *text* at read time and reached the letter unchanged:
+
+        变动将于2026-09-01 00:00:00生效
+
+    Fixing `format_value` alone was not enough, and this test is why: by the time
+    a formatter sees the value it is already a string with a time stuck to it, so
+    nothing downstream can tell a date from a timestamp. The normalisation has to
+    happen at the boundary where the cell is read."""
+    from datetime import datetime
+
+    from app.generation.source_ingestion import _clean_cell
+
+    assert _clean_cell(datetime(2026, 9, 1)) == "2026-09-01"
+    assert "00:00:00" not in _clean_cell(datetime(2026, 9, 1))
+
+
+def test_a_date_object_is_read_as_a_date():
+    from datetime import date
+
+    from app.generation.source_ingestion import _clean_cell
+
+    assert _clean_cell(date(2026, 9, 1)) == "2026-09-01"
+
+
+def test_a_cell_carrying_a_real_time_keeps_it():
+    """Dropping it would be inventing a fact. Only the midnight goes."""
+    from datetime import datetime
+
+    from app.generation.source_ingestion import _clean_cell
+
+    assert _clean_cell(datetime(2026, 9, 1, 14, 30)) == "2026-09-01 14:30"
+
+
+def test_the_normalised_date_still_formats_in_the_readers_locale():
+    """ISO on the way in, so a field the compiler typed as a date is still
+    rendered per locale on the way out -- the boundary fix must not cost the
+    formatting the other one buys."""
+    from app.generation.source_ingestion import _clean_cell
+    from datetime import datetime
+
+    cell = _clean_cell(datetime(2026, 9, 1))
+    assert format_value(cell, {"type": "date"}, "zh_CN") == "2026年9月1日"
+    assert format_value(cell, {"type": "date"}, "en_US") == "Sep 1, 2026"
+
+
+def test_the_other_cell_normalisations_are_untouched():
+    from app.generation.source_ingestion import _clean_cell
+
+    assert _clean_cell(38.0) == "38"          # openpyxl reads whole numbers as 38.0
+    assert _clean_cell(None) == ""
+    assert _clean_cell("  Shanghai  ") == "Shanghai"

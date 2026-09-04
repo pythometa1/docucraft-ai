@@ -367,6 +367,11 @@ def test_every_assertion_kind_has_a_correction_that_can_address_it():
         A.PARAGRAPH_SCOPED_SWITCH: "inline_branches_to_add",
         A.SCAFFOLDING_CONFLICT: "scaffolding_remove",
         A.TEST_FILL_FAILURE: "conditions_to_rewrite",
+        # A block nothing governs is fixed by supplying the condition that keeps
+        # it -- which is what the assertion's own text asks for. Its alternative,
+        # "if it is not conditional it should not be a block", is
+        # `blocks_to_remove`; either channel resolves it, so the loop converges.
+        A.UNGOVERNED_BLOCK: "conditions_to_add",
     }
     kinds = {
         v for k, v in vars(A).items()

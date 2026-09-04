@@ -687,3 +687,81 @@ def test_one_paragraph_reports_a_repeated_placeholder_once():
     ])
     found, _split = uncovered_placeholders(scan, {"fields": [], "conditions": []})
     assert len(found) == 1
+
+
+# ------------------------------------------------- a block nothing governs
+
+def test_a_block_no_condition_keeps_is_a_fault():
+    """A block nothing governs is not a conditional section — it is ordinary
+    text with a condition's name on it.
+
+    `docx_renderer` drops a block only when a condition that *keeps* it decides
+    False, so a block no condition references survives whatever the data says.
+    Both halves of an IF/ELSE then print, one directly contradicting the other:
+
+        This is a fixed-term contract commencing on 1 September 2026.
+        This is a permanent contract commencing on 1 September 2026.
+
+    Measured on a template with eight blocks and three conditions: the five
+    ungoverned blocks were every positive arm. Nothing downstream caught it,
+    because every other gate asks what was left over or what is missing, and this
+    section is neither."""
+    from app.compiler.assertions import UNGOVERNED_BLOCK, structural_faults
+
+    manifest = {
+        "fields": [],
+        "blocks": [
+            {"id": "blk_0_if_arm", "start_paragraph": 7, "end_paragraph": 7},
+            {"id": "blk_1_else_arm", "start_paragraph": 9, "end_paragraph": 9},
+        ],
+        "conditions": [
+            {"id": "c", "expression": "contract_type != 'Fixed Term'",
+             "keeps_blocks": ["blk_1_else_arm"]},
+        ],
+    }
+    faults = structural_faults(manifest)
+    assert [f.check for f in faults] == [UNGOVERNED_BLOCK]
+    assert faults[0].object_id == "blk_0_if_arm"
+    assert faults[0].paragraph_index == 7
+
+
+def test_a_block_every_arm_of_which_is_governed_is_silent():
+    from app.compiler.assertions import structural_faults
+
+    manifest = {
+        "fields": [],
+        "blocks": [
+            {"id": "blk_0_if_arm", "start_paragraph": 7, "end_paragraph": 7},
+            {"id": "blk_1_else_arm", "start_paragraph": 9, "end_paragraph": 9},
+        ],
+        "conditions": [
+            {"id": "c0", "expression": "contract_type == 'Fixed Term'",
+             "keeps_blocks": ["blk_0_if_arm"]},
+            {"id": "c1", "expression": "contract_type != 'Fixed Term'",
+             "keeps_blocks": ["blk_1_else_arm"]},
+        ],
+    }
+    assert structural_faults(manifest) == []
+
+
+def test_a_manifest_with_no_blocks_at_all_is_silent():
+    """Most templates have no conditional sections. The check must not invent a
+    fault for them."""
+    from app.compiler.assertions import structural_faults
+
+    assert structural_faults({"fields": [], "blocks": [], "conditions": []}) == []
+
+
+def test_the_rule_compiler_cannot_produce_an_ungoverned_block():
+    """`register_condition` runs for every block the deterministic path creates,
+    so this fault is reachable only from the agentic path. Pinned so a refactor
+    of the rule compiler cannot quietly start emitting them."""
+    import inspect
+
+    from app.compiler import rule_compiler
+
+    src = inspect.getsource(rule_compiler)
+    body = src[src.index("# ---- pass 3: resolve condition markers"):]
+    # Every `blocks.append` in the marker and inline passes is followed by a
+    # `register_condition` for that same block.
+    assert body.count("blocks.append(") == body.count("register_condition(")

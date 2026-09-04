@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from app.compiler.rule_compiler import CONTROL_TOKEN_RE
 from app.qa.policy import (
     CONTROL_TOKEN_REMAINS,
+    DATE_PART_MALFORMED,
+    FILL_MASK_REMAINS,
     INSTRUCTION_TEXT_REMAINS,
     PLACEHOLDER_REMAINS,
     UNRESOLVED_MERGEFIELD,
@@ -77,6 +79,76 @@ SHOUT_RATIO = 0.8
 INCLUDE_RE = re.compile(r"include the following (?:text|section)", re.IGNORECASE)
 
 
+# A slot marked with a mask rather than a bracket.
+#
+# Every gate in this module looked for the template's scaffolding written as
+# `<Colleague Name>`, `«FIELD»` or `[[ENDIF]]`. These templates mark a date slot
+# by *drawing* it instead:
+#
+#     本合同生效日期为xxxx年xx月xx日，终止日期为xxxx年xx月xx日。
+#     本合同期限为xx个月，其中试用期x 个月。
+#
+# None of that is a bracket, so a letter carrying it was reported clean. In one
+# eleven-template run the engine had resolved the contract start date, had no
+# slot to write it into, left `xxxx年xx月xx日` on the page, and passed the
+# document three times out of three.
+#
+# Deliberately narrow. The mask has to be x-runs *in the position of the value*,
+# next to the unit that names it -- so `12个月` and `2026年9月1日` are filled and
+# say nothing, while `xx个月` and `xxxx年xx月xx日` are not.
+#
+# Underscore runs are deliberately NOT matched. `签订日期：____年___月___日` on the
+# counterparty's side of a contract is a line somebody signs in ink, not an
+# unfilled slot, and there were 294 of them in one document. A gate that fires
+# on those is a gate reviewers learn to wave through -- the same reasoning the
+# instruction-text patterns above are narrowed by.
+FILL_MASK_RES = (
+    # CJK date: xxxx年xx月xx日
+    re.compile(r"[xX]{2,4}\s*年\s*[xX]{1,2}\s*月\s*[xX]{1,2}\s*日"),
+    # CJK counts: xx个月, x个月, xx天, xx年
+    re.compile(r"(?<![0-9A-Wa-wYyZz])[xX]{1,4}\s*(?:个月|个星期|天|周)"),
+    # Western date masks
+    re.compile(r"(?<![0-9A-Za-z])[xX]{2}[/\-][xX]{2}[/\-][xX]{2,4}(?![0-9A-Za-z])"),
+)
+
+# A whole date sitting in a slot that holds one part of one.
+#
+# `xxxx年xx月xx日` is three slots. Bind all three to the same date field and each
+# receives the entire value:
+#
+#     2026-09-01年2026-09-01月2026-09-01
+#
+# This is worse than the mask it replaces. A mask is visibly unfilled; this is
+# filled, wrong, and reads as data, so nobody checks it.
+DATE_PART_RES = (
+    re.compile(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\s*[年月日]"),
+    re.compile(r"[年月]\s*\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"),
+)
+
+
+def fill_masks_in(text: str) -> list:
+    """Masked slots the fill never replaced, in the order they appear."""
+    out, seen = [], set()
+    for rx in FILL_MASK_RES:
+        for hit in rx.findall(text):
+            token = " ".join(str(hit).split())
+            if token not in seen:
+                seen.add(token)
+                out.append(token)
+    return out
+
+
+def malformed_date_parts_in(text: str) -> list:
+    out, seen = [], set()
+    for rx in DATE_PART_RES:
+        for hit in rx.findall(text):
+            token = " ".join(str(hit).split())
+            if token not in seen:
+                seen.add(token)
+                out.append(token)
+    return out
+
+
 def _is_shouted(line: str) -> bool:
     letters = [c for c in line if c.isalpha()]
     if not letters:
@@ -121,6 +193,10 @@ class PlaceholderScan:
     #: The instructions themselves, so the finding can name one instead of
     #: telling a reviewer only that something is wrong somewhere.
     instruction_texts: tuple = ()
+    #: Slots drawn as a mask that the fill never replaced.
+    fill_masks: tuple = ()
+    #: Date-part slots carrying a whole date.
+    malformed_date_parts: tuple = ()
 
     @property
     def clean(self) -> bool:
@@ -129,6 +205,8 @@ class PlaceholderScan:
             or self.unresolved_mergefields
             or self.leftover_control_tokens
             or self.instruction_text_found
+            or self.fill_masks
+            or self.malformed_date_parts
         )
 
 
@@ -164,6 +242,8 @@ def scan(body_el) -> PlaceholderScan:
         leftover_control_tokens=CONTROL_TOKEN_RE.findall(text),
         instruction_text_found=bool(instruction_text_in(text)),
         instruction_texts=tuple(instruction_text_in(text)),
+        fill_masks=tuple(fill_masks_in(text)),
+        malformed_date_parts=tuple(malformed_date_parts_in(text)),
     )
 
 
@@ -196,6 +276,18 @@ def findings(body_el, policy: QaPolicy) -> list[QaFinding]:
     out += findings_for(
         INSTRUCTION_TEXT_REMAINS,
         [f"Leftover instruction text: {t}" for t in found.instruction_texts[:5]],
+        policy,
+    )
+    out += findings_for(
+        FILL_MASK_REMAINS,
+        [f"A slot was left as its mask rather than filled: {list(found.fill_masks[:5])}"]
+        if found.fill_masks else [],
+        policy,
+    )
+    out += findings_for(
+        DATE_PART_MALFORMED,
+        [f"A whole date was written into a year/month/day slot: {list(found.malformed_date_parts[:5])}"]
+        if found.malformed_date_parts else [],
         policy,
     )
     return out

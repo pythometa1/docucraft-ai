@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 from dataclasses import dataclass
+from datetime import date, datetime
 
 
 @dataclass
@@ -151,6 +152,29 @@ def _clean_cell(value) -> str:
         return ""
     if isinstance(value, float) and value.is_integer():
         return str(int(value))  # openpyxl reads whole numbers as 38.0
+    # A date-formatted cell arrives from openpyxl as a real `datetime`, and
+    # `str()` of one renders the midnight it never had:
+    #
+    #     变动将于2026-09-01 00:00:00生效
+    #
+    # in a letter that asked for a date. This is the layer where it has to be
+    # fixed: everything downstream -- binding, conditions, `format_value` -- is
+    # handed the string this function returns, so by the time a formatter could
+    # notice the value was a date, it is already text with a time stuck to it.
+    #
+    # A datetime at midnight is a date; every date-formatted spreadsheet cell is
+    # one. ISO, because this is the normalised form the rest of the pipeline
+    # parses -- `value_format.parse_date` reads it, so a field the compiler typed
+    # as a date still renders in the reader's locale from here.
+    #
+    # A datetime carrying an actual time keeps it. Dropping that would be
+    # inventing a fact rather than normalising one; what goes away is only the
+    # midnight nobody meant.
+    if isinstance(value, datetime):
+        return (value.date().isoformat() if not (value.hour or value.minute or value.second)
+                else value.isoformat(sep=" ", timespec="minutes"))
+    if isinstance(value, date):
+        return value.isoformat()
     return str(value).strip()
 
 

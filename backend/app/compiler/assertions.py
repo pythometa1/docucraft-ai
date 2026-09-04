@@ -45,6 +45,7 @@ UNEXECUTABLE_CONDITION = "unexecutable_condition"
 ORPHANED_FIELD = "orphaned_field"
 FIELD_WITHOUT_SLOT = "field_without_slot"
 SCAFFOLDING_CONFLICT = "scaffolding_conflict"
+UNGOVERNED_BLOCK = "ungoverned_block"
 TEST_FILL_FAILURE = "test_fill_failure"
 
 
@@ -513,6 +514,40 @@ def structural_faults(manifest: dict) -> list[Assertion]:
             f"{sorted(orphan.paragraphs)} which the compile deletes, so no document can ever "
             f"contain it. Either the deletion is wrong or the field is.",
             object_id=orphan.field_id,
+        ))
+
+    # A block nothing governs is not a conditional section -- it is ordinary
+    # text with a condition's name on it.
+    #
+    # `docx_renderer` drops a block only when a condition that *keeps* it decides
+    # False. So a block no condition references is never dropped, whatever the
+    # data says. Both halves of an `[[IF]] … [[ELSE]] … [[ENDIF]]` then print:
+    #
+    #     This is a fixed-term contract commencing on 1 September 2026.
+    #     This is a permanent contract commencing on 1 September 2026.
+    #
+    # The rule compiler cannot produce this -- `register_condition` runs for
+    # every block it creates. The agentic path can, and did: eight blocks, three
+    # conditions, and the five ungoverned ones were the positive arms. Nothing
+    # downstream notices, because every existing gate asks what is left over or
+    # what is absent, and this section is neither -- it is present and should not
+    # be.
+    governed = {
+        block_id
+        for c in manifest.get("conditions") or []
+        for block_id in (c.get("keeps_blocks") or [])
+    }
+    for b in manifest.get("blocks") or []:
+        if b.get("id") in governed:
+            continue
+        out.append(Assertion(
+            UNGOVERNED_BLOCK,
+            f"Block {b.get('id')!r} (paragraphs {b.get('start_paragraph')}-{b.get('end_paragraph')}) "
+            f"is kept by no condition, so it appears in every document regardless of the data. "
+            f"If it is conditional, add the condition that keeps it; if it is not, it should not "
+            f"be a block.",
+            paragraph_index=b.get("start_paragraph"),
+            object_id=b.get("id"),
         ))
     return out
 

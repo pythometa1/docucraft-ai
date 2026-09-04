@@ -53,6 +53,7 @@ function Landing() {
             <a href="#features" className="hover:text-foreground">Features</a>
             <a href="#usecases" className="hover:text-foreground">Use cases</a>
             <a href="#how" className="hover:text-foreground">How it works</a>
+            <Link to="/docs" className="hover:text-foreground">Docs</Link>
           </nav>
           <div className="flex items-center gap-2">
             <Link to="/dashboard" className="text-sm text-muted-foreground hover:text-foreground px-3 py-1.5">
@@ -193,6 +194,7 @@ function Landing() {
             <a href="#features" className="hover:text-foreground">Features</a>
             <a href="#usecases" className="hover:text-foreground">Use cases</a>
             <a href="#how" className="hover:text-foreground">How it works</a>
+            <Link to="/docs" className="hover:text-foreground">Documentation</Link>
             <Link to="/login" search={{ redirect: undefined }} className="hover:text-foreground">Sign in</Link>
           </div>
         </div>

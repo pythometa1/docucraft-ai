@@ -22,6 +22,7 @@ import {
   Sun,
   Moon,
   LogOut,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -43,6 +44,7 @@ const NAV = [
   { to: "/team", label: "Team", icon: Users },
   { to: "/audit-log", label: "Audit Log", icon: Shield },
   { to: "/settings", label: "Settings", icon: Settings },
+  { to: "/docs", label: "Docs", icon: BookOpen },
 ];
 
 function initials(name: string): string {
