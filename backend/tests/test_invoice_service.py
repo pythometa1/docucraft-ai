@@ -288,3 +288,52 @@ def test_gst_template_splits_tax_even_when_the_caller_forgets(app_client, org_a)
     assert record["cgst_amount"] == "900.00"
     assert record["sgst_amount"] == "900.00"
     assert record["grand_total"] == "11800.00"
+
+
+def test_a_fill_crash_after_allocation_rolls_the_number_back(
+        app_client, published_invoice_manifest, monkeypatch):
+    """The number is allocated before the fill, in the same transaction -- so a
+    renderer crash must return it, not burn it."""
+    token, project_id, manifest_id = published_invoice_manifest
+
+    first = app_client.post("/api/v1/invoices:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "customer": {"name": "A"}, "line_items": [{"amount": 10}], "fields": FIELDS})
+    assert first.status_code == 201
+
+    import app.generation.single as single_module
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("renderer crashed mid-fill")
+
+    monkeypatch.setattr(single_module, "fill_template", explode)
+    crashed = app_client.post("/api/v1/invoices:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "customer": {"name": "B"}, "line_items": [{"amount": 10}], "fields": FIELDS})
+    assert crashed.status_code == 422
+    assert crashed.json()["detail"]["error"]["code"] == "FILL_FAILED"
+    monkeypatch.undo()
+
+    after = app_client.post("/api/v1/invoices:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "customer": {"name": "C"}, "line_items": [{"amount": 10}], "fields": FIELDS})
+    n_first = int(first.json()["number"].split("-")[1])
+    n_after = int(after.json()["number"].split("-")[1])
+    assert n_after == n_first + 1, "the crashed generation burned a number"
+
+
+def test_an_invoice_with_nobody_to_bill_is_refused(app_client, published_invoice_manifest):
+    token, project_id, manifest_id = published_invoice_manifest
+    res = app_client.post("/api/v1/invoices:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "line_items": [{"amount": 10}], "fields": FIELDS})
+    assert res.status_code == 422
+    assert res.json()["detail"]["error"]["code"] == "INVOICE_NEEDS_CUSTOMER"
+
+
+def test_tax_rate_snapshot_is_plain_decimal_notation():
+    """Decimal("18").normalize() is 1.8E+1; the snapshot must never say that."""
+    totals = compute_totals([{"amount": 100}], tax_rate=18)
+    assert totals.record_values()["tax_rate"] == "18"
+    fractional = compute_totals([{"amount": 100}], tax_rate=12.5)
+    assert fractional.record_values()["tax_rate"] == "12.5"

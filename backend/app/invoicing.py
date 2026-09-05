@@ -69,7 +69,10 @@ class InvoiceTotals:
             "total_due": str(self.grand_total),
         }
         if self.tax_rate is not None:
-            out["tax_rate"] = str(self.tax_rate.normalize())
+            # `format(..., "f")` and not `str(normalize())`: Decimal("18")
+            # normalises to 1.8E+1, and scientific notation in an audit
+            # snapshot reads as corruption even where the renderer recovers.
+            out["tax_rate"] = format(self.tax_rate.normalize(), "f")
         return out
 
 

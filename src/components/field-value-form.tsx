@@ -69,17 +69,38 @@ const number = (value: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+/** Which keys of a line item carry the numbers, derived from the TABLE_ROW's
+ *  own columns -- a model-authored template is free to call quantity `qty`,
+ *  and hardcoding the kit names would 422 every invoice from it. */
+export function lineItemKeys(spec: TableRowSpec | null): {
+  quantity_key: string; unit_price_key: string; amount_key: string;
+} {
+  const columns = spec?.columns ?? [];
+  const find = (pattern: RegExp, type?: string) =>
+    columns.find((c) => pattern.test(c.source_key) && (!type || c.type === type))?.source_key;
+  const currencyColumns = columns.filter((c) => c.type === "currency");
+  return {
+    quantity_key: find(/qty|quantity|count|hours|units/i) ?? "quantity",
+    unit_price_key: find(/price|rate/i, "currency") ?? find(/price|rate/i) ?? "unit_price",
+    amount_key:
+      find(/amount|total|line_total/i, "currency")
+      ?? currencyColumns[currencyColumns.length - 1]?.source_key
+      ?? "amount",
+  };
+}
+
 /** Display-only totals while typing; the server's Decimal math is the record. */
 export function previewTotals(
   rows: Record<string, unknown>[],
   taxRate: number | null,
+  keys: { quantity_key: string; unit_price_key: string; amount_key: string },
 ): { subtotal: number; tax: number; total: number } | null {
   let subtotal = 0;
   for (const row of rows) {
     const amount =
-      number(row.amount) ??
-      (number(row.quantity) !== null && number(row.unit_price) !== null
-        ? (number(row.quantity) as number) * (number(row.unit_price) as number)
+      number(row[keys.amount_key]) ??
+      (number(row[keys.quantity_key]) !== null && number(row[keys.unit_price_key]) !== null
+        ? (number(row[keys.quantity_key]) as number) * (number(row[keys.unit_price_key]) as number)
         : null);
     if (amount === null) return null; // an unfinished row has no honest total
     subtotal += amount;

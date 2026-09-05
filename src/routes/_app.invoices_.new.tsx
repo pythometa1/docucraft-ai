@@ -28,7 +28,7 @@ import { ErrorBanner } from "@/components/error-banner";
 import { StageSkeleton } from "@/components/skeletons";
 import { FadeIn, SwapIn } from "@/components/motion";
 import {
-  FieldValueForm, previewTotals, tableRowSpec, typedFields,
+  FieldValueForm, lineItemKeys, previewTotals, tableRowSpec, typedFields,
   type ManifestFieldLike,
 } from "@/components/field-value-form";
 import { CustomerDialog } from "./_app.invoices";
@@ -75,6 +75,7 @@ function NewInvoicePage() {
 
   // Step 2 state
   const [customerId, setCustomerId] = useState<string | null>(null);
+  const [oneOff, setOneOff] = useState({ name: "", address: "", tax_id: "" });
   const [customers, setCustomers] = useState<Customer[] | null>(null);
   const [addingCustomer, setAddingCustomer] = useState(false);
   const [issueDate, setIssueDate] = useState(todayISO());
@@ -123,13 +124,19 @@ function NewInvoicePage() {
     if (selectedCustomer?.default_currency) setCurrency(selectedCustomer.default_currency);
   }, [selectedCustomer?.default_currency]);
 
+  const itemKeys = useMemo(() => lineItemKeys(spec), [spec]);
   const preview = useMemo(
-    () => previewTotals(rows, taxRate === "" ? null : Number(taxRate)),
-    [rows, taxRate],
+    () => previewTotals(rows, taxRate === "" ? null : Number(taxRate), itemKeys),
+    [rows, taxRate, itemKeys],
   );
 
   async function generate() {
     if (!manifest) return;
+    if (!customerId && !oneOff.name.trim()) {
+      toast.error("An invoice bills somebody — pick a customer or type a name.");
+      setStep(1);
+      return;
+    }
     const cleanRows = rows.filter((row) => Object.values(row).some((v) => v !== "" && v != null));
     setResult(null);
     try {
@@ -137,6 +144,11 @@ function NewInvoicePage() {
         manifest_id: manifest.id,
         project_id: projectId ?? undefined,
         customer_id: customerId ?? undefined,
+        customer: customerId ? undefined : {
+          name: oneOff.name.trim(),
+          address: oneOff.address.trim() || undefined,
+          tax_id: oneOff.tax_id.trim() || undefined,
+        },
         line_items: cleanRows,
         fields: values,
         currency,
@@ -144,6 +156,7 @@ function NewInvoicePage() {
         tax_split: taxSplit,
         issue_date: issueDate || undefined,
         due_date: dueDate || undefined,
+        ...itemKeys,
         locale: currency === "INR" ? "en_IN" : undefined,
       });
       setResult(generated);
@@ -226,11 +239,20 @@ function NewInvoicePage() {
               </div>
               <Button variant="outline" onClick={() => setAddingCustomer(true)}>New customer</Button>
             </div>
-            {selectedCustomer && (
+            {selectedCustomer ? (
               <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
                 <div className="font-medium text-foreground">{selectedCustomer.name}</div>
                 {selectedCustomer.address && <div>{selectedCustomer.address}</div>}
                 {selectedCustomer.tax_id && <div>Tax ID: {selectedCustomer.tax_id}</div>}
+              </div>
+            ) : (
+              <div className="grid gap-3 rounded-lg border border-border bg-muted/20 p-3 sm:grid-cols-3">
+                <Input placeholder="Customer name" value={oneOff.name}
+                       onChange={(e) => setOneOff({ ...oneOff, name: e.target.value })} />
+                <Input placeholder="Billing address" value={oneOff.address}
+                       onChange={(e) => setOneOff({ ...oneOff, address: e.target.value })} />
+                <Input placeholder="Tax ID / GSTIN" value={oneOff.tax_id}
+                       onChange={(e) => setOneOff({ ...oneOff, tax_id: e.target.value })} />
               </div>
             )}
             <div className="grid gap-4 sm:grid-cols-2">
@@ -292,7 +314,7 @@ function NewInvoicePage() {
 
         {step === 3 && manifest && (
           <ReviewStep
-            customerName={selectedCustomer?.name ?? "One-off customer"}
+            customerName={selectedCustomer?.name ?? (oneOff.name.trim() || "— nobody yet —")}
             lineCount={rows.filter((row) => Object.values(row).some((v) => v !== "" && v != null)).length}
             preview={preview}
             currency={currency}

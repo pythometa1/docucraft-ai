@@ -26,6 +26,7 @@ from app.authz import APPROVE_DOCUMENT, has_capability
 from app.db import get_db
 from app.generation.single import FillFailed, generate_one
 from app.invoicing import UncomputableAmount, compute_totals
+from app.metrics import record_qa_overrides
 from app.models import (
     Counter, Customer, Invoice, Project, TemplateFile, TemplateManifest,
     TemplateVersion, User, now,
@@ -339,13 +340,15 @@ def generate_invoice(body: InvoiceGenerateRequest, db: Session = Depends(get_db)
                     for k in ("name", "email", "phone", "address", "tax_id")}
     else:
         snapshot = {}
-    if snapshot and not (snapshot.get("name") or "").strip():
-        raise error("CUSTOMER_NEEDS_NAME", "The customer being billed needs a name.", 422)
-
     # -- the money, in Decimal, before anything is stored --
     if not body.line_items:
         raise error("INVOICE_NEEDS_LINE_ITEMS",
                     "An invoice needs at least one line item.", 422)
+    if not (snapshot.get("name") or "").strip():
+        raise error(
+            "INVOICE_NEEDS_CUSTOMER",
+            "An invoice bills somebody: pass customer_id from the client book, or an inline "
+            "customer with at least a name.", 422)
     tax_split = body.tax_split
     if tax_split is None:
         field_ids = {f.get("id") for f in (m.fields or ())}
@@ -420,6 +423,10 @@ def generate_invoice(body: InvoiceGenerateRequest, db: Session = Depends(get_db)
             outcome.version.approved_at = now()
             outcome.document.status = "approved"
             approved = True
+            # The same record the real :approve endpoint writes: §22 asks
+            # whether a human signed under a warning-severity finding, and an
+            # auto-approval that skipped this would hide exactly those.
+            record_qa_overrides(db, document_version_id=outcome.version.id, user_id=user.id)
             log_audit(db, user, "Approved draft", "document_version", outcome.version.id,
                       project.id, "success")
 
