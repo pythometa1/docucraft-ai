@@ -59,6 +59,13 @@ OPERATION_SCHEMA = {
         "conditions_to_remove": _array_of(id=_STR, reason=_REASON),
         "blocks_to_rerange": _array_of(
             id=_STR, start_paragraph=_INT, end_paragraph=_INT, reason=_REASON),
+        # A repeating table row: name the collection and the column tokens in the
+        # one template row that should render once per record. Tokens are a JSON
+        # string of `<Token>` names joined by `|`, because a free-form object
+        # cannot satisfy additionalProperties: false (see the module docstring).
+        "rows_to_repeat": _array_of(
+            id=_STR, iterate_over=_STR, column_tokens=_STR, reason=_REASON),
+        "row_repeats_to_remove": _array_of(id=_STR, reason=_REASON),
         "questions": {"type": "array", "items": _STR},
         "notes": {"type": "array", "items": _STR},
         "verdict": {"type": "string", "enum": ["proposed", "need_more_context"]},
@@ -67,6 +74,7 @@ OPERATION_SCHEMA = {
         "text_to_replace", "runs_to_reclassify", "runs_to_remove", "fields_to_add",
         "fields_to_remove", "fields_to_rename", "fields_to_retype", "missing_policies_to_set",
         "conditions_to_rewrite", "conditions_to_remove", "blocks_to_rerange",
+        "rows_to_repeat", "row_repeats_to_remove",
         "questions", "notes", "verdict",
     ],
     "additionalProperties": False,
@@ -85,6 +93,8 @@ _TRANSLATION = {
     "conditions_to_rewrite": ("rewrite_condition", ("id", "expression")),
     "conditions_to_remove": ("remove_condition", ("id",)),
     "blocks_to_rerange": ("set_block_range", ("id", "start_paragraph", "end_paragraph")),
+    "rows_to_repeat": ("set_row_repeat", ("id", "iterate_over")),
+    "row_repeats_to_remove": ("remove_row_repeat", ("id",)),
 }
 
 AUTHOR_SYSTEM = """You help somebody edit a document template.
@@ -110,7 +120,13 @@ Rules that are not negotiable:
     recognise, and say why.
   - If you cannot tell what is meant, return verdict "need_more_context" with a
     question rather than guessing. A wrong edit to a legal template is worse
-    than an unanswered question."""
+    than an unanswered question.
+
+A table row whose placeholders should repeat once per record of a list -- line
+items on an invoice, doses in a schedule -- is proposed with `rows_to_repeat`:
+name the collection (like line_items) and the row's column tokens joined by `|`
+(like `<Item Description>|<Qty>|<Amount>`). Only one row of the table repeats;
+headers and totals rows stay as they are."""
 
 EXPLAIN_SCHEMA = {
     "type": "object",
@@ -177,6 +193,11 @@ def _render_objects(objects) -> str:
             lines.append(
                 f"SECTION {obj.get('object_id')} paragraphs "
                 f"{obj.get('start_paragraph')}-{obj.get('end_paragraph')}")
+        elif kind == "TABLE_ROW":
+            tokens = "|".join((c.get("token") or "") for c in obj.get("columns") or ())
+            lines.append(
+                f"TABLE_ROW {obj.get('object_id')} repeats over {obj.get('iterate_over')!r} "
+                f"columns {tokens}")
     return "\n".join(lines) or "(nothing understood yet)"
 
 
@@ -199,6 +220,12 @@ def to_operations(data: dict) -> list:
                     op[key] = entry[key]
             if operation == "set_segment_emit":
                 op["emit"] = False
+            if operation == "set_row_repeat":
+                op["columns"] = [
+                    {"token": token.strip()}
+                    for token in (entry.get("column_tokens") or "").split("|")
+                    if token.strip()
+                ]
             if entry.get("reason"):
                 op["reason"] = entry["reason"]
             out.append(op)

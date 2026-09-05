@@ -19,11 +19,16 @@ RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
 FROM python:3.12-slim-bookworm AS runtime
 
-# Runtime libraries only, and LibreOffice deliberately NOT installed: the PDF
-# preview path is the only thing that wants it, it has no callers, and it would
-# roughly triple the image. Add it here if that path is ever wired up.
+# Runtime libraries, plus LibreOffice Writer for DOCX->PDF conversion -- the
+# invoice service delivers PDFs, so the path that used to have no callers now
+# does. Writer-only with --no-install-recommends keeps the addition to a few
+# hundred MB rather than the full suite's ~1GB; fonts-dejavu covers the Latin
+# range plus the currency glyphs invoices print. `pdf_renderer.render_pdf`
+# finds /usr/bin/soffice via SOFFICE_CANDIDATES and, absent this package,
+# answers 503 PDF_UNAVAILABLE -- so dev machines without it keep working.
 RUN apt-get update && apt-get install --no-install-recommends -y \
         libxml2 libxslt1.1 libpq5 curl \
+        libreoffice-writer fonts-dejavu \
     && rm -rf /var/lib/apt/lists/*
 
 # Not root. A template is an untrusted zip from outside the trust boundary and

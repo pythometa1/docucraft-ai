@@ -9,6 +9,7 @@ export type FunctionKey =
   | "Medical Affairs"
   | "Marketing"
   | "Legal"
+  | "Finance"
   | "Regulatory Affairs";
 
 export interface TemplateFile {
@@ -365,3 +366,68 @@ export interface QualityReport {
     note: string;
   };
 }
+
+/* ---- The invoice service ---- */
+
+export type Customer = {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  tax_id: string | null;
+  default_currency: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InvoiceSummary = {
+  id: string;
+  number: string;
+  status: string; // issued | draft | void
+  project_id: string;
+  customer_id: string | null;
+  /** The customer as billed -- a snapshot, deliberately not a live join. */
+  customer: { name?: string | null; address?: string | null; tax_id?: string | null };
+  currency: string;
+  subtotal: string | null;
+  tax_amount: string | null;
+  total: string | null;
+  line_count: number;
+  manifest_id: string | null;
+  document_id: string | null;
+  document_version_id: string | null;
+  qa_passed: boolean;
+  issued_at: string | null;
+  due_at: string | null;
+  created_at: string;
+};
+
+export type InvoiceGenerated = InvoiceSummary & {
+  filename: string;
+  qa_notes: string[];
+  locale: string;
+  locale_source: string;
+};
+
+/** One column of a §6 TABLE_ROW: the token in the prototype row, the key each
+ *  line-item record supplies, and how the value renders. */
+export type TableRowColumn = {
+  token: string;
+  field_id: string;
+  source_key: string;
+  type: string;
+  format: string | null;
+  on_missing: string;
+  default: unknown;
+};
+
+export type TableRowSpec = {
+  id: string;
+  object_type: "TABLE_ROW";
+  iterate_over: string;
+  columns: TableRowColumn[];
+  empty_behaviour: string;
+  required?: boolean;
+};

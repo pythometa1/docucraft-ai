@@ -94,6 +94,7 @@ OPERATION_BY_CAPABILITY = {
     "Agentic revision": COMPILE,
     "Editing a template": AUTHORING,
     "Explaining a template": AUTHORING,
+    "Authoring a template from a description": AUTHORING,
     "Suggesting a document edit": EDIT,
     "Chat": CHAT,
     "Token-template generation": GENERATE,

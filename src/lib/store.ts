@@ -255,6 +255,7 @@ export const FUNCTIONS: FunctionKey[] = [
   "Human Resources",
   "Legal",
   "Regulatory Affairs",
+  "Finance",
 ];
 
 export const DOCUMENT_TYPES: Record<string, string[]> = {
@@ -267,6 +268,7 @@ export const DOCUMENT_TYPES: Record<string, string[]> = {
   Marketing: ["Product Brief", "Campaign Copy", "Localized Content"],
   Legal: ["Contract", "NDA", "Legal Memo"],
   "Regulatory Affairs": ["Regulatory Cover Letter", "Submission Package"],
+  Finance: ["Invoice", "Quotation", "Purchase Order"],
 };
 
 export const REGIONS = ["Europe", "North America", "Asia Pacific", "Latin America", "Middle East & Africa", "Global"];
@@ -281,4 +283,5 @@ export const FUNCTION_COLORS: Record<FunctionKey, string> = {
   Marketing: "bg-chart-5/15 text-chart-5 border-chart-5/30",
   Legal: "bg-muted text-muted-foreground border-border",
   "Regulatory Affairs": "bg-brand/15 text-brand border-brand/30",
+  Finance: "bg-success/15 text-success border-success/30",
 };

@@ -47,7 +47,7 @@ from app.security import error, get_current_user
 from app.storage import abs_path, save_bytes
 from app.templates import blueprint as bp
 from app.templates.emit_docx import EmitError, emit, emit_from_base
-from app.templates.kits import UnknownKit, list_kits, load_kit, objects_for
+from app.templates.kits import UnknownKit, kit_objects, list_kits, load_kit
 from app.templates.blueprint_lint import Finding as LintFinding
 from app.templates.blueprint_lint import lint as lint_blueprint
 from app.templates.lift import (
@@ -350,6 +350,114 @@ def from_template(body: FromTemplateRequest, db: Session = Depends(get_db),
         summary=None, blocking_note=unconverged)
 
 
+class FromDescriptionRequest(BaseModel):
+    description: str
+    name: str | None = None
+    project_id: str | None = None
+    #: Selects a per-service prompt pack ("invoice" today) and the kit used as
+    #: a fallback when no model is configured or authoring fails validation.
+    service: str | None = None
+
+
+#: The kit that stands in when the model cannot author for a service. A wizard
+#: that dead-ends on a missing API key is a wizard nobody finishes.
+FALLBACK_KIT_BY_SERVICE = {"invoice": "invoice"}
+
+
+@router.post("/template-blueprints:from-description", status_code=201)
+def from_description(body: FromDescriptionRequest, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """A whole template, authored by a model from a plain description.
+
+    The model emits a constrained body vocabulary; the server assembles it,
+    derives the typed objects, and *proves* the result by emitting it and
+    asserting the round-trip property before anything is persisted -- see
+    `compiler.blueprint_author`. What comes back is an ordinary draft
+    blueprint: same studio, same lint, same publish gate as everything else.
+
+    When no model is configured, or the model's two attempts both fail
+    validation, the service's kit stands in -- with the reason recorded in the
+    response and the provenance, never silently.
+    """
+    from app.compiler.blueprint_author import AuthoringFailed, author_blueprint
+
+    if not (body.description or "").strip():
+        raise error("DESCRIPTION_REQUIRED",
+                    "Describe the business and the document, or start from a kit.", 422)
+    if body.project_id:
+        owned_project(db, body.project_id, user)
+
+    service = (body.service or "").strip().lower() or None
+    fallback_kit = FALLBACK_KIT_BY_SERVICE.get(service)
+
+    authored = None
+    fallback_reason = None
+    try:
+        authored = author_blueprint(
+            body.description, service=service,
+            llm_policy=llm_policy_for(
+                db, user.org_id, project_id=body.project_id, user_id=user.id,
+                subject_type="template_authoring", subject_id=None))
+    except LLMNotConfiguredError as exc:
+        if fallback_kit is None:
+            raise error("LLM_NOT_CONFIGURED", str(exc) or NO_MODEL_MESSAGE, 503)
+        fallback_reason = "No language model is configured, so a shipped kit stands in."
+    except AuthoringFailed as exc:
+        if fallback_kit is None:
+            raise error(
+                "TEMPLATE_NOT_AUTHORED",
+                f"The model could not produce a verifiable template ({exc}). "
+                "Try rephrasing the description, or start from a kit.", 502)
+        fallback_reason = (
+            f"The model could not produce a verifiable template ({exc}), "
+            "so a shipped kit stands in.")
+
+    if authored is not None:
+        blueprint_kind = "generated"
+        blueprint_body, objects = authored["body"], authored["objects"]
+        findings = authored["findings"]
+        notes = authored["notes"]
+        provenance = {"kind": "generated", "description": body.description[:2000],
+                      "service": service, "model": authored.get("model")}
+        change_summary = "Authored from a description."
+        generation = {"source": "model", "notes": notes, "model": authored.get("model")}
+    else:
+        from app.templates.kits import kit_objects as _kit_objects
+        from app.templates.kits import load_kit as _load_kit
+
+        kit = _load_kit(fallback_kit)
+        blueprint_kind = "kit"
+        blueprint_body, objects = kit["body"], _kit_objects(kit)
+        findings = []
+        provenance = {"kind": "kit", "kit": kit["id"],
+                      "description": body.description[:2000],
+                      "fallback_reason": fallback_reason}
+        change_summary = f"Started from the {kit['name']} kit ({fallback_reason})"
+        generation = {"source": "kit_fallback", "notes": [fallback_reason], "model": None}
+
+    row = TemplateBlueprint(
+        org_id=user.org_id, project_id=body.project_id,
+        name=body.name or (service.title() if service else "Generated template"),
+        kind=blueprint_kind, status="draft", created_by=user.id)
+    db.add(row)
+    db.flush()
+    first = TemplateBlueprintVersion(
+        blueprint_id=row.id, org_id=row.org_id, version_no=1,
+        body=blueprint_body, objects=objects, findings=findings,
+        provenance=provenance, change_summary=change_summary[:400], created_by=user.id)
+    db.add(first)
+    db.flush()
+    row.current_version_id = first.id
+
+    log_audit(db, user, "Authored a template from a description", "template_blueprint",
+              row.id, body.project_id, "info", (body.description or "")[:200])
+    db.commit()
+    db.refresh(row)
+    db.refresh(first)
+    return {**_blueprint_out(row, first), "version": _version_out(first),
+            "generation": generation}
+
+
 @router.get("/template-blueprint-kits")
 def blueprint_kits(user: User = Depends(get_current_user)):
     """The documents you can start from.
@@ -393,7 +501,7 @@ def create_from_kit(request: FromKitRequest, db: Session = Depends(get_db),
 
     first = TemplateBlueprintVersion(
         blueprint_id=row.id, org_id=row.org_id, version_no=1,
-        body=kit["body"], objects=objects_for(kit["body"]), findings=[],
+        body=kit["body"], objects=kit_objects(kit), findings=[],
         provenance={"kind": "kit", "kit": kit["id"]},
         change_summary=f"Started from the {kit['name']} kit.", created_by=user.id)
     db.add(first)
@@ -974,11 +1082,27 @@ def publish(blueprint_id: str, request: PublishRequest | None = None,
         # Straight from the compiler, exactly as the project's own Compile button
         # would produce it -- same code, same shape, same confidence -- so the
         # manifest that ships is a reading of the bytes that shipped.
+        #
+        # With one addition the compiler cannot make. A §6 TABLE_ROW is an
+        # *author's* declaration -- "this row renders once per record" -- and
+        # nothing in the document says it; the compiler reads the prototype
+        # row's tokens as ordinary fields. Dropping the declaration here would
+        # mean a republished invoice quietly stops repeating its line items, so
+        # the blueprint's TABLE_ROW objects ride into the recompiled manifest
+        # unchanged. They are located by token at fill time, so the compiler's
+        # renumbering costs them nothing.
+        carried_rows = [
+            {"id": o.get("object_id"),
+             **{k: v for k, v in o.items() if k not in ("object_id", "id")}}
+            for o in (version.objects or ())
+            if str(o.get("object_type") or "").upper() == "TABLE_ROW"
+        ]
         manifest = TemplateManifest(
             org_id=row.org_id, template_file_id=row.template_file_id,
             template_version_id=emitted_version.id, version_no=next_version_no,
             status="draft", fields=compiled.manifest.fields,
-            conditions=compiled.manifest.conditions, blocks=compiled.manifest.blocks,
+            conditions=compiled.manifest.conditions,
+            blocks=list(compiled.manifest.blocks or []) + carried_rows,
             delete_always=compiled.manifest.delete_always,
             confidence=compiled.manifest.confidence,
             compiled_by=compiled.manifest.compiled_by,

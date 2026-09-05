@@ -469,6 +469,8 @@ def manifest_preview(manifest_id: str, db: Session = Depends(get_db), user: User
     deleted = {(d["paragraph_index"], d.get("span_index")) for d in manifest.delete_always}
     blocks_by_paragraph: dict[int, list[str]] = {}
     for block in manifest.blocks:
+        if block.get("start_paragraph") is None or block.get("end_paragraph") is None:
+            continue  # a §6 TABLE_ROW is located by its column tokens, not by a range
         for p in range(block["start_paragraph"], block["end_paragraph"] + 1):
             blocks_by_paragraph.setdefault(p, []).append(block["id"])
 

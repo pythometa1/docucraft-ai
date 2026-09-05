@@ -38,7 +38,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   BarChart3, BookOpen, ClipboardCheck, FileText, FolderKanban, Gauge,
-  LayoutTemplate, MessageSquare, Settings, Shield, Users,
+  LayoutTemplate, MessageSquare, ReceiptText, Settings, Shield, Users,
 } from "lucide-react";
 
 import { api } from "@/lib/api";
@@ -63,6 +63,7 @@ const DESTINATIONS = [
   { label: "Projects", to: "/dashboard" as const, icon: FolderKanban },
   { label: "Chat", to: "/chat" as const, icon: MessageSquare },
   { label: "Templates", to: "/templates" as const, icon: FileText },
+  { label: "Invoices", to: "/invoices" as const, icon: ReceiptText },
   { label: "Review", to: "/review" as const, icon: ClipboardCheck },
   { label: "Analytics", to: "/analytics" as const, icon: BarChart3 },
   { label: "Quality", to: "/quality" as const, icon: Gauge },

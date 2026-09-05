@@ -36,6 +36,7 @@ from app.ownership import owned_manifest, owned_project, owned_template_file
 from app.templates.ingest import parse_template_version
 from app.templates.parsers.docx_prescan import prescan
 from app.generation.docx_renderer import fill_template
+from app.generation.single import FillFailed, generate_one
 from app.generation.pdf_fill import fill_pdf_template
 from app.generation.source_template import build_workbook, filename_for
 from app.compile_progress import DETERMINISTIC, EMBEDDING, MODEL, RETRIEVAL, CompileProgress
@@ -1012,74 +1013,25 @@ def generate_from_manifest(manifest_id: str, body: GenerateFromManifestRequest, 
     if not project or project.org_id != user.org_id:
         raise error("PROJECT_NOT_FOUND", "Project not found", 404)
 
-    manifest_dict = {"fields": m.fields, "conditions": m.conditions, "blocks": m.blocks, "delete_always": m.delete_always}
-    out_dir = f"generated/{project_id}"
-    os.makedirs(str(abs_path(out_dir)), exist_ok=True)
-    gen_id_placeholder = f"manifest-gen-{datetime.now(timezone.utc).timestamp()}"
-
-    # §12 keeps one logical manifest and two format-specific execution paths. An
-    # immutable PDF is not filled by editing runs -- there are none -- but by
-    # masking the approved region and overlaying text at the coordinates a human
-    # signed off. The manifest is the same; only the renderer differs, which is
-    # exactly the separation §12 asks for.
-    is_pdf = str(tv.blob_path).lower().endswith(".pdf")
-    out_rel = f"{out_dir}/{gen_id_placeholder}.{'pdf' if is_pdf else 'docx'}"
-
+    # The render, the document trail and the two §12 fixes (locale, qa_policy)
+    # live in `generation.single.generate_one`, shared with the invoice service
+    # so the two single-record paths cannot drift apart the way the single and
+    # batch paths once did.
     try:
-        if is_pdf:
-            with timed(db, org_id=user.org_id, operation=PDF_OVERLAY_RENDER):
-                fill_result = fill_pdf_template(
-                    str(abs_path(tv.blob_path)), str(abs_path(out_rel)),
-                    manifest_dict, body.source_record,
-                    page_regions=tv.page_regions,
-                    qa_policy=m.qa_policy,
-                )
-        else:
-            with timed(db, org_id=user.org_id, operation=SINGLE_DOCX_RENDER):
-                fill_result = fill_template(str(abs_path(tv.blob_path)), str(abs_path(out_rel)), manifest_dict, body.source_record)
-    except Exception as exc:
+        outcome = generate_one(
+            db, user, manifest=m, template_version=tv, project=project,
+            source_record=body.source_record, language=body.language,
+        )
+    except FillFailed as exc:
         raise error("FILL_FAILED", f"Could not generate document: {exc}", 422)
-
-    counter = db.get(Counter, "generated_doc_display_id")
-    if counter is None:
-        counter = Counter(name="generated_doc_display_id", value=50000)
-        db.add(counter)
-    counter.value += 1
-    db.flush()
-
-    # A QA failure has to change something. This line used to read
-    # `"draft" if fill_result.qa_passed else "draft"`, so a document with an
-    # unresolved required field or a leftover placeholder was stored, listed and
-    # downloadable exactly like a clean one -- QA was computed, recorded, and
-    # then ignored.
-    doc_status = "draft" if fill_result.qa_passed else "blocked"
-    gen_doc = GeneratedDocument(org_id=user.org_id, project_id=project_id, draft_id=None, display_id=counter.value, language=body.language, status=doc_status)
-    db.add(gen_doc)
-    db.flush()
-    dv = DocumentVersion(document_id=gen_doc.id, org_id=gen_doc.org_id, version_no=1, blob_path=out_rel, renderer=OOXML_FILL, change_summary="Generated via Template Manifest", status=doc_status, created_by=user.id)
-    db.add(dv)
-    db.flush()
-    gen_doc.current_version_id = dv.id
-
-    mg = ManifestGeneration(
-        org_id=user.org_id, manifest_id=manifest_id, source_record=body.source_record,
-        field_lineage=fill_result.field_lineage, condition_lineage=fill_result.condition_lineage,
-        qa_passed=fill_result.qa_passed, qa_notes=fill_result.qa_notes, blob_path=out_rel, created_by=user.id,
-    )
-    db.add(mg)
-    db.flush()
-    record_qa_findings(
-        db, org_id=user.org_id, findings=fill_result.qa_findings, manifest_id=manifest_id,
-        generation_id=mg.id, document_version_id=dv.id,
-    )
-    log_audit(db, user, "Generated document from manifest", "generated_document", gen_doc.id, project_id, "info" if fill_result.qa_passed else "warning")
     db.commit()
 
-    filename = f"{project.name}_{project.display_id}_{gen_doc.display_id}_{body.language}.docx"
     return {
-        "document_id": gen_doc.id, "document_version_id": dv.id, "filename": filename,
-        "qa_passed": fill_result.qa_passed, "qa_notes": fill_result.qa_notes,
-        "field_lineage": fill_result.field_lineage, "condition_lineage": fill_result.condition_lineage,
+        "document_id": outcome.document.id, "document_version_id": outcome.version.id,
+        "filename": outcome.filename,
+        "qa_passed": outcome.fill.qa_passed, "qa_notes": outcome.fill.qa_notes,
+        "field_lineage": outcome.fill.field_lineage,
+        "condition_lineage": outcome.fill.condition_lineage,
     }
 
 

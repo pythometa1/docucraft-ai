@@ -144,6 +144,27 @@ def validate_manifest(manifest: dict, *, warnings=None, dispositions=None) -> li
                 ))
 
     for b in blocks:
+        if str(b.get("object_type") or "").upper() == "TABLE_ROW":
+            # A §6 TABLE_ROW lives in `blocks` beside the SECTIONs but is not a
+            # paragraph range: it is one template row, located by its column
+            # tokens and rendered once per record. What approval must insist on
+            # is that repeating it could ever fill anything.
+            if not str(b.get("iterate_over") or "").strip():
+                failures.append(ValidationFailure(
+                    "table_row_without_collection",
+                    f"Repeating row {b.get('id')!r} names no collection to iterate over, so it "
+                    "would render the template row once and call that a table.",
+                    b.get("id"),
+                ))
+            columns = [c for c in (b.get("columns") or ()) if isinstance(c, dict)]
+            if not any((c.get("token") or "").strip() for c in columns):
+                failures.append(ValidationFailure(
+                    "table_row_without_columns",
+                    f"Repeating row {b.get('id')!r} declares no column tokens, so repeating it "
+                    "would print the unfilled template row over and over.",
+                    b.get("id"),
+                ))
+            continue
         start, end = b.get("start_paragraph"), b.get("end_paragraph")
         if start is None or end is None:
             failures.append(ValidationFailure("block_without_range", f"Block {b.get('id')!r} has no paragraph range.", b.get("id")))

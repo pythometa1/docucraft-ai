@@ -5,7 +5,7 @@
 ![status](https://img.shields.io/badge/status-active%20development-brightgreen)
 ![frontend](https://img.shields.io/badge/frontend-React%2019%20%2F%20TanStack%20Start-blue)
 ![backend](https://img.shields.io/badge/backend-FastAPI%20%2F%20PostgreSQL%2017%20%2F%20Redis-blue)
-![tests](https://img.shields.io/badge/tests-2%2C222%20%C2%B7%2087%25%20coverage-success)
+![tests](https://img.shields.io/badge/tests-2%2C266%20%C2%B7%2088%25%20coverage-success)
 ![license](https://img.shields.io/badge/license-proprietary-lightgrey)
 
 > **This file is the canonical overview of the project and is written against the code, not against a plan.** Every number, gate name, endpoint count and limit below was read out of the source at the time of writing. Where something is built but not wired up, [§12](#12-what-is-wired-and-what-is-a-seam) says so by name — a README that only lists what works is a sales page, and the first person it misleads is the next contributor.
@@ -39,7 +39,9 @@ DocuMind AI is a document-generation platform for regulated, template-heavy work
 
 The central design decision: **a model reads the template once; nothing reads the data.** Compiling a template is hard language understanding and happens once per template family. Filling it is deterministic OOXML surgery that runs per document, makes zero model calls, costs nothing but CPU, and cannot hallucinate a salary figure.
 
-It is a running application, not a prototype: 133 HTTP endpoints across a FastAPI backend on PostgreSQL 17 + pgvector and Redis, a 15-route React 19 frontend, 45 database tables, 42 of them under row-level security, and a 2,222-test suite behind a coverage gate CI runs verbatim.
+It is a running application, not a prototype: 148 HTTP endpoints across a FastAPI backend on PostgreSQL 17 + pgvector and Redis, a 17-route React 19 frontend, 48 database tables, 45 of them under row-level security, and a 2,266-test suite behind a coverage gate CI runs verbatim.
+
+It also ships its first per-industry **service**: invoice generation. Describe your business, a model authors the invoice template (proven by the same emit round-trip every template passes, with shipped kits standing in when no model is configured), type the line items, and a numbered invoice comes back as DOCX or PDF - customer book, org-scoped INV-#### sequences and server-side Decimal money included. The primitive underneath it, the TABLE_ROW (one template row rendered once per record of a collection), is the same one clinical listings and batch records will need.
 
 ---
 
@@ -268,7 +270,7 @@ flowchart TB
 | **Cache** | Redis 7 — token bucket, JWT revocation, download grants |
 | **Documents** | python-docx, lxml (raw OOXML surgery), pypdf, openpyxl, babel, beautifulsoup4 |
 | **Retrieval** | scikit-learn TF-IDF + a local hashing embedder, pgvector storage |
-| **Testing** | pytest — 81 modules, 2,222 tests, golden-DOCX comparison by C14N canonicalisation |
+| **Testing** | pytest — 89 modules, 2,266 tests, golden-DOCX comparison by C14N canonicalisation |
 
 ---
 
@@ -339,13 +341,12 @@ The repo contains **zero `TODO`, `FIXME`, `XXX`, `HACK` or `NotImplementedError`
 - **Mapping memory persists nowhere at runtime.** The binding-suggestions endpoint rebuilds an in-process memory from existing bindings on every request; the three memory tables are modelled and migrated but unwritten. Cross-tenant structural-pattern sharing has no HTTP surface at all.
 - **`GET /document-versions/{id}/citations` can only return an empty list** — every document-creation site hardcodes `draft_id=None`, and nothing writes the citations column. Citation grounding is real at the provider boundary; the endpoint that would surface it is not.
 - **Escaped-error reporting and the calibration log have no UI.** The backend ranks escaped error rate first among its metrics, and the only endpoint that can make it measurable is unreachable from the shipped product.
-- **The manifest `qa_policy` never reaches the DOCX renderer** — both DOCX callers build a four-key dict, so DOCX generations always run on default severities. Only the PDF path passes it.
 - **The Korean postposition pass never fires** — the manifest column that would enable it is not persisted.
 - **`value_exceeds_max_len` is dormant** — nothing in the compiler emits a `max_len`, so it is silent until a manifest declares one.
 - **A tenth assertion, `scaffolding_conflict`, is declared and never raised.** So is the compiler's optional test-fill assertion: `compile_template(test_fill=...)` is passed only from tests, so `test_fill_failure` cannot fire through the API.
 - **Retrieval evidence reaches one of four compile call sites.** Only the single-template compile passes it; bulk onboarding and both blueprint compiles do not — so a template onboarded in bulk is read with no knowledge of the organisation's existing column names, which is the case the feature was built for.
 - **Settings is mostly mock.** Only the Profile tab reads real data. Workspace, AI Models, Notifications, Security, API keys and Billing are static JSX. Audit-log filters, export and pagination have no handlers, and the team screen has no invite or role-change controls at all.
-- **PDF export does not work in the container as built** — the image deliberately omits LibreOffice (it would roughly triple the size). The single-document download answers `503 PDF_UNAVAILABLE` there; the bulk zip catches the same failure per document, lists it in `_FAILED.txt`, and answers `422 NOTHING_TO_DOWNLOAD` when nothing converted. The Dockerfile comment claiming that path has no callers is stale: it has two.
+- **PDF export needs LibreOffice on the host.** The Docker image now installs `libreoffice-writer` (the invoice service delivers PDFs), so the container converts; a dev machine without `soffice` still answers `503 PDF_UNAVAILABLE` on the single download, and the bulk zip lists the failure per document in `_FAILED.txt`.
 - **`docs/BACKEND_SPEC.md` §-numbers cited in code comments do not resolve to that document.** The code quotes an architecture record not present in this repository — treat those references as provenance notes, not lookups.
 
 ---
@@ -454,7 +455,7 @@ One script, run identically locally and in CI, so *"green locally"* and *"green 
 
 | | |
 |---|---|
-| Tests collected | **2,222** across 81 modules |
+| Tests collected | **2,266** across 89 modules |
 | Last verified run | 2,220 passed, 2 skipped, exit 0 |
 | Measured coverage | **87.33%** (14,995 statements, 1,900 missed) |
 | Global floor | 76%, env-overridable |

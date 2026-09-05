@@ -118,6 +118,23 @@ const API: { id: string; title: string; blurb: string; endpoints: Endpoint[] }[]
     ],
   },
   {
+    id: "api-invoices",
+    title: "Invoices",
+    blurb:
+      "The first per-industry service: a client book, an org-scoped numbering, and one call "
+      + "that turns a published invoice template plus line items into a numbered document. "
+      + "Every figure is computed server-side in Decimal.",
+    endpoints: [
+      { method: "POST", path: "/template-blueprints:from-description", what: "A whole template authored from a plain description; falls back to a shipped kit when no model is configured.", note: "service: invoice" },
+      { method: "GET", path: "/customers", what: "The client book." },
+      { method: "POST", path: "/customers", what: "Save a customer for reuse." },
+      { method: "POST", path: "/invoices:generate", what: "Line items + fields in, a numbered invoice out. Allocates INV-#### in the same transaction that stores the document.", note: "tax_split for CGST/SGST" },
+      { method: "GET", path: "/invoices", what: "Every invoice, newest first.", note: "?status=&customer_id=" },
+      { method: "POST", path: "/invoices/{id}:void", what: "Void an invoice. The number is kept — a numbering with silent gaps is worse." },
+      { method: "GET", path: "/document-versions/{id}/download", what: "The invoice as a file.", note: "?format=docx|pdf" },
+    ],
+  },
+  {
     id: "api-documents",
     title: "Documents",
     blurb:

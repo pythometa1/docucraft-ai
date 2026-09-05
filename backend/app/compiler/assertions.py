@@ -540,6 +540,12 @@ def structural_faults(manifest: dict) -> list[Assertion]:
     for b in manifest.get("blocks") or []:
         if b.get("id") in governed:
             continue
+        if str(b.get("object_type") or "").upper() == "TABLE_ROW":
+            # Not a conditional section at all: a §6 TABLE_ROW is governed by
+            # its *collection* -- it renders once per record of `iterate_over`
+            # and disappears when the collection is empty -- so "kept by no
+            # condition" is its correct, permanent state.
+            continue
         out.append(Assertion(
             UNGOVERNED_BLOCK,
             f"Block {b.get('id')!r} (paragraphs {b.get('start_paragraph')}-{b.get('end_paragraph')}) "

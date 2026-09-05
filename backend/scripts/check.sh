@@ -95,6 +95,16 @@ FLOORS = {
     # embeddings table, and nothing called the overlay renderer.
     "retrieval/indexing.py": 94,
     "generation/pdf_fill.py": 95,
+    # The invoice service. `invoicing` is the Decimal money math -- every branch
+    # is a figure on somebody's tax return; `numbering` hands out INV-#### and an
+    # untested branch there is a duplicate number in an audit; `single` is the
+    # shared single-record generation core both the manifest endpoint and the
+    # invoice endpoint execute; `blueprint_author` is the only place a model's
+    # output becomes a template, and its refusals are the whole safety story.
+    "invoicing.py": 85,
+    "numbering.py": 88,
+    "generation/single.py": 90,
+    "compiler/blueprint_author.py": 90,
     # The contract: what production is allowed to execute, and whether a
     # document can still be reproduced from the pair it was generated against.
     "manifests/models.py": 90,

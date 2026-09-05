@@ -113,6 +113,10 @@ def run_row(
         "conditions": manifest.conditions,
         "blocks": manifest.blocks,
         "delete_always": manifest.delete_always,
+        # §12's known gap, closed on both single and batch paths in the same
+        # release: the manifest's declared severities reach the renderer
+        # instead of silently reapplying the defaults.
+        "qa_policy": manifest.qa_policy,
     }
     resolved = apply_binding(record, field_bindings, value_map)
 

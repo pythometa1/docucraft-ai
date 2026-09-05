@@ -50,8 +50,10 @@ def org_a_resources(app_client, two_orgs):
     """
     from app.db import SessionLocal
     from app.models import (
-        Conversation, DocumentReview, DocumentVersion, DraftDocument, GeneratedDocument,
-        GenerationJob, Mapping, Project, ReviewComment, ReviewTask, SourceFile, SourceVersion,
+        Conversation, Customer, DocumentReview, DocumentVersion, DraftDocument,
+        GeneratedDocument,
+        GenerationJob, Invoice, Mapping, Project, ReviewComment, ReviewTask, SourceFile,
+        SourceVersion,
         TemplateBlueprint,
         TemplateBlueprintVersion, TemplateFile, TemplateLibrary, TemplateLibraryVersion,
         TemplateManifest, TemplateVersion, User,
@@ -121,6 +123,15 @@ def org_a_resources(app_client, two_orgs):
         db.add(comment)
         db.flush()
 
+        customer = Customer(org_id=org, name="Acme Traders", created_by=user.id)
+        db.add(customer)
+        db.flush()
+        invoice = Invoice(org_id=org, project_id=project_a, number="INV-9001",
+                          customer_id=customer.id, customer_snapshot={"name": "Acme Traders"},
+                          currency="USD", created_by=user.id)
+        db.add(invoice)
+        db.flush()
+
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
             "source_id": sf.id, "draft_id": draft.id, "document_id": gd.id,
@@ -130,6 +141,7 @@ def org_a_resources(app_client, two_orgs):
             "source_version_id": sv.id, "template_version_id": tv.id,
             "blueprint_id": blueprint.id,
             "review_id": review.id, "comment_id": comment.id,
+            "customer_id": customer.id, "invoice_id": invoice.id,
         }
         db.commit()
     finally:
@@ -267,6 +279,15 @@ ROUTES: list[dict] = [
         "method": "POST", "path": "/template-manifests/{manifest_id}/warnings:resolve",
         "body": {"code": "W-HL-GAP", "note": "reviewed"},
     },
+
+    # The invoice service. The registry rows carry customer names, addresses,
+    # tax ids and money, so a wrong-tenant read here is a leak of exactly the
+    # data §16 is about.
+    {"method": "GET", "path": "/customers/{customer_id}"},
+    {"method": "PATCH", "path": "/customers/{customer_id}", "body": {"name": "x"}},
+    {"method": "DELETE", "path": "/customers/{customer_id}"},
+    {"method": "GET", "path": "/invoices/{invoice_id}"},
+    {"method": "POST", "path": "/invoices/{invoice_id}:void"},
 ]
 
 

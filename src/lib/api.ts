@@ -11,7 +11,8 @@
 
 import type {
   AnalyticsKpis, AnalyticsRange, Blueprint, BlueprintBody, BlueprintVersion, CompileReport,
-  CostReport, LintReport, QualityReport, SettableWorkflowStatus, TopTemplates, TrendSeries,
+  CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
+  SettableWorkflowStatus, TopTemplates, TrendSeries,
 } from "@/lib/types";
 
 const API_URL = (import.meta as any).env?.VITE_API_URL ?? "http://localhost:8000/api/v1";
@@ -382,6 +383,52 @@ export const api = {
   createConversation: (projectId: string, title: string) => request<any>("POST", `/projects/${projectId}/conversations`, { json: { title } }),
   listMessages: (conversationId: string) => request<{ items: any[] }>("GET", `/conversations/${conversationId}/messages`),
   sendMessage: (conversationId: string, text: string) => request<any>("POST", `/conversations/${conversationId}/messages`, { json: { text } }),
+
+  /* ---- Invoices: the first per-industry service ----
+   * A published invoice template plus typed-in values becomes a numbered,
+   * stored invoice. Every figure the document prints is computed server-side
+   * in Decimal; the totals this client shows while typing are a preview the
+   * server re-derives, never the record. */
+  invoiceWorkspace: () =>
+    request<{ project_id: string; name: string; display_id: number }>("POST", "/invoices:workspace"),
+  listCustomers: (q?: string) =>
+    request<{ items: Customer[] }>("GET", "/customers", { query: { q } }),
+  createCustomer: (body: Partial<Customer> & { name: string }) =>
+    request<Customer>("POST", "/customers", { json: body }),
+  updateCustomer: (id: string, body: Partial<Customer>) =>
+    request<Customer>("PATCH", `/customers/${id}`, { json: body }),
+  deleteCustomer: (id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/customers/${id}`),
+  listInvoices: (params: { customer_id?: string; status?: string } = {}) =>
+    request<{ items: InvoiceSummary[] }>("GET", "/invoices", { query: params }),
+  getInvoice: (id: string) =>
+    request<InvoiceSummary & { source_record: Record<string, unknown> }>("GET", `/invoices/${id}`),
+  voidInvoice: (id: string) =>
+    request<InvoiceSummary>("POST", `/invoices/${id}:void`),
+  generateInvoice: (body: {
+    manifest_id: string;
+    project_id?: string;
+    customer_id?: string;
+    customer?: { name: string; email?: string; phone?: string; address?: string; tax_id?: string };
+    line_items: Record<string, unknown>[];
+    fields?: Record<string, unknown>;
+    currency?: string;
+    tax_rate?: number;
+    tax_split?: boolean;
+    issue_date?: string;
+    due_date?: string;
+    locale?: string;
+  }) => request<InvoiceGenerated>("POST", "/invoices:generate", { json: body }),
+  /** A whole template, authored by a model from a plain description. The server
+   *  proves the result (emit round-trip) before persisting, and stands a kit in
+   *  -- reason recorded in `generation` -- when no model is configured. */
+  blueprintFromDescription: (body: { description: string; name?: string; project_id?: string; service?: string }) =>
+    request<Blueprint & { version: BlueprintVersion; generation: { source: "model" | "kit_fallback"; notes: string[]; model: string | null } }>(
+      "POST", "/template-blueprints:from-description", { json: body }),
+  /** One record in, one stored document out -- no spreadsheet, no binding. */
+  generateFromManifest: (manifestId: string, body: { source_record: Record<string, unknown>; language?: string; project_id?: string }) =>
+    request<{ document_id: string; document_version_id: string; filename: string; qa_passed: boolean; qa_notes: string[] }>(
+      "POST", `/template-manifests/${manifestId}/generate`, { json: body }),
 
   // ---- Template Studio: compile -> review -> bind -> generate ----
   // `progressToken` is chosen by the caller before the request goes out, which

@@ -318,7 +318,8 @@ def test_a_blueprint_with_no_project_cannot_be_written_out(app_client, org_a):
 def test_the_kits_are_documents_rather_than_field_lists(app_client, org_a):
     token, _project_id, _org_id, _user_id = org_a
     kits = app_client.get("/api/v1/template-blueprint-kits", headers=_auth(token)).json()["items"]
-    assert {k["id"] for k in kits} == {"blank", "offer", "contract", "clinical", "medaff"}
+    assert {k["id"] for k in kits} == {"blank", "offer", "contract", "clinical", "medaff",
+                                       "invoice", "invoice_gst", "invoice_intl"}
     assert all(k["paragraph_count"] > 0 for k in kits), "a kit with no prose is a form"
 
 

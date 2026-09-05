@@ -66,6 +66,12 @@ FILL_MASK_REMAINS = "fill_mask_remains"
 # A whole date written into a slot that holds one part of one: the year box of
 # `xxxx年xx月xx日` carrying `2026-09-01`.
 DATE_PART_MALFORMED = "date_part_malformed"
+# A §6 TABLE_ROW could not be repeated: the collection is not a list, a
+# required row value is absent, or the manifest promises a repeating row the
+# document does not carry. One name for every way "one row per record" fails,
+# because they are one failure mode -- the table the reader sees does not say
+# what the data says.
+ROW_REPEAT = "row_repeat"
 
 
 @dataclass(frozen=True)
@@ -114,6 +120,7 @@ REGISTRY: dict[str, QaCheck] = {
         # `2026-09-01年2026-09-01月2026-09-01`, produced when the year, month and
         # day slots of one date mask were all bound to the same field.
         QaCheck(DATE_PART_MALFORMED, "A date part slot (year/month/day) holds a whole date rather than its part.", BLOCKING),
+        QaCheck(ROW_REPEAT, "A repeating table row could not be rendered once per record of its collection.", BLOCKING),
         QaCheck(VALUE_EXCEEDS_MAX_LEN, "A value is longer than the manifest's declared max_len for that field.", BLOCKING),
         QaCheck(
             VALUE_OVERFLOWS_CELL,

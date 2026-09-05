@@ -1,0 +1,87 @@
+name: GST invoice (India)
+description: A GST tax invoice with GSTIN, HSN/SAC line items and a CGST/SGST split.
+fields: [business_name, business_address, business_gstin, invoice_number, invoice_date,
+         customer_name, customer_address, customer_gstin, item_description, hsn_sac,
+         quantity, unit_price, amount, subtotal, cgst_amount, sgst_amount, grand_total]
+field_types:
+  invoice_date: date
+  quantity: number
+  unit_price: currency
+  amount: currency
+  subtotal: currency
+  cgst_amount: currency
+  sgst_amount: currency
+  grand_total: currency
+table_rows:
+  - id: line_items
+    iterate_over: line_items
+    empty_behaviour: REMOVE_ROW
+    required: true
+    columns:
+      - {token: "<Item Description>", source_key: item_description, type: string}
+      - {token: "<HSN/SAC>", source_key: hsn_sac, type: string}
+      - {token: "<Quantity>", source_key: quantity, type: number}
+      - {token: "<Unit Price>", source_key: unit_price, type: currency}
+      - {token: "<Amount>", source_key: amount, type: currency}
+blocks:
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "TAX INVOICE"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Business Name>"}
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Business Address>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "GSTIN: "}
+      - {role: placeholder, text: "<Business GSTIN>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Invoice number: "}
+      - {role: placeholder, text: "<Invoice Number>"}
+      - {role: static, text: "   Date: "}
+      - {role: placeholder, text: "<Invoice Date>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Bill to"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Customer Name>"}
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Customer Address>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Customer GSTIN: "}
+      - {role: placeholder, text: "<Customer GSTIN>"}
+  - kind: table
+    rows:
+      - - [{kind: paragraph, segments: [{role: static, text: "Description"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "HSN/SAC"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Qty"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Rate"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Amount"}]}]
+      - - [{kind: paragraph, segments: [{role: placeholder, text: "<Item Description>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<HSN/SAC>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Quantity>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Unit Price>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Amount>"}]}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Taxable value: ₹ "}
+      - {role: placeholder, text: "<Subtotal>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "CGST: ₹ "}
+      - {role: placeholder, text: "<CGST Amount>"}
+      - {role: static, text: "   SGST: ₹ "}
+      - {role: placeholder, text: "<SGST Amount>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Total (incl. GST): ₹ "}
+      - {role: placeholder, text: "<Grand Total>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "This is a computer-generated invoice."}
