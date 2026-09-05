@@ -351,6 +351,32 @@ export const api = {
   teamMembers: () => request<{ items: any[] }>("GET", "/team/members"),
   teamRolesSummary: () => request<{ items: { role: string; count: number }[] }>("GET", "/team/roles-summary"),
   auditLogs: () => request<{ items: any[] }>("GET", "/audit-logs"),
+  /** The same endpoint, given the three parameters it has always accepted.
+   *
+   *  Added alongside `auditLogs()` rather than replacing it. The page's Filter
+   *  button was decorative because nothing here could carry a filter through --
+   *  but `auditLogs()` is a no-argument call already in use, and widening it
+   *  would make every existing caller's request depend on defaults it never
+   *  asked for. Two methods, one endpoint, no caller disturbed.
+   *
+   *  There is no `offset`: the server does not accept one. `limit` is the only
+   *  way to reach further back, which is why the page raises a limit rather
+   *  than paginating -- a Next button here could only ever be a lie. */
+  auditLogEntries: (params: { entity_type?: string; severity?: string; limit?: number } = {}) =>
+    request<{ items: AuditEntry[] }>("GET", "/audit-logs", {
+      query: {
+        entity_type: params.entity_type,
+        severity: params.severity,
+        limit: params.limit,
+      },
+    }),
+
+  /** What this organisation has told us to keep, and where it may be processed.
+   *
+   *  MANAGE_USERS server-side, so most roles get a 403 here. Callers must treat
+   *  that as "not visible to you" rather than as a failure: it is the answer,
+   *  not an error. */
+  dataPolicy: () => request<DataPolicy>("GET", "/admin/data-policy"),
 
   listConversations: (projectId: string) => request<{ items: any[] }>("GET", `/projects/${projectId}/conversations`),
   createConversation: (projectId: string, title: string) => request<any>("POST", `/projects/${projectId}/conversations`, { json: { title } }),
@@ -550,6 +576,45 @@ export type BulkDeleteResult<K extends string> = {
     code: string; reason: string; name?: string | null; filename?: string | null;
   })[];
   blobs_deleted?: number;
+};
+
+/** One recorded action, exactly as `/audit-logs` returns it.
+ *
+ *  `actor` and `target` are nullable in the table and stay nullable here: a row
+ *  written with no actor name is a row whose actor was not recorded, and
+ *  defaulting it to "System" in the type would hand every screen a fact the
+ *  database never had.
+ *
+ *  `severity` is left as `string` rather than the five-value union the writers
+ *  currently use. The column has no constraint, so narrowing it here would let
+ *  a sixth value type-check its way into a `Record` lookup that has no entry
+ *  for it. */
+export type AuditEntry = {
+  id: number;
+  time: string;
+  actor: string | null;
+  action: string;
+  target: string | null;
+  severity: string;
+  entity_type: string;
+};
+
+/** What an organisation has *required*, which is not the same thing as what any
+ *  provider has been *configured* to do.
+ *
+ *  Nothing on this shape reports a provider's real retention or processing
+ *  location -- those are not exposed over HTTP at all -- so anything rendering
+ *  it has to say whose statement it is. `recorded` is the difference between a
+ *  policy this customer set and the platform default standing in for one. */
+export type DataPolicy = {
+  org_id: string;
+  source_retention_days: number;
+  generated_document_retention_days: number | null;
+  generated_documents_retained_indefinitely: boolean;
+  /** One of GLOBAL, EU, UK, IN. */
+  residency: string;
+  zero_retention_required: boolean;
+  recorded: boolean;
 };
 
 export type BindingSuggestion = {

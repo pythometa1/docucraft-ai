@@ -12,7 +12,6 @@ import {
   Settings,
   ClipboardCheck,
   Search,
-  Bell,
   Sparkles,
   HelpCircle,
   PanelLeftClose,
@@ -30,6 +29,7 @@ import { useStore } from "@/lib/store";
 import { useTheme } from "@/lib/theme";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { CommandPalette } from "@/components/command-palette";
+import { ModelBoundaryChip } from "@/components/model-boundary-chip";
 
 const NAV = [
   { to: "/dashboard", label: "Projects", icon: FolderKanban },
@@ -104,11 +104,15 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [location.pathname]);
 
   return (
-    <div className="flex min-h-screen bg-background text-foreground">
+    // Translucent rather than solid: `Atmosphere` is a fixed layer at -z-10, and
+    // an opaque background here would paint straight over it. At 88% the aurora
+    // reads as a tint in the corners and nothing else -- body text keeps its full
+    // contrast against a near-solid ground.
+    <div className="flex min-h-screen bg-background/88 text-foreground">
       {/* Desktop sidebar */}
       <aside
         className={cn(
-          "hidden md:flex flex-col border-r border-border bg-sidebar transition-[width] duration-200 ease-in-out",
+          "hidden md:flex flex-col border-r border-border bg-sidebar/85 backdrop-blur-xl transition-[width] duration-200 ease-in-out",
           collapsed ? "w-16" : "w-60",
         )}
       >
@@ -190,6 +194,13 @@ export function AppShell({ children }: { children: ReactNode }) {
               </kbd>
             </button>
           </div>
+          {/* §16's residency and zero-retention requirements, which were
+              enforced server-side and visible nowhere. It renders itself only
+              for a session that may read them, so most roles see the header
+              exactly as before. */}
+          <div className="hidden sm:block">
+            <ModelBoundaryChip />
+          </div>
           <button
             onClick={toggle}
             className="p-2 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground"
@@ -198,13 +209,20 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>
-          <button className="p-2 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground">
+          {/* Was a button with no handler; the destination it implied already
+              exists in the nav, so it goes there. */}
+          <Link
+            to="/docs"
+            className="p-2 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground"
+            aria-label="Documentation"
+            title="Documentation"
+          >
             <HelpCircle className="h-4 w-4" />
-          </button>
-          <button className="p-2 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground relative">
-            <Bell className="h-4 w-4" />
-            <span className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-destructive" />
-          </button>
+          </Link>
+          {/* The bell is gone rather than silenced. It had no handler and wore a
+              permanent unread dot -- a badge asserting there is something to
+              read, drawn over a feature that does not exist. Nothing in the API
+              reports notifications, so there is nothing here to show. */}
           <button
             onClick={signOut}
             className="p-2 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground"

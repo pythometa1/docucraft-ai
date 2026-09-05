@@ -2,6 +2,7 @@ import { useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { Sparkles, Loader2 } from "lucide-react";
 
+import { Atmosphere } from "@/components/atmosphere";
 import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,7 +41,12 @@ function Login() {
   }
 
   return (
-    <div className="min-h-screen grid place-items-center bg-background px-4">
+    <>
+      {/* The ambient layer runs here too. Sign-in is the first thing anyone
+          sees, and a flat ground is a poor first impression of a product whose
+          whole pitch is that the details were looked after. */}
+      <Atmosphere />
+      <div className="min-h-screen grid place-items-center bg-background/85 px-4">
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-2 mb-8 justify-center">
           <div className="h-9 w-9 rounded-lg bg-gradient-brand grid place-items-center">
@@ -97,6 +103,7 @@ function Login() {
           </p>
         </form>
       </div>
-    </div>
+      </div>
+    </>
   );
 }

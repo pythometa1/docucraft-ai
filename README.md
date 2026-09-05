@@ -1,364 +1,377 @@
 # DocuMind AI
 
-**Turn manual, template-based document work into an audited, AI-assisted workflow — without rewriting a single template by hand.**
+**Upload a Word template and a spreadsheet. Get back one correct, audited document per row — with no language model anywhere near the letters themselves.**
 
-![status](https://img.shields.io/badge/status-active%20development-brightgreen) ![frontend](https://img.shields.io/badge/frontend-React%20%2F%20TanStack%20Start-blue) ![backend](https://img.shields.io/badge/backend-FastAPI%20%2F%20PostgreSQL%20%2F%20Redis-blue) ![license](https://img.shields.io/badge/license-proprietary-lightgrey)
+![status](https://img.shields.io/badge/status-active%20development-brightgreen)
+![frontend](https://img.shields.io/badge/frontend-React%2019%20%2F%20TanStack%20Start-blue)
+![backend](https://img.shields.io/badge/backend-FastAPI%20%2F%20PostgreSQL%2017%20%2F%20Redis-blue)
+![tests](https://img.shields.io/badge/tests-2%2C222%20%C2%B7%2087%25%20coverage-success)
+![license](https://img.shields.io/badge/license-proprietary-lightgrey)
 
-> **This file is the living, canonical overview of the whole project.** Every time the product, architecture, or data model changes in a meaningful way, this README should be updated alongside it — it is the front door for anyone (teammate, reviewer, future you) trying to understand what DocuMind AI is, why it exists, and how the pieces fit together. Deep technical detail lives in the companion docs linked in [§10](#10-full-documentation-index); this file is the map to all of it.
+> **This file is the canonical overview of the project and is written against the code, not against a plan.** Every number, gate name, endpoint count and limit below was read out of the source at the time of writing. Where something is built but not wired up, [§12](#12-what-is-wired-and-what-is-a-seam) says so by name — a README that only lists what works is a sales page, and the first person it misleads is the next contributor.
 
 ---
 
 ## Table of Contents
 
-1. [What This Project Is](#1-what-this-project-is)
-2. [The Problem & Use Cases](#2-the-problem--use-cases)
-3. [How It Works — End to End](#3-how-it-works--end-to-end)
-4. [The Generation Engines](#4-the-generation-engines)
-5. [Impact — Why This Matters](#5-impact--why-this-matters)
-6. [System Architecture](#6-system-architecture)
-7. [Technology Stack](#7-technology-stack)
-8. [Data Model / Database](#8-data-model--database)
-9. [Project Structure](#9-project-structure)
-10. [Full Documentation Index](#10-full-documentation-index)
-11. [Getting Started](#11-getting-started)
-12. [Security & Compliance Posture](#12-security--compliance-posture)
-13. [Current Status & Roadmap](#13-current-status--roadmap)
-14. [Origins](#14-origins)
+1. [What this is](#1-what-this-is)
+2. [The problem](#2-the-problem)
+3. [How it works, end to end](#3-how-it-works-end-to-end)
+4. [The compile → fill pipeline](#4-the-compile--fill-pipeline)
+5. [Quality gates](#5-quality-gates)
+6. [Template authoring and bulk onboarding](#6-template-authoring-and-bulk-onboarding)
+7. [Mapping, review and the human loop](#7-mapping-review-and-the-human-loop)
+8. [Retrieval, chat and the model boundary](#8-retrieval-chat-and-the-model-boundary)
+9. [Security, tenancy and compliance](#9-security-tenancy-and-compliance)
+10. [Architecture and stack](#10-architecture-and-stack)
+11. [Data model](#11-data-model)
+12. [What is wired, and what is a seam](#12-what-is-wired-and-what-is-a-seam)
+13. [Getting started](#13-getting-started)
+14. [Tests and CI](#14-tests-and-ci)
+15. [Project structure](#15-project-structure)
+16. [Documentation index](#16-documentation-index)
 
 ---
 
-## 1. What This Project Is
+## 1. What this is
 
-DocuMind AI is an enterprise document-generation platform for regulated, template-heavy industries — HR, clinical research, quality/CMC, medical affairs, legal. Users upload a **template** (the structure/layout/legal boilerplate that must never change) and one or more **source files** (the data that fills it in), map the two together, and generate a finished document that keeps the template's exact formatting while the content comes from real, traceable data.
+DocuMind AI is a document-generation platform for regulated, template-heavy work — HR, clinical research, quality/CMC, medical affairs, legal. You give it a **template** (the structure, styles and legal boilerplate that must not change) and **source data** (the values that fill it in). It reads the template once into a machine-executable **manifest**, you bind that manifest's fields to spreadsheet columns, and it produces one document per row by *editing a copy of your original file in place* — so the layout is never rebuilt and therefore never at risk.
 
-It ships as a full application, not a prototype: a polished React frontend and a real FastAPI backend running against PostgreSQL and Redis, with an LLM in the loop only where grounded generation is actually needed — never where deterministic data-filling would do.
+The central design decision: **a model reads the template once; nothing reads the data.** Compiling a template is hard language understanding and happens once per template family. Filling it is deterministic OOXML surgery that runs per document, makes zero model calls, costs nothing but CPU, and cannot hallucinate a salary figure.
+
+It is a running application, not a prototype: 133 HTTP endpoints across a FastAPI backend on PostgreSQL 17 + pgvector and Redis, a 15-route React 19 frontend, 45 database tables, 42 of them under row-level security, and a 2,222-test suite behind a coverage gate CI runs verbatim.
 
 ---
 
-## 2. The Problem & Use Cases
+## 2. The problem
 
-### 2.1 The manual process this replaces
+Someone opens a Word template. The author left instructions behind in it — often literally colour-coded: blue runs are values to substitute (`<Colleague First Name>`), red runs are directions to the human processor (*"Include the following section only if the Colleague Type is Fixed Term"*). They copy values across from a spreadsheet by hand, delete the sections that don't apply, delete the instructions themselves, and save. Thousands of times a month, per team, across an industry holding **lakhs of distinct templates**, each encoding its rules informally, for a human reader.
 
-Across HR, clinical, and regulatory teams, someone opens a Word template, reads instructions the template's author left behind (often literally colour-coded — blue for "put a value here," red for "read this and decide"), copies values across from a spreadsheet or system export by hand, deletes the sections that don't apply to this particular case, deletes the instructions themselves, and saves the result. It's repeated thousands of times a month per team, and at an industry level, across **lakhs of distinct templates**, each encoding its own fields and rules informally, for a human reader.
-
-### 2.2 Concrete use cases this platform targets
-
-| Function | Example documents | What's automated |
+| Function | Documents | What gets automated |
 |---|---|---|
-| **Human Resources** | Offer letters, termination letters, promotion memos, policy communications | Full/part-time/fixed-term conditional clauses, salary tables, compliance boilerplate |
-| **Clinical Research** | Clinical study reports, protocol amendments, informed consent forms | Long narrative sections grounded in study data, standardized structure per ICH guidance |
-| **Quality / CMC** | Batch records, deviation reports, CMC sections (ICH M4Q format) | Structured technical sections pulled from lab/quality systems |
-| **Medical Affairs** | Medical letters, publication summaries, congress posters | Mixed narrative + data-driven content |
-| **Marketing / Legal** | Product briefs, campaign copy, vendor agreements (MSAs) | Templated legal boilerplate with data-specific clauses |
+| **Human Resources** | Offer letters, termination letters, promotion memos | Conditional clauses by employment type, salary tables, compliance boilerplate |
+| **Clinical Research** | Study reports, protocol amendments, consent forms | Long narrative sections grounded in study data, ICH-standard structure |
+| **Quality / CMC** | Batch records, deviation reports, ICH M4Q sections | Structured technical content from lab and quality systems |
+| **Medical Affairs** | Medical letters, publication summaries | Mixed narrative and data-driven content |
+| **Legal / Marketing** | MSAs, vendor agreements, product briefs | Boilerplate with data-specific clauses |
 
-### 2.3 The specific hard case this was built and proven against
-
-A real Hospira Australia (Pfizer) HR offer-letter template was used as the design's acceptance test: a 207-paragraph legacy Word document where the original author colour-coded the text by hand — blue runs are exact-value placeholders (`<Colleague First Name>`), red runs are instructions for the human processor (`Include the following section only if the Colleague Type is Fixed Term:`), and the document embeds seven legacy Word `MERGEFIELD` codes across two remuneration tables. See [§10](#10-full-documentation-index) for the full research behind this.
+**The acceptance case.** A real Hospira Australia (Pfizer) HR offer letter: 207 paragraphs, hand-coloured runs, twelve legacy `MERGEFIELD` instructions resolving to seven distinct codes, six of them inside two remuneration tables. Alongside it, two ICC employment-contract masters. These three files are customer-owned and deliberately **not** in this repository — which is why parts of the test suite skip on a fresh checkout ([§14](#14-tests-and-ci)).
 
 ---
 
-## 3. How It Works — End to End
+## 3. How it works, end to end
 
 ```mermaid
 flowchart LR
-  A[Upload template] --> B[Upload source data]
-  B --> C[Compile the template\ninto a manifest]
-  C --> D[Review and approve\nwhat the compiler understood]
-  D --> E[Map manifest fields\nto spreadsheet columns]
-  E --> F[Generate: one document per row\nno LLM in the loop]
-  F --> G[Assembled DOCX]
-  G --> H[Review & Approve]
-  H --> I[Versioned, audited,\ndownloadable document]
+  A[Upload .docx] -->|compiles in the same act| B[Manifest:<br/>fields · conditions · blocks]
+  B --> C[Download the spreadsheet<br/>the manifest asks for]
+  C --> D[Bind fields to columns<br/>ranked, confidence-banded]
+  D --> E[3 canary rows<br/>rendered + QA'd first]
+  E -->|pass| F[Full batch:<br/>one .docx per row]
+  E -->|fail| G[Batch refuses to run]
+  F --> H[16 QA gates<br/>on every document]
+  H --> I[Review → approve → download]
 ```
 
-1. **Import a template** — a DOCX blueprint defining structure, styles, headers/footers, and any embedded placeholders or instructions.
-2. **Import source data** — a CSV or XLSX of rows (one row per document), or DOCX/PDF/text for narrative material.
-3. **Compile** — the system reads the template's *own* embedded rules: which runs are placeholders, which are instructions to a human processor, which paragraphs a conditional block covers, where the `MERGEFIELD` codes are. The result is a **manifest**: a machine-executable description of what this template means.
-4. **Review and approve** — a person reads the conditions in plain English ("Keep when the colleague type is Fixed Term"), sees exactly what is blocking approval, and signs off once. Nothing generates from a manifest nobody approved.
-5. **Map** — each manifest field is bound to a spreadsheet column, with the system proposing matches and saying how much evidence each one has. Values that match no branch of the template are flagged before they can silently drop a section from someone's letter.
-6. **Generate** — one document per row, produced by *mutating a copy* of the original template rather than rebuilding it, so layout is never at risk. A few canary rows are rendered and QA-checked first; the rest only run if they pass.
-7. **Review & approve, and everything is audited** — full version history, and field-level lineage (which source value, which confidence) plus condition-level lineage (which rule fired and why) for every document.
+The project screen is a **four-stage rail**: **Template → Sources → Document Mapping → Documents**.
 
-Steps 3–6 are one screen — **Document Mapping**, stage 3 of every project.
+1. **Template.** Upload a `.docx`. The zip archive is inspected for symlinks, path traversal and decompression ratios *before any parser opens it*, then it is pre-scanned and compiled into a manifest in the same act — with live staged progress showing which work is running and which of it costs money.
+2. **Sources.** Upload the `.csv`/`.xlsx` whose rows become documents — or download the spreadsheet the manifest asks for, which ships one column per bindable field, headed by the field id itself, with Excel dropdowns offering exactly the strings each equality condition tests.
+3. **Document Mapping.** Two steps: bind fields to columns, then generate. Not four — compile happens at upload, and generating does not wait on a signature.
+4. **Documents.** Batch progress, per-row failures, and each letter worked through a lane. **Only an approved document can be downloaded**, enforced on all five egress paths including the unauthenticated grant handler and the bulk zip.
 
----
-
-## 4. The Generation Engines
-
-This is the single most important architectural decision in the project: **not every document needs an LLM at generation time, and pretending otherwise wastes money, adds hallucination risk, and threatens layout fidelity.**
-
-The deterministic engine below is the main path and produces the great majority of documents. Grounded generation still exists, but as a *component* rather than as a whole-document pipeline.
-
-### 4.1 Grounded generation (RAG), where prose genuinely has to be written
-
-An LLM is used where content must be **written** rather than **looked up**: project chat grounded in the source files, `prompt` tokens inside natively-authored templates, and manifest units of kind `narrative`. Retrieval is hybrid — a tenant/document-type filter first, then lexical (keyword/TF-IDF) matching for exact placeholder codes, then pgvector similarity for naming variation, merged and reranked — and every generated sentence must cite the source chunk it came from; a citation the model invents is dropped rather than trusted.
-
-A `narrative` unit in a manifest does **not** get written unattended: it lands in the human review queue with enough context for a person to decide. A wrong number in a tox report is not an acceptable failure mode.
-
-> **Removed.** An earlier version of this section described a *Section-Mapping Generation Engine*: parse the template into a heading tree, select sections in a mapping wizard, call an LLM once per section, splice the results back in. That whole pipeline — the wizard screen, the draft entity, and the `/drafts/…` endpoints behind it — has been deleted. It had no manifest, so it filled nothing: a template full of placeholders came back out of it unchanged.
-
-### 4.2 Template Compiler + Universal Fill Engine (deterministic)
-
-**This is the main path.** For legacy, colour-coded templates like the Hospira/Pfizer example, running an LLM over every generated letter would be slow, costly, non-deterministic, and risk hallucinating a salary figure. Instead:
-
-1. **Pre-scan** (deterministic, no LLM): unzip the DOCX, classify every text run by colour, inventory every `MERGEFIELD`, hyperlink, and table, and assign every paragraph a stable position — the same way, every time.
-2. **Compile a manifest** (once per template, LLM-optional): turn the colour/instruction inventory into a machine-executable JSON manifest — fields, their source-mapping hints, conditional expressions, and exactly which paragraphs each conditional block covers. A human reviews and approves it once.
-3. **Fill deterministically** (every document, zero LLM calls): evaluate conditions, replace placeholder text in place (styling inherited automatically since only the text node changes), resolve `MERGEFIELD`s to formatted values, delete the instruction text, and run QA checks (no leftover placeholder brackets, no leftover instruction text, exactly the right blocks kept/dropped).
-
-The template is compiled **once**; after that, generating a perfect letter is deterministic, auditable, and effectively free — whether it's the first letter or the ten-thousandth. Full design rationale, the actual manifest schema, and the exact bugs found and fixed while validating this against the real file are in `docs/TEMPLATE_COMPILER_RESEARCH.md`.
-
-Two details that matter in practice:
-
-- **Conditions are rendered into plain English for the approver.** The sentence is generated from the same expression tree the evaluator runs, never from a description written alongside it — a hand-written description drifts from its expression the first time the expression is edited, and a drifted description is a false statement of what was approved. An expression that cannot be rendered is shown as broken rather than omitted; it is the one that must not be approved, so it must not look like a blank.
-- **A batch does not run blind.** Three canary rows, spread evenly across the batch rather than taken from the front (a spreadsheet arrives sorted, so the first three are usually the same department and the same branch of every condition), are rendered and QA-checked before the remaining rows are attempted.
-
-### 4.3 Bulk onboarding
-
-Given many legacy templates at once, the platform clusters them by structural similarity (TF-IDF over extracted text) so **one manifest is compiled per family of near-duplicate templates**, not per file — the same lever that makes onboarding lakhs of real-world templates tractable instead of a lakh-sized manual re-authoring project.
+**Approval is not a precondition for generating, on purpose.** It used to be, and it was unmeetable: manifest validation turns every unacknowledged compiler warning into a failure, and a freshly compiled template has warnings and no acknowledgements by construction. So the gate did not mean *"somebody looked at this"* — it meant *"acknowledge each warning in writing, sign, then generate"*, on every template. Both generate endpoints now ask whether the reading is **usable and current**: `MANIFEST_NOT_READ` for a failed compile, `MANIFEST_RETIRED` for one a newer compile superseded, and `MANIFEST_NOT_APPROVED` only where a template is flagged legally binding and the four-eyes rule applies.
 
 ---
 
-## 5. Impact — Why This Matters
+## 4. The compile → fill pipeline
 
-| Dimension | Before | After |
-|---|---|---|
-| **Speed** | A skilled operations person manually fills one letter at a time, reading and interpreting instructions | Seconds per document; a batch of 500 source rows can produce 500 letters in one pass |
-| **Consistency** | Human error in copying values, missed conditional deletions, inconsistent tone | Deterministic fill for data-driven sections; grounded, cited generation for narrative sections |
-| **Auditability** | Tribal knowledge; no record of who changed what or why | Every generated document has field-level lineage (which source value, which confidence) and condition-level lineage (which rule fired and why), plus an immutable audit log |
-| **Compliance** | Manual review is the only safety net | QA gates block a document from shipping if placeholders are left unfilled or instructions leak into the output; e-signature capture for regulated approvals |
-| **Cost at scale** | Linear in headcount — more templates and more volume means more people | One LLM call to compile a template manifest (not per letter); after that, filling is pure CPU. Scales to "lakhs of templates" without lakhs of engineers or lakhs of LLM calls |
-| **Change management** | A template edit means re-training whoever fills it out by hand | A changed template is recompiled; the manifest diff shows exactly what changed, ready for a quick human review |
+### 4.1 Pre-scan — deterministic, no model
+
+`prescan()` flattens the document body into document-order paragraphs and, for each, mechanically inventories:
+
+- **Run colour and highlight roles** — which runs are placeholders, which are instructions — with adjacent same-role runs merged into spans.
+- **`MERGEFIELD` sequences**, walked as a complex-field state machine (`fldChar begin → instrText → separate → cached result → end`).
+- **Hyperlinks, tables, and a stable `(paragraph_index, span_index)` coordinate** for every span.
+
+It never interprets meaning. Every coordinate the rest of the system uses is minted here, and `docx_prescan.py` is held at a **100% coverage floor** because a manifest whose coordinates are off by one addresses the wrong text for the rest of the file.
+
+### 4.2 Compile — one agentic loop
+
+`agentic_compiler.compile_template()` is the live compile path for every upload. It runs **chunk → write → reconcile → ground → assert → review**, repeating until a deterministic assertion set stops objecting, two rounds pass without the fault count falling to a new low, or the round budget (12) runs out.
+
+- **Chunking** splits the template into 40,000-character windows with **8 paragraphs of overlap** — a conditional block straddles boundaries, and a writer that sees only the governed clause has no reason to make it conditional. Every chunk of a split template carries a whole-document instruction outline — up to 200 instruction-shaped lines — in front of it; a template that fits in one chunk is sent without one.
+- **Grounding** re-locates every claim the model makes inside a real pre-scan span. Anything that cannot be found is **dropped, not guessed**.
+- **Assertions** are the loop's only objective signal: nine mechanical checks — `uncovered_placeholder`, `uncovered_mergefield`, `surviving_instruction`, `paragraph_scoped_switch`, `unexecutable_condition`, `orphaned_field`, `field_without_slot`, `ungoverned_block`, `test_fill_failure`. Faults force another round; warnings ride along on the manifest because no further round can fix them.
+- **Eight compiler warning codes** (`W-HL-GAP`, `W-MARKER-PARSE`, `W-MIXED-SYNTAX`, `W-FIELD-CODE`, `W-DUP-STATIC`, `W-NESTED-COND`, `W-UNSLOTTED-FIELD`, `W-SPLIT-PLACEHOLDER`) are raised per paragraph with evidence, and block auto-approval.
+
+A full **rule-based compiler** also exists, built on the red/blue colour convention and per-language YAML grammars. On the live path it now runs only as a diagnostic — `rules_would_have_fallen_short`, recorded on the compile transcript, answering *"should this template have needed a model at all?"* It is not a fallback the product depends on.
+
+> `ungoverned_block` is the newest assertion and worth the paragraph. The renderer drops a block only when a condition that *keeps* it decides False — so a block no condition references can never be dropped, and both halves of an `[[IF]] … [[ELSE]]` print, one contradicting the other. The rule compiler cannot produce this; the agentic path can, and did: eight blocks, three conditions, and all five ungoverned ones were the positive arms.
+
+### 4.3 Fill — deterministic OOXML surgery
+
+`fill_template()` opens a **copy of the approved template** and edits it. It never rebuilds a document.
+
+| Mechanism | What happens |
+|---|---|
+| **Three-state conditions** | A verdict is `True`, `False` or `None`. Undecided is not false: it **blocks the document**, and never silently drops a section from someone's letter. |
+| **Block keep/drop at three granularities** | A paragraph, a table row (`w:tr`, with the table removed once it has no rows left), or an inline span switch — two branches on one line. |
+| **`MERGEFIELD` resolution** | The whole complex-field run sequence is replaced by the formatted value, so a surviving `instrText` is by construction one the fill never reached. |
+| **Styling by construction** | Runs are edited rather than rebuilt, so fonts and sizes are inherited rather than reapplied. The only styling the fill touches is the author's own markup — the placeholder run's colour is stripped and highlight markup is swept, so a value never prints in the annotation's blue. |
+| **Four missing-value policies** | `BLOCK`, `BLANK`, `DEFAULT`, `REMOVE_SENTENCE`, declared per field on an authored blueprint. A field that declares nothing falls back to `BLOCK` when it is marked required and `BLANK` when it is not — which is what compiled manifests get today, because the compiler emits no `on_missing`. `REMOVE_SENTENCE` plants Private Use Area markers at fill time and sweeps the sentence afterwards. |
+| **Locale-aware formatting** | Currency, date, number and percentage formatting via babel, keyed on the field's declared type and the project's locale. |
+| **Byte-for-byte reproducibility** | `normalise_docx()` rewrites the archive with a fixed 1980-01-01 timestamp, DEFLATE level 9 and a stable entry order, so the same manifest and row produce the same bytes. |
+
+Five **resolution unit kinds** — `static`, `computed`, `conditional`, `narrative`, `human` — are resolved in topological dependency order. Computed fields evaluate through a whitelisted Python AST (`safe_eval_formula`), not `eval`.
+
+**A batch does not run blind.** `run_batch` renders **3 canary rows spread evenly across the batch** — not taken from the front, because a spreadsheet arrives sorted and the first three rows are usually the same department and the same branch of every condition. If a canary fails QA, the remaining rows are never attempted. Progress is rewritten and committed to the job row after every row.
+
+### 4.4 PDF
+
+Immutable-PDF templates take a parallel path: `render_overlay` deletes the show-text operators inside an approved bounding box and appends a mask rectangle plus one text operator, passing every other operator through untouched. Content-stream operators are constructed by hand over pypdf — there is no PDF-writing library in the dependency set — which is why the overlay path is limited to Helvetica/WinAnsi.
+
+DOCX→PDF conversion shells out to headless LibreOffice with a 120-second timeout and a private user profile per run, **and then reads its own output back**. A missing font does not make LibreOffice fail — it makes it substitute, so a Chinese letter converts to a PDF of its Latin fragments with exit code zero. If fewer than half the distinct source CJK characters survive, the renderer refuses rather than hand over a wrong document that looks like a right one.
 
 ---
 
-## 6. System Architecture
+## 5. Quality gates
+
+Sixteen named checks live in one registry (`app/qa/policy.py`), each with a stable code, a default severity and an enabled flag. **Fifteen are on by default; fourteen block, one warns.** Gates run against the file that was actually **saved and archive-normalised**, re-opened and re-read — not against the in-memory tree the renderer believed it wrote.
+
+| Check | Catches |
+|---|---|
+| `placeholder_remains` | A bracket placeholder survived the fill and is legible to the reader |
+| `unresolved_mergefield` | A Word `MERGEFIELD` was never resolved — read from `w:instrText`, not from visible text, which Word never displays |
+| `control_token_remains` | `[[IF]]` / `[[ELSE]]` / `[[ENDIF]]` printed in the output |
+| `instruction_text_remains` | Prose addressed to the assembler leaked into the letter |
+| `fill_mask_remains` | A slot **drawn** rather than bracketed — `xxxx年xx月xx日`, `xx个月`, `xx/xx/xxxx` — that the fill never replaced |
+| `date_part_malformed` | A whole date written into a slot holding one part of one: `2026-09-01年2026-09-01月2026-09-01` |
+| `required_value_missing` | A `BLOCK`-policy field resolved to nothing |
+| `branch_selection` | A mutually exclusive branch set did not resolve to exactly one branch |
+| `static_region_changed` | A package part the engine must not touch differs from the template — `word/document.xml` is the *only* editable part |
+| `resolved_value_absent` | A field resolved to a real value that is nowhere in the finished document |
+| `value_format_doubled` | A unit or currency printed twice: *"$AUD 76,800 per annum per annum"* |
+| `doubled_word` | A word repeated adjacently (the one **warning**-severity check) |
+| `orphaned_field` | A field whose every slot sits in a paragraph marked for unconditional deletion |
+| `value_exceeds_max_len` | A value longer than the manifest's declared `max_len` |
+| `value_overflows_cell` | Text estimated not to fit the declared table-cell width (**opt-in**, and an estimate — it cannot see auto-width cells, vertical overflow or real font metrics) |
+| `value_overflows_region` | A value wider than the approved PDF region (PDF overlay path only) |
+
+Two properties are deliberate. **There is no "off".** The severity vocabulary offers `blocking` or `warning` — a human still sees a warning — because a gate people can switch off protects nothing. And **an unknown or contradictory check name raises at resolution time** rather than being ignored, as does a finding produced for a check the policy did not enable, so a silently-skipped gate is impossible.
+
+`fill_mask_remains`, `date_part_malformed` and `ungoverned_block` came from running 21 real templates end to end and *reading the letters that came out* rather than trusting that a green run meant a correct one. Every gate that existed before them asked what was **left over** or what was **absent**. These three are neither — they are present and should not be, or absent and should not be — and that asymmetry is why they were invisible. One eleven-template set contained 395 unfilled masks. Underscore runs are deliberately *not* matched: a signature line signed in ink is not an unfilled slot, and one contract had 294 of those.
+
+---
+
+## 6. Template authoring and bulk onboarding
+
+### 6.1 Blueprints — the editable half of a template
+
+A compiled manifest cannot be edited back into a document (a static object carries a `text_hash`, not text). So authoring has its own model: a **blueprint** is a JSON body of paragraphs, segments and tables stored beside its semantic objects, versioned append-only.
+
+The whole design rests on one round-trip property, **asserted on every emit rather than only in tests**:
+
+```
+blueprint → emit → prescan → compile → blueprint′   must equal   blueprint
+```
+
+An authored template is therefore indistinguishable from a well-formed legacy one, and re-enters the same pre-scanner, compiler, fill engine and QA gates with no special case.
+
+- **One segment means exactly one span** — the invariant that makes `(paragraph_index, span_index)` coordinates addressable, and the reason normalisation exists (Word runs do not map one-to-one onto them).
+- **11 typed operations** (`set_segment_text`, `set_segment_role`, `set_segment_emit`, `add_field`, `remove_field`, `rename_field`, `retype_field`, `set_on_missing`, `rewrite_condition`, `remove_condition`, `set_block_range`) are the validated vocabulary for changing a blueprint: the editor's *Apply fix*, an API caller and the co-pilot all post the same payload to the operations endpoint. A plain Save still posts a whole revised body, which is normalised but applies no operations.
+- **The co-pilot proposes operations and never holds the pen.** It has an explicit `author` / `explain` mode; in explain mode it answers with paragraph references and writes nothing.
+- **Two emit modes.** `emit()` rebuilds from scratch. `emit_from_base()` publishes a customer's own file by editing the package — and refuses any structural change, because the operation vocabulary that could safely add or remove paragraphs in a real customer package does not exist yet.
+- **Linting** has three severities (blocking / warning / advisory) and *calls* the approval-time validator rather than restating it, so the two cannot drift.
+- **Five starter kits** (`blank`, `offer`, `contract`, `clinical`, `medaff`) and **four convention families** as YAML, not code: `en`, `ja`, `ko`, `zh`. Colour, brackets and `MERGEFIELD`s are language-independent structure.
+
+### 6.2 Conditions in plain English
+
+Conditions are written in **`documind-expr/1.0`**, a restricted-AST dialect with 8 comparison operators, 3 connectives, and 15 Python AST node classes rejected by name. The reviewer-facing sentence — *"Keep when the colleague type is Fixed Term"* — is **rendered from the same expression tree the evaluator runs**, never from a description written alongside it. A hand-written description drifts from its expression the first time the expression is edited, and a drifted description is a false statement about what was approved. An expression that cannot be rendered is shown as **broken**, not omitted: it is the one that must not be approved, so it must not look like a blank.
+
+### 6.3 Bulk onboarding — the cost lever
+
+`POST /projects/{id}/templates:bulk-onboard` takes an estate of `.docx` files at once, and clusters them by **structural fingerprint** — MERGEFIELD codes (0.5), structure (0.3: a paragraph-count band, table size and the blue/red run counts) and bracket tokens (0.2) — then compiles **exactly one representative per family**.
+
+> This replaced TF-IDF-over-full-text clustering, and the older docs still describe the TF-IDF version. The fingerprint is language-independent, which the text-similarity approach was not.
+
+Family inheritance then decides, per new template, whether to **reuse** an approved manifest (structural similarity ≥ 0.90), use one as **targeted-review evidence** (≥ 0.60), or **start a new family**. This is what makes onboarding lakhs of real templates a compile-per-*family* problem rather than a lakh-sized manual re-authoring project.
+
+---
+
+## 7. Mapping, review and the human loop
+
+**Binding suggestions are scored, not guessed.** Seven weighted independent signals combine as `1 − Π(1 − sᵢwᵢ)` into four bands — **AUTO_ACCEPT** (≥ 0.97), **CONFIRM** (≥ 0.80), **REVIEW** (≥ 0.50), **BLOCK** — with four hard vetoes, a 0.05 ambiguity margin between the top two candidates, and a historical-approvals signal that saturates as `1 − e^(−n/8)` so a memory cannot be bullied by volume.
+
+**Mapping memory** records the `(field, column, transform)` triples reviewers approved *and rejected*, with rejection counts — a memory that only remembers acceptances would keep proposing the column a reviewer just replaced.
+
+**Two review queues, one inbox.** `/review` merges *document reviews* (a person objected to a letter) with *unit tasks* (the engine would not guess: a calculation needing sign-off, an ambiguous condition, a weak binding, poorly-grounded narrative). Resolving a unit task can **promote the decision back into the manifest** — in `formula` mode it rewrites the field to `computed` with the human's expression; in `condition_expression` mode it rewrites the expression and downgrades the condition from a judgement call to `exact`. A rationale is mandatory and is appended to the generation's field lineage with `source: "human"`, alongside everything the machine resolved. It refuses on an approved manifest, which is immutable.
+
+**Documents carry two independent status axes, with one writer each.** `workflow_status` stores only the three states a person can assert (work in progress / completed / cancelled); `approved` and `blocked` are derived on read, because a signature is the approve endpoint's to record and a QA verdict is the fill engine's. Each column has exactly one writer, so they cannot fight.
+
+---
+
+## 8. Retrieval, chat and the model boundary
+
+Retrieval is **hybrid and tenant-filtered before anything is scored** — never after. Lexical TF-IDF (weight 0.45) and vector similarity (0.55) are merged with a +0.10 agreement bonus, capped at 1.0.
+
+What gets embedded is deliberately narrow: **source column *descriptions*** (one vector per column, with a synthetic sample value — never a customer row) and **template field context** (the sentence a placeholder sits in). Embeddings are 1024-dimensional from `HashingEmbedder`, a signed feature-hashing vectoriser over word unigrams plus 3- and 4-character n-grams that makes no network call; a hosted provider drops in behind the `EmbeddingProvider` protocol, and the index refuses to score across two providers. Storage is pgvector `vector(1024)` on PostgreSQL and a JSON float array on SQLite, through one `TypeDecorator`.
+
+This evidence is injected into the compiler's prompt as advisory *"columns that already exist in this organisation's source data"*, so a field gets named after a column the tenant already has.
+
+**Three vendors sit behind one provider interface** — Anthropic (`claude-opus-5` compile / `claude-sonnet-5` generate), Gemini (`gemini-2.5-pro` / `gemini-3.6-flash`) and OpenAI (`gpt-5` / `gpt-5-mini`). `LLM_COMPILE_PROVIDER` can name a *different vendor* from `LLM_PROVIDER`, because the two jobs have opposite economics: compiling a family happens once and is worth the strongest model available, while per-document generation runs forever and wants the cheapest one that is good enough. When they differ, both are wrapped in a router that dispatches on the `purpose` already threaded through every call. Response *shape* is constrained by a strict schema at the API level rather than asked for in prose.
+
+**The boundary is a refusal, not a filter.** `get_llm_provider` is the unskippable choke point — it will not hand back a provider unless the caller names the tenant, and it checks the tenant's residency and zero-retention requirements there against what the configured deployment actually offers. It was moved to the factory precisely because the earlier gate lived in `prepare_context`, whose only caller is the chat route, so five of the six paths that reach a model skipped it. `prepare_context` still applies that check plus redaction to source-derived context. Sensitive values are redacted into deterministic, one-way, type-preserving synthetic samples. There is **no offline stub** — a missing key answers `503 LLM_NOT_CONFIGURED` rather than returning invented output. The deterministic fill path needs no key at all.
+
+Generation is schema-constrained to blocks carrying citations, and **any chunk id the model invents is filtered out** against the ids actually sent. Every call is metered into an `llm_calls` row and costed in **integer micro-dollars** against a dated vendor rate table, by a wrapper that survives handlers which never commit.
+
+---
+
+## 9. Security, tenancy and compliance
+
+- **Auth**: bcrypt password hashing, HS256 JWT carrying `sub` and `org_id`, 8-hour lifetime, revoked through a Redis blacklist on logout.
+- **Tenant isolation is enforced twice.** Every handler goes through one of twelve `owned_*` guards that return the **same 404 for "not yours" as for "not there"** — a 403 confirms the resource exists to someone who should not know that. Underneath, PostgreSQL row-level security covers **42 of 45 tables** with an `org_isolation` policy keyed on the `app.current_org` session GUC — re-asserted on every transaction begin — plus an `rls_maintenance` policy keyed on the separate `app.rls_bypass` GUC.
+- **A superuser silently ignores every RLS policy** — with the policies still listed in `pg_policies` and `FORCE` still set. So the app connects as `documind_app` (`NOSUPERUSER NOCREATEROLE NOBYPASSRLS`) while migrations run as a separate owner, and a **startup check refuses to serve** in production if the database role can bypass RLS. A deployment that connects as the owner has isolation that has never once worked, and nothing about it looks wrong.
+- **A meta-test forces every new endpoint to be classified.** It reads the route table at test time and fails if any parametrized route appears in neither the tenancy walker's coverage table nor its exemption list. There is exactly one exemption — `GET /downloads/{token}` — carrying a written justification.
+- **Rate limiting**: a Lua token bucket in Redis, 300 req/min sustained with a 60-request burst per organisation, plus 10/min per IP on login and download redemption.
+- **Downloads**: 120-second, single-use, Redis-backed grants, audited on both mint and redemption. Only approved documents are downloadable, on every egress path.
+- **Capabilities**: 10 constants across 8 roles. Four-eyes approval bites on legally-binding templates; an author can **never** close the review of their own document (`SELF_REVIEW_REFUSED`), unconditionally.
+- **Audit**: an append-only log across 49 call sites and ~44 event labels — who, what, when, from where.
+- **Retention and deletion**: per-tenant retention (sources default 30 days), residency and zero-retention policy; a deletion cascade computed by **walking the schema** rather than a hand-maintained list; SHA-256 deletion certificates whose id manifest is deliberately never stored; and tenant offboarding that reaches blobs, embeddings and mapping memory. `retention.py` and `downloads.py` are both held at a **100% coverage floor** — an untested branch there is a row a customer was told had been destroyed.
+- **Upload safety**: `.docx` archives are inspected from the central directory only — never decompressed — for symlinks, path traversal, decompression ratio and entry count, before any parser opens the file.
+- **Prompt injection posture**: the shared system prompt instructs the model to treat everything inside `<context>` as untrusted retrieved data.
+- **Production config guard**: `ENV` in `{production, prod, staging}` makes the process **refuse to boot** on a SQLite URL, a default JWT secret, or wildcard CORS.
+
+---
+
+## 10. Architecture and stack
 
 ```mermaid
 flowchart TB
-  subgraph Client
-    FE[React 19 + TanStack Start frontend]
-  end
-  FE -->|HTTPS/JSON| API[FastAPI backend]
-  API --> PG[(PostgreSQL 17 + pgvector\nAlembic migrations, row-level security)]
-  API --> REDIS[(Redis\nrate limiting, session revocation,\ndownload grants)]
-  API --> STORE[(Local/object storage\ntemplates, sources, generated docs)]
-  API --> LLM[LLM Provider\nAnthropic / Gemini / OpenAI, pluggable]
-  API --> TPL[Template Compiler +\nUniversal Fill Engine\nno LLM at generation time]
-  API --> RAG[Grounded generation\nchat, prompt tokens, narrative units]
-  RAG --> RET[Hybrid retrieval\nlexical + pgvector, tenant-filtered]
+  FE[React 19 · TanStack Start<br/>15 routes] -->|HTTPS/JSON · 133 endpoints| API[FastAPI · 14 routers]
+  API --> PG[(PostgreSQL 17 + pgvector<br/>45 tables · RLS · Alembic)]
+  API --> REDIS[(Redis 7<br/>rate limit · revocation · grants)]
+  API --> STORE[(Local filesystem<br/>templates · sources · outputs)]
+  API --> TPL[Pre-scan → Compile → Fill → QA<br/>NO model at generation time]
+  API --> LLM[Anthropic / Gemini / OpenAI<br/>behind one provider + boundary]
+  API --> RAG[Hybrid retrieval<br/>lexical + vector, tenant-filtered]
 ```
 
-**Architecture style: modular monolith.** One FastAPI application with clearly bounded modules (`templates`, `compiler`, `manifests`, `expressions`, `retrieval`, `generation`, `qa`, `llm`, `audit`) rather than microservices — the domain is a single linear pipeline (template → sources → compile → approve → bind → generate → review), and splitting it into separate services today would add operational overhead without solving a scaling problem the project actually has. Heavy work (parsing, compiling, DOCX surgery) is where complexity is isolated, not the service boundaries.
-
-**Tenant isolation is enforced twice, on purpose.** Every handler checks `org_id`, and underneath that PostgreSQL row-level security keys on a per-session `app.current_org` setting, so a forgotten `WHERE` clause fails closed instead of leaking. That only works if the application cannot bypass a policy: the app connects as `documind_app`, created **NOSUPERUSER NOBYPASSRLS**, while migrations run as a separate owner role. PostgreSQL ignores every RLS policy for a superuser *silently*, with the policies still listed in `pg_policies` — a deployment that connects as the owner has isolation that has never once worked and nothing about it looks wrong.
-
-**Component responsibilities:**
-
-| Component | Responsibility | Technology |
-|---|---|---|
-| Frontend | Project pipeline UI, Document Mapping, the template editor, review inbox, document review, dashboard, analytics and quality | React 19, TanStack Start/Router, Tailwind CSS v4, Zustand, TipTap, Recharts |
-| Core API | Auth, CRUD, validation, orchestration | FastAPI, SQLAlchemy 2.x, Alembic |
-| Database | System of record — every entity in the product, plus embeddings | PostgreSQL 17 + pgvector, row-level security |
-| Cache / rate limiting | Token-bucket rate limiting, JWT revocation on logout, short-lived download grants | Redis 7 |
-| Document parsing | DOCX structure parsing, colour-run classification, source extraction (PDF/XLSX/CSV/DOCX) | python-docx, lxml, PyMuPDF, pdfplumber, openpyxl |
-| Retrieval | Tenant-filtered hybrid search: lexical + pgvector, merged and reranked; plus per-org mapping memory | scikit-learn TF-IDF + pgvector |
-| LLM | Compiling templates, grounded generation | Anthropic / Gemini / OpenAI behind one provider interface. **No offline stub** — a missing key answers `503`, never invented output |
-
----
-
-## 7. Technology Stack
-
-**Frontend**
+**Modular monolith, on purpose.** One FastAPI application with bounded modules — `templates`, `compiler`, `manifests`, `expressions`, `retrieval`, `generation`, `qa`, `llm`, `audit`. The domain is a single linear pipeline; splitting it into services today would add operational overhead without solving a scaling problem the project has. Complexity is isolated in the heavy work (parsing, compiling, DOCX surgery), not at service boundaries.
 
 | Layer | Choice |
 |---|---|
-| Framework | React 19, TanStack Start (SSR) + TanStack Router (file-based routing) |
-| Styling | Tailwind CSS v4 (CSS-first config), custom OKLCH design tokens, dark/light themes |
-| State | Zustand (thin client over the real backend API) |
-| Rich text | TipTap (draft editor + the colour-coded template token editor) |
-| UI primitives | Radix UI (shadcn-style components) |
-| Build | Vite 8, Bun |
-
-**Backend**
-
-| Layer | Choice |
-|---|---|
-| Language/Framework | Python 3.12, FastAPI |
-| Database | PostgreSQL 17 + pgvector, SQLAlchemy 2.x ORM, Alembic migrations, row-level security. SQLite is dev/test only |
-| Cache / rate limiting | Redis 7 (token-bucket limiter, session revocation, download grants) |
-| Auth | JWT (bcrypt password hashing), Redis-backed logout revocation; partial RBAC incl. separation of duties on manifest approval |
-| Document processing | python-docx, lxml (raw OOXML surgery), PyMuPDF, pdfplumber, openpyxl |
-| LLM | Anthropic / Gemini / OpenAI behind one `LLMProvider` interface, with residency and zero-retention enforced at the boundary |
-| Retrieval | Hybrid: scikit-learn TF-IDF + pgvector similarity, tenant-filtered before scoring |
-| Testing | pytest — 47 modules incl. golden-DOCX fixtures per template family, RLS tests and a production-config guard |
+| **Frontend** | React 19.2, TanStack Start 1.168 + Router 1.170 (file-based, generated route tree), Tailwind CSS v4 (oklch tokens), Radix/shadcn primitives (17), Zustand, TipTap, Recharts, framer-motion, cmdk, sonner, lucide |
+| **Build** | Bun + Vite 8 through `@lovable.dev/vite-tanstack-config`; `bun run build` emits a **Cloudflare Worker bundle via Nitro**, not a static `dist/` |
+| **Backend** | Python 3.12, FastAPI, SQLAlchemy 2.x, Alembic, pydantic-settings |
+| **Database** | PostgreSQL 17 + pgvector, row-level security. SQLite is dev/test only |
+| **Cache** | Redis 7 — token bucket, JWT revocation, download grants |
+| **Documents** | python-docx, lxml (raw OOXML surgery), pypdf, openpyxl, babel, beautifulsoup4 |
+| **Retrieval** | scikit-learn TF-IDF + a local hashing embedder, pgvector storage |
+| **Testing** | pytest — 81 modules, 2,222 tests, golden-DOCX comparison by C14N canonicalisation |
 
 ---
 
-## 8. Data Model / Database
+## 11. Data model
 
-The database is the single source of truth for every entity in the product — projects, templates (both kinds — see below), sources, manifests, bindings, generated documents and their versions, review tasks, embeddings, audit logs, and more: **39 tables**. Full DDL lives in `docs/BACKEND_SPEC.md` §5; the essential shape:
+**45 tables in one declarative module, 20 Alembic revisions on a single head.** The schema is versioned-immutable by design: templates, sources, manifests, blueprints and documents each have a parent row plus an append-only `*_versions` child, so a signature or an approved manifest always names bytes that still exist.
 
 ```mermaid
 erDiagram
   ORGANIZATIONS ||--o{ USERS : employs
   ORGANIZATIONS ||--o{ PROJECTS : owns
-  ORGANIZATIONS ||--o{ TEMPLATE_LIBRARY : owns
   PROJECTS ||--o{ TEMPLATE_FILES : has
   PROJECTS ||--o{ SOURCE_FILES : has
   PROJECTS ||--o{ GENERATION_JOBS : runs
-  PROJECTS ||--o{ GENERATED_DOCUMENTS : yields
   TEMPLATE_FILES ||--o{ TEMPLATE_VERSIONS : versioned_as
-  TEMPLATE_VERSIONS ||--o{ TEMPLATE_SECTIONS : parsed_into
   TEMPLATE_VERSIONS ||--o{ TEMPLATE_MANIFESTS : compiled_into
-  SOURCE_FILES ||--o{ SOURCE_VERSIONS : versioned_as
-  SOURCE_VERSIONS ||--o{ SOURCE_CHUNKS : chunked_into
   TEMPLATE_MANIFESTS ||--o{ MANIFEST_BINDINGS : bound_by
-  SOURCE_VERSIONS ||--o{ MANIFEST_BINDINGS : feeds
   TEMPLATE_MANIFESTS ||--o{ MANIFEST_GENERATIONS : produces
   TEMPLATE_MANIFESTS ||--o{ REVIEW_TASKS : parks
+  SOURCE_FILES ||--o{ SOURCE_VERSIONS : versioned_as
+  SOURCE_VERSIONS ||--o{ SOURCE_CHUNKS : chunked_into
+  SOURCE_VERSIONS ||--o{ MANIFEST_BINDINGS : feeds
   GENERATED_DOCUMENTS ||--o{ DOCUMENT_VERSIONS : versioned_as
+  DOCUMENT_VERSIONS ||--o{ DOCUMENT_REVIEWS : objected_to_by
+  TEMPLATE_BLUEPRINTS ||--o{ TEMPLATE_BLUEPRINT_VERSIONS : versioned_as
   TEMPLATE_CLUSTERS ||--o{ TEMPLATE_CLUSTER_MEMBERS : groups
 ```
 
-### 8.1 Two kinds of "template," on purpose
-
-| | Template file (`template_files`) | Blueprint (`template_blueprints`) | ~~Template library~~ |
-|---|---|---|---|
-| Scope | One project | One project | Org-wide |
-| Authored in | Microsoft Word (uploaded) | The template editor, or Word, or both | ~~DocuMind's token editor~~ |
-| Understood via | Heading tree / jinja variables / colour-run manifest | The same colour-run manifest — a blueprint emits a real `.docx` | ~~Inline coloured tokens~~ |
-| Used by | Document Mapping, via a compiled manifest | Publishes *into* the left-hand column: a template version and its manifest | ~~The Templates page~~ |
-
-The third column is **retired**. Its editor produced HTML with `<span data-token>`
-markers, and the fill engine works on OOXML runs addressed by position — so a
-template authored that way could never fill a document, and `generateFromLibrary`
-was never called by any screen. The rows are kept and readable, and
-`POST /template-blueprints:from-library` migrates one into an editable template.
-
-A **blueprint** is the answer to "I want to change this template", which the
-product previously had no answer to. A legacy `.docx` is read into an editable
-body, corrected, and published as a template version plus the manifest that fills
-it — so authoring and the deterministic engine are the same path rather than two.
-
-### 8.2 Core tables at a glance
-
-| Table | Purpose |
+| Group | Tables |
 |---|---|
-| `organizations`, `users`, `roles` | Tenancy and identity |
-| `projects` | The unit of work — region, function, document type, pipeline status |
-| `template_files` / `template_versions` / `template_sections` | Uploaded DOCX templates and their parsed structure |
-| `template_manifests` | Compiled field/condition/block rules for colour-coded templates ([§4.2](#42-template-compiler--universal-fill-engine-deterministic)) |
-| `template_blueprints` / `template_blueprint_versions` | Templates being *written*: the editable body, the semantic objects over it, the findings against it, and where each version came from. Never mutated, so any earlier state can be forked back to |
-| `template_clusters` / `template_cluster_members` | Bulk-onboarding template families ([§4.3](#43-bulk-onboarding)) |
-| `source_files` / `source_versions` / `source_chunks` | Uploaded data files, chunked and indexed for retrieval |
-| `manifest_bindings` | Which source column feeds which manifest field, for one (manifest × source version) pairing, plus the `value_map` that reconciles vocabulary ("FT" → "Full time") |
-| `field_dictionary` / `mapping_memory` | The org's canonical field names, and the (field, column, transform) triples it has approved — with rejection counts, so a memory that only remembers acceptances cannot keep proposing the column a reviewer replaced |
-| `embeddings` | pgvector store behind hybrid retrieval |
-| `review_tasks` | Units the engine would not guess — a calculation needing sign-off, an ambiguous condition, a weak binding, poorly-grounded narrative — parked with enough context for a human to decide |
-| `generation_jobs` / `section_outputs` | Generation runs, their progress and per-row results |
-| `manifest_generations` | Audit record for one manifest-driven fill — field lineage, condition verdicts, QA result |
-| `generated_documents` / `document_versions` | The output artifacts, fully versioned, each stamped with the `renderer` that produced it |
-| `audit_logs` | Append-only record of every state-changing action |
-| `org_data_policies` / `deletion_certificates` | Per-tenant retention and residency, and the record that accounts for a deletion |
-| ~~`draft_documents` / `mappings`~~ | **Vestigial.** The storage behind the removed draft + mapping-wizard pipeline. Nothing writes to either table; the rows that exist are read-only history |
+| Identity & tenancy | `organizations`, `users`, `counters`, `lookup_values`, `org_data_policies`, `org_model_rates`, `deletion_certificates` |
+| Work | `projects` |
+| Templates | `template_files`, `template_versions`, `template_sections`, `template_library`, `template_library_versions`, `template_families`, `template_clusters`, `template_cluster_members` |
+| Authoring | `template_blueprints`, `template_blueprint_versions` |
+| Compilation | `template_manifests`, `manifest_generations`, `manifest_bindings`, `field_dictionary` |
+| Sources | `source_files`, `source_versions`, `source_chunks` |
+| Generation | `generation_jobs`, `generated_documents`, `document_versions`, `section_outputs` |
+| Review | `review_tasks`, `document_reviews`, `review_comments` |
+| Chat | `conversations`, `chat_messages` |
+| Semantic memory | `embeddings`, `mapping_memory`, `mapping_memory_sharing`, `reviewer_corrections` |
+| Instrumentation | `audit_logs`, `llm_calls`, `qa_failure_logs`, `operation_timings`, `suggestion_logs` |
+| Vestigial | `draft_documents`, `mappings` — storage behind the removed draft + mapping-wizard pipeline. Nothing writes to either; the rows that exist are read-only history |
 
-### 8.3 Design principles
+That is all 45.
 
-- **JSONB for genuinely variable shape** (manifest fields/conditions/blocks, generation settings), real columns and indexes for everything queried or filtered on.
-- **Soft deletes** everywhere a delete is reversible in spirit and referenced by immutable history.
-- **Versioning over mutation** — templates, sources, library entries and documents are versioned rather than edited in place. (One deliberate exception: the editor's autosave mutates the current draft version, matching how people expect an editor to behave.)
-- **Human-friendly display IDs** (`51255`, `50616`) generated via per-org counters, distinct from internal UUIDs.
-- **Every row that can hold customer data carries `org_id`**, so a query filter is possible and row-level security has a column to key on. It is derived from the parent on write, never supplied by a caller — which would make it forgeable.
+**Design rules.** Generic SQLAlchemy `JSON` columns (not `JSONB` — the schema stays portable to SQLite) where shape is genuinely variable (manifest fields, conditions, blocks, generation settings), real indexed columns for anything queried. Soft deletes where history references the row. Versioning over mutation (the editor's autosave is the one deliberate exception). Human-friendly display ids distinct from internal UUIDs. And **`org_id` on all 43 tables that can hold customer data, derived from the parent on write** — never supplied by a caller, which would make it forgeable.
 
 ---
 
-## 9. Project Structure
+## 12. What is wired, and what is a seam
 
-```
-TemplateAI/
-├── docker-compose.yml            # pgvector/pg17 + redis + migrate(owner role) + api(app role)
-├── src/                          # Frontend (React + TanStack Start)
-│   ├── routes/                   # File-based routes: login, dashboard, project pipeline,
-│   │                             #   template editor, document editor, templates, review,
-│   │                             #   chat, analytics, team, audit log, settings
-│   ├── components/
-│   │   ├── document-mapping.tsx  #   THE PRIMARY WORKFLOW: map columns -> generate
-│   │   ├── app-shell.tsx, create-project-sheet.tsx
-│   │   ├── template-editor.tsx   #   token UI for natively-authored templates
-│   │   └── template-conversion-wizard.tsx, status-badge.tsx, ui/
-│   └── lib/                      # api.ts (backend client), store.ts (Zustand), types.ts
-├── backend/
-│   ├── scripts/init-db/          # 01-app-role.sh — creates documind_app NOSUPERUSER NOBYPASSRLS
-│   ├── tests/                    # pytest + golden DOCX fixtures per template family
-│   ├── alembic/                  # Database migrations (incl. row-level security, pgvector)
-│   └── app/
-│       ├── main.py               # FastAPI app, middleware, router registration
-│       ├── models.py             # SQLAlchemy models — the full data model (39 tables)
-│       ├── tenancy.py            # RLS session scoping + LLM residency policy
-│       ├── authz.py, ownership.py, security.py, rate_limit.py, downloads.py, retention.py
-│       ├── routers/              # auth, projects, templates, sources, manifests, bindings,
-│       │                         #   generation, review, chat, admin, metrics, downloads
-│       ├── templates/            # ingest, semantic model, fingerprint, family matching,
-│       │                         #   inheritance, parsers/{docx_parser,docx_prescan,docx_safety}
-│       ├── compiler/             # rule_compiler, llm_compiler, mapping_agent (agentic loop),
-│       │                         #   confidence (the AUTO_ACCEPT/CONFIRM/REVIEW/BLOCK bands)
-│       ├── manifests/            # the manifest contract, validator, versioning, diff
-│       ├── expressions/          # condition language, plain-English rendering, token parser
-│       ├── retrieval/            # hybrid (lexical + pgvector), indexing, store, mapping memory
-│       ├── generation/           # docx_renderer (the Universal Fill Engine), batch_runner,
-│       │                         #   resolution_engine, narrative_engine, source ingestion,
-│       │                         #   renderers, value formatting, pdf_fill
-│       ├── qa/                   # placeholder / layout / overflow / lineage checks
-│       ├── llm/                  # provider (Anthropic/Gemini/OpenAI), boundary, redaction
-│       └── conventions/          # en/ja/ko/zh annotated locale rules
-└── docs/
-    ├── BACKEND_SPEC.md            # Full backend engineering specification
-    └── TEMPLATE_COMPILER_RESEARCH.md  # Research behind the Template Compiler engine
-```
+The repo contains **zero `TODO`, `FIXME`, `XXX`, `HACK` or `NotImplementedError` markers**. Absences are documented in prose inside module docstrings instead — which makes them easy to miss. Named here so they are not:
 
-> `backend/app/services/` no longer exists — it was a flat folder that became the module tree above. `APPLICATION_FLOW.md` §3 carries an old-path → new-path table if you are following a stale link.
+**Deliberate scoping choices**
+
+- **Batch generation runs in an in-process background task.** No worker queue, so a restart mid-batch loses the run; the only recovery is the job row's progress.
+- **Compile progress is polled, not pushed.** No WebSocket or SSE — the client mints a token, passes it to the compile endpoint, and reads it back through the jobs endpoint.
+- **No user-management API.** Accounts and roles come from `python -m app.bootstrap` and `bootstrap add-user`. The team screen is read-only.
+- **Object storage is the local filesystem** — 32 lines of `shutil`/`pathlib`. No S3/MinIO/Azure/GCS.
+- **Auth is JWT-only.** No SSO/OIDC, no refresh tokens, no password reset.
+
+**Built but not plugged in** — real code, real tests, no runtime caller:
+
+- **Five of ten capabilities are declared but unenforced**: `UPLOAD_TEMPLATE`, `UPLOAD_SOURCE`, `COMPILE_MANIFEST`, `EDIT_MANIFEST`, `GENERATE_DOCUMENT`. Any authenticated member can upload, compile and generate. Only approval, review, audit-read and admin routes actually gate.
+- **The narrative/RAG half of the resolution engine is a seam.** No caller injects a `narrative_resolver` or `fuzzy_resolver`, so every `narrative` unit and every fuzzy condition takes the refusal branch and parks for a human. That is a safe failure mode, not a silent one — but it means narrative generation does not currently run unattended.
+- **The manifest envelope's `(template_hash, manifest_hash)` pin is implemented and unwired.** The approval endpoint supersedes and stamps directly rather than building an envelope, so the reproducibility pin exists in `versioning.py` and in tests only.
+- **The HNSW index is created and never used.** Vector search fetches tenant-scoped rows and computes cosine in numpy; pgvector currently buys the column type and the tenant filter, not approximate nearest-neighbour search.
+- **Mapping memory persists nowhere at runtime.** The binding-suggestions endpoint rebuilds an in-process memory from existing bindings on every request; the three memory tables are modelled and migrated but unwritten. Cross-tenant structural-pattern sharing has no HTTP surface at all.
+- **`GET /document-versions/{id}/citations` can only return an empty list** — every document-creation site hardcodes `draft_id=None`, and nothing writes the citations column. Citation grounding is real at the provider boundary; the endpoint that would surface it is not.
+- **Escaped-error reporting and the calibration log have no UI.** The backend ranks escaped error rate first among its metrics, and the only endpoint that can make it measurable is unreachable from the shipped product.
+- **The manifest `qa_policy` never reaches the DOCX renderer** — both DOCX callers build a four-key dict, so DOCX generations always run on default severities. Only the PDF path passes it.
+- **The Korean postposition pass never fires** — the manifest column that would enable it is not persisted.
+- **`value_exceeds_max_len` is dormant** — nothing in the compiler emits a `max_len`, so it is silent until a manifest declares one.
+- **A tenth assertion, `scaffolding_conflict`, is declared and never raised.** So is the compiler's optional test-fill assertion: `compile_template(test_fill=...)` is passed only from tests, so `test_fill_failure` cannot fire through the API.
+- **Retrieval evidence reaches one of four compile call sites.** Only the single-template compile passes it; bulk onboarding and both blueprint compiles do not — so a template onboarded in bulk is read with no knowledge of the organisation's existing column names, which is the case the feature was built for.
+- **Settings is mostly mock.** Only the Profile tab reads real data. Workspace, AI Models, Notifications, Security, API keys and Billing are static JSX. Audit-log filters, export and pagination have no handlers, and the team screen has no invite or role-change controls at all.
+- **PDF export does not work in the container as built** — the image deliberately omits LibreOffice (it would roughly triple the size). The single-document download answers `503 PDF_UNAVAILABLE` there; the bulk zip catches the same failure per document, lists it in `_FAILED.txt`, and answers `422 NOTHING_TO_DOWNLOAD` when nothing converted. The Dockerfile comment claiming that path has no callers is stale: it has two.
+- **`docs/BACKEND_SPEC.md` §-numbers cited in code comments do not resolve to that document.** The code quotes an architecture record not present in this repository — treat those references as provenance notes, not lookups.
 
 ---
 
-## 10. Full Documentation Index
+## 13. Getting started
 
-| Document | What's in it |
-|---|---|
-| **`README.md`** (this file) | The living project overview — use case, architecture, database, impact. Keep this current. |
-| **`APPLICATION_FLOW.md`** | The self-contained technical briefing: what the code actually does today, layer by layer — repository map, data model, every flow, the full route inventory, and an explicit list of what was removed and why. Start here to understand the running system. |
-| **`docs/BACKEND_SPEC.md`** | The backend engineering **specification**: the full database DDL, scalability/security/reliability design, the milestone roadmap, and a frontend-file-to-endpoint traceability table. Parts of it describe a target rather than the code; its "Implementation status" block at the top says which. |
-| **`docs/TEMPLATE_COMPILER_RESEARCH.md`** | The research report behind the Template Compiler + Universal Fill Engine — grounded in a real analysis of a legacy Hospira/Pfizer HR template, including the RAG-vs-deterministic decision framework and the Azure/AWS service landscape for source extraction. |
-| **`AGENTS.md`** | Notes for AI coding agents working in this repo (Lovable sync behavior). |
-| API docs (running backend) | `http://localhost:8000/docs` — live OpenAPI/Swagger UI generated from the actual FastAPI routes. |
+**Prerequisites**: Docker (recommended) or Python 3.12 + PostgreSQL 17 + Redis on the host. Bun for the frontend either way.
 
----
+### 13.1 The database is not optional, and it is not SQLite
 
-## 11. Getting Started
+`DATABASE_URL` defaults to SQLite and the test suite runs on it, but that is a development convenience. SQLite cannot express row-level security, the `vector` column type, foreign key enforcement or a session timezone — and every one of those has already hidden a real defect in this codebase while the SQLite run stayed green. `ENV=production` makes the process refuse to start on a SQLite URL.
 
-**Prerequisites**: Docker (recommended), or Python 3.12 + PostgreSQL 17 + Redis on the host. Node/Bun for the frontend either way.
+The stack uses **two database roles**, and this is the part that is easy to skip:
 
-### 11.1 The database is not optional, and it is not SQLite
+- `documind_owner` runs migrations — creating tables, enabling RLS and installing an extension all need privileges the application must not hold.
+- `documind_app` is what the API connects as: `NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`.
 
-`DATABASE_URL` still *defaults* to SQLite, and the test suite runs on it, but that is a development convenience only. SQLite cannot express row-level security, the `vector` column type that retrieval stores embeddings in, or a session timezone — all three of which have already hidden real defects in this codebase. `ENV=production` makes the process **refuse to start** on a non-PostgreSQL URL.
-
-The stack also uses **two database roles**, and this is the part that is easy to skip:
-
-- `documind_owner` runs migrations, because creating tables, enabling RLS and installing an extension all need privileges the application must not have.
-- `documind_app` is what the API connects as: `NOSUPERUSER NOCREATEDB NOCREATEROLE **NOBYPASSRLS**`.
-
-PostgreSQL ignores every row-level security policy for a superuser or a `BYPASSRLS` role — silently, with the policies still listed in `pg_policies`. Connect as the owner and tenant isolation has never once worked, and nothing about it looks wrong.
-
-### 11.2 Fastest path: Docker Compose
-
-`docker-compose.yml` brings up exactly those components: `pgvector/pgvector:pg17` (stock Postgres does not ship the extension, so the migration that creates it fails), Redis, a one-shot `migrate` service running as the owner, and the API running as the app role.
+### 13.2 Docker Compose
 
 ```sh
-docker compose up -d db redis
+docker compose up -d db redis          # pgvector/pgvector:pg17 + redis:7-alpine
 docker compose run --rm migrate        # alembic upgrade head, as documind_owner
 docker compose up api                  # uvicorn on :8000, as documind_app
 ```
 
-Then create the first organisation and administrator — nothing is seeded on boot, so until this runs the database is genuinely empty and nobody can sign in:
+Nothing is seeded on boot, so until this runs the database is genuinely empty and nobody can sign in:
 
 ```sh
 docker compose exec api python -m app.bootstrap \
@@ -366,118 +379,155 @@ docker compose exec api python -m app.bootstrap \
   --email you@example.com \
   --name "Your Name" \
   --password 'choose-a-long-one'
+
+# Add a colleague. The separation-of-duties rules are unsatisfiable with one
+# account: an author may never close the review of their own letter.
+docker compose exec api python -m app.bootstrap add-user \
+  --org "Your Organisation" --email colleague@example.com \
+  --name "Their Name" --role approver --password '...'
 ```
 
+Then, from the repo root:
+
 ```sh
-# --- Frontend (second terminal, from repo root) ---
 bun install
-bun run dev
+bun run dev                            # Vite dev server
 ```
 
-### 11.3 Running the backend on the host instead
+> Migrations are intentionally **not** run by the container `CMD` — `alembic upgrade head` must be a separate pre-deploy job, or a rolling deploy races itself. There is no frontend service in compose and no frontend Dockerfile; the UI runs on the host.
 
-Same two roles, same migration order:
+### 13.3 On the host instead
 
 ```sh
-brew install postgresql@17 redis        # macOS; use your package manager otherwise
-brew services start postgresql@17
-brew services start redis
+brew install postgresql@17 redis && brew services start postgresql@17 && brew services start redis
 createuser documind_owner -P
 createdb documind -O documind_owner
 
-# Creates the pgvector extension and the documind_app role (NOSUPERUSER NOBYPASSRLS).
-# Docker runs this automatically via docker-entrypoint-initdb.d; on the host, run it yourself:
-POSTGRES_USER=documind_owner POSTGRES_DB=documind APP_DB_PASSWORD='choose-another-one' \
+# Creates the pgvector extension and the documind_app role. Docker runs this
+# automatically via docker-entrypoint-initdb.d; on the host, run it yourself:
+POSTGRES_USER=documind_owner POSTGRES_DB=documind APP_DB_PASSWORD='another-long-one' \
   bash backend/scripts/init-db/01-app-role.sh
 
 cd backend
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env                    # set DATABASE_URL (documind_app), JWT_SECRET, CORS_ORIGINS
+cp .env.example .env                   # set DATABASE_URL, JWT_SECRET, CORS_ORIGINS
 DATABASE_URL=postgresql+psycopg://documind_owner:...@localhost:5432/documind alembic upgrade head
-python -m app.bootstrap --org "…" --email … --name "…" --password '…'
-
-# Add at least one colleague. The separation-of-duties rules are unsatisfiable
-# with a single account: the compiler may not sign off its own manifest, and an
-# author may not close the review of their own letter.
-python -m app.bootstrap add-user --org "…" --email … --name "…" \
-  --role approver --password '…'
-
+python -m app.bootstrap --org "..." --email ... --name "..." --password '...'
 uvicorn app.main:app --reload --port 8000
 ```
 
-`app/config.py` reads `.env` relative to the process working directory, so uvicorn must start from `backend/`.
+`app/config.py` reads `.env` relative to the process working directory, and `alembic.ini` still carries a placeholder URL that `env.py` overrides from settings — so **both must be run from `backend/`**.
 
-`GET /readyz` reports whether Postgres and Redis are actually connected; `GET /healthz` is the static probe. Interactive API docs at `http://localhost:8000/docs`.
+`GET /readyz` reports whether Postgres and Redis are actually connected; `GET /healthz` is a static probe. Interactive OpenAPI docs at `http://localhost:8000/docs`; a **public, login-free** product and API reference is served by the frontend at `/docs`.
 
-### 11.4 First run, end to end
+### 13.4 Configuration
 
-Sign in at `/login` with the account you just created. There is no demo data and no seeded user: every project, template, source file and document in a running instance was put there by someone using it, which is what makes a green dashboard evidence that the application works.
-
-Then, on one project:
-
-1. **Stage 1 — Template.** Upload a `.docx`. A legacy colour-coded template (blue placeholder runs, red instructions, `MERGEFIELD` codes) is the case this was built for.
-2. **Stage 2 — Sources.** Upload the `.csv`/`.xlsx` whose rows will become documents.
-3. **Stage 3 — Document Mapping.** Map fields to columns, then generate. Two steps, because the template was already read at upload and generating from it does not wait on a signature. Anything the compiler was unsure about is listed beside the Generate button as advice — those are the places a document is most likely to come back with a QA failure — rather than as a gate in front of it.
-4. **Stage 4 — Documents.** Where the batch's progress and its failures are shown, and where each letter is worked through a lane — work in progress, completed, approved, blocked, cancelled. **Only an approved document can be downloaded**, individually or as a ZIP.
-
-There is no separate Template Studio. There was, reached from "Open in Studio" on a template row, and it offered the same compile/review/bind/generate steps a second time — two screens with the same name doing overlapping jobs. Templates are read at upload; the words of a template are edited in the template editor at `/templates/$blueprintId`.
-
-### 11.5 Language models
-
-A model is required for **compiling** templates that have no colour coding, and for chat, narrative sections, and fuzzy or context-dependent conditions. Colour, brackets and `MERGEFIELD`s are language-independent structure, so a coloured template — even in German or Korean — compiles on the free rule-based path, and **generation never calls a model at all**. Three vendors are supported:
+The frontend reads exactly one variable, `VITE_API_URL`, defaulting to `http://localhost:8000/api/v1`. The backend reads 31 settings; the ones that matter:
 
 ```sh
-LLM_PROVIDER=anthropic        # or: gemini, openai
-# LLM_COMPILE_PROVIDER=gemini # optional — compile on one vendor, generate on another
+ENV=development               # production|prod|staging enable the boot guard
+DATABASE_URL=...              # PostgreSQL in anything but dev
+REDIS_URL=redis://localhost:6379/0
+JWT_SECRET=...                # the default is refused in production
+CORS_ORIGINS=["http://localhost:3000"]   # a JSON list — a bare URL fails to parse
 
-ANTHROPIC_API_KEY=...         # needed when a provider above is "anthropic"
-GEMINI_API_KEY=...            # needed when a provider above is "gemini"
-OPENAI_API_KEY=...            # needed when a provider above is "openai"
-```
+LLM_PROVIDER=anthropic        # anthropic | gemini | openai
+LLM_COMPILE_PROVIDER=         # optional — compile on one vendor, generate on another
+ANTHROPIC_API_KEY=...         # / GEMINI_API_KEY / OPENAI_API_KEY
 
-`LLM_COMPILE_PROVIDER` exists because the two jobs have opposite economics: compiling a template family happens once and is worth the strongest model available, while per-document generation runs forever and wants the cheapest one that is good enough. A provider name that isn't `anthropic`, `gemini` or `openai` is rejected rather than defaulted — a typo must not silently route every document through a vendor nobody chose.
-
-All three vendors sit behind the same `LLMProvider` interface in `app/llm/provider.py`, with the response *shape* constrained by a strict schema at the API level rather than asked for in prose. OpenAI uses the Responses API with strict `json_schema` structured outputs; the compile schemas already satisfy that subset, so no schema is weakened to fit it.
-
-Two more settings are assertions about a contract, not preferences, so both default to the weakest claim and an organisation requiring more than the deployment offers gets a refusal rather than a prompt:
-
-```sh
-LLM_RESIDENCY=GLOBAL          # GLOBAL | EU | UK | IN — where the configured deployment runs
+LLM_RESIDENCY=GLOBAL          # GLOBAL | EU | UK | IN — what the deployment actually offers
 LLM_ZERO_RETENTION=false      # confirm contractually before setting true
 ```
 
-There is no offline stub. Without a usable key those endpoints answer `503 LLM_NOT_CONFIGURED` instead of returning invented output. The deterministic path (pre-scan → manifest → fill → QA), which is how colour-coded templates become documents, makes no model call at all and needs no key.
+The last two are **assertions about a contract, not preferences**, so both default to the weakest claim: an organisation requiring more than the deployment offers gets a refusal rather than a prompt. A provider name that is not one of the three is rejected rather than defaulted — a typo must not silently route every document through a vendor nobody chose.
 
 ---
 
-## 12. Security & Compliance Posture
+## 14. Tests and CI
 
-- **Auth**: JWT (bcrypt-hashed passwords), Redis-backed token revocation on logout, a stale or revoked token is detected on the next request, cleared, and the user returned to `/login`.
-- **Rate limiting**: Redis-backed token-bucket limiter on every authenticated endpoint, plus a separate IP-based limiter on login to blunt brute force.
-- **Audit trail**: append-only `audit_logs` table recording every state-changing action — who, what, when, from where.
-- **Grounded generation**: every LLM-generated sentence in the RAG engine must cite the source chunk it came from; ungrounded claims are treated as failures, not warnings.
-- **Deterministic filling**: the Template Compiler path makes zero LLM calls at generation time for data-driven templates, eliminating hallucination risk for those documents entirely.
-- **QA gates**: a generated document from the Template Compiler path is checked for leftover placeholder brackets, leftover `MERGEFIELD` codes, and leftover instruction text before it's considered valid.
-- **Approval is a real gate**: an approved manifest is immutable and subject to separation of duties; a manifest with an unrenderable condition or an unanswered compiler warning cannot be approved; a QA-blocked document cannot be approved; and a document that has been approved cannot be deleted until the approval is revoked, which is itself auditable.
-- **Tenant isolation is enforced twice**: per-handler `org_id` checks, and PostgreSQL row-level security keyed on a per-session setting, with the application connecting as a role that cannot bypass a policy even by accident.
-- **Data residency and retention**: per-organisation retention schedules with a sweep, a residency/zero-retention policy checked at the model boundary *before* a prompt is built, tenant offboarding, and deletion certificates that account for what was destroyed.
-- **Regulated-industry features (in progress)**: document versioning with full history is live; e-signature capture and section-anchored review comments remain design targets (see `docs/BACKEND_SPEC.md` §13).
+```sh
+cd backend && ./scripts/check.sh        # the gate. CI runs this exact script.
+```
 
----
+One script, run identically locally and in CI, so *"green locally"* and *"green in CI"* cannot drift into two definitions of done. It runs fully offline — `conftest.py` blanks every provider key, and any model-backed path is expected to refuse rather than reach out.
 
-## 13. Current Status & Roadmap
+| | |
+|---|---|
+| Tests collected | **2,222** across 81 modules |
+| Last verified run | 2,220 passed, 2 skipped, exit 0 |
+| Measured coverage | **87.33%** (14,995 statements, 1,900 missed) |
+| Global floor | 76%, env-overridable |
+| Per-module floors | **34**, grouped under comments naming the failure modes they guard |
+| Held at 100% | `docx_prescan`, `renderers`, `llm/pricing`, `compiler/confidence`, `downloads`, `retention` |
 
-**Working today**: the full frontend — sign-in, dashboard, the four-stage project pipeline with **Document Mapping** as its centre, the template editor, the document editor, a unified review inbox (documents somebody objected to alongside the values the engine parked), chat, analytics with real token and USD figures, a quality screen carrying §22's metrics and §18's timing targets, team and audit log — wired to a real backend running on PostgreSQL 17 + pgvector and Redis, with row-level security enforced by a non-bypassing application role. The deterministic read → bind → generate path is complete end to end — a template is compiled when it is uploaded, and generating from it needs no approval step: what the engine checks is that the reading is usable and current, not that somebody signed it. The one exception is a template flagged legally binding, where §16's four-eyes rule still applies. Also complete: plain-English condition review, confidence-banded binding suggestions, batch generation with a canary gate, and QA gates that block a document rather than shipping one with a placeholder still in it.
+**CI runs the suite twice** — once on SQLite, once against real PostgreSQL — because row-level security, the pgvector column, foreign keys and the session timezone only exist on the latter, and each has hidden a real defect while the SQLite run stayed green. CI connects as a purpose-made non-superuser role: PostgreSQL ignores RLS for a superuser, so the whole PostgreSQL job would otherwise have asserted against a database that does not filter, and the RLS tests would have proved nothing while passing.
 
-**Removed, deliberately**: the earlier "draft + mapping wizard" pipeline and the section-mapping RAG generator behind it. It had no manifest, so it filled nothing, and it stood in front of the path that works. Every `/drafts/…` endpoint went with it.
+**Three coverage floors are reported as unmeasurable rather than failing.** `rule_compiler`, `docx_renderer` and `docx_prescan` can only reach their floors with the customer-owned template masters, which are deliberately not published here. `conftest.py` skips the 345 tests that need them, so on a checkout without those files those modules are legitimately lower. Printing them with a `--` marker, the real percentage and the floor they could not be checked against is not a silent pass — but failing on every machine that does *not* hold customer data is backwards, and is the kind of red that teaches people to stop reading CI.
 
-**Known simplifications** (see `docs/BACKEND_SPEC.md`'s "Implementation status" table for the full list): batch generation runs on an in-process background task rather than a durable job queue, so there is no retry, cancellation or survival across a restart; RBAC is enforced on manifest approval, document approval and review, user management and audit reads but not yet across every endpoint; there is no endpoint that creates a user, so colleagues are added from the command line; auth is JWT-only rather than enterprise SSO/OIDC. Each is a documented, deliberate scoping choice with a clear upgrade path, not an oversight.
-
-**Natural next steps**: a background job queue for generation at higher volume; screens for the pieces that are built but still API-only (bulk onboarding and clustering, manifest inheritance, manifest diff, the admin data-policy and deletion-certificate surfaces); and OIDC/SSO for enterprise auth.
+**Known gaps in the gate**: there is no frontend test suite at all (the only frontend CI check is `tsc --noEmit` — neither `lint` nor `build` runs), no Python linter or formatter, and no pytest config file, so a bare `pytest` runs with no coverage and no floors. CI's PostgreSQL image is `pg16` while compose uses `pg17`.
 
 ---
 
-## 14. Origins
+## 15. Project structure
 
-This project began as a Lovable-scaffolded frontend (`docucraft-ai`) and has since grown a complete, independent FastAPI backend, a deterministic template-compilation engine, and this documentation set. The Lovable sync notes in `AGENTS.md` still apply to the frontend half of the repo.
+```
+TemplateAI/
+├── docker-compose.yml             # pg17+pgvector · redis · migrate(owner) · api(app role)
+├── src/                           # Frontend — 15 routes, ~14.6k lines
+│   ├── routes/                    #   3 public (/, /login, /docs) + 12 under the /_app guard
+│   ├── components/
+│   │   ├── document-mapping.tsx   #   bind columns → generate
+│   │   ├── batch-progress.tsx     #   held above the stage that starts it, so it survives navigation
+│   │   ├── review-bar.tsx, bulk-select.tsx, command-palette.tsx, motion.tsx
+│   │   └── ui/                    #   17 Radix/shadcn primitives
+│   └── lib/                       # api.ts (~110 methods), store.ts, types.ts, theme.tsx
+├── backend/
+│   ├── scripts/check.sh           # THE GATE — CI runs this verbatim
+│   ├── scripts/init-db/           # 01-app-role.sh — documind_app NOSUPERUSER NOBYPASSRLS
+│   ├── alembic/versions/          # 20 revisions, single head
+│   ├── tests/                     # 81 modules, golden-DOCX fixtures, tenancy walker
+│   └── app/                       # ~38.5k lines
+│       ├── main.py                #   14 routers, CORS, startup RLS verification
+│       ├── models.py              #   45 tables
+│       ├── routers/               #   auth · projects · templates · sources · manifests ·
+│       │                          #     bindings · generation · blueprints · review · reviews ·
+│       │                          #     chat · admin · metrics · downloads
+│       ├── templates/             #   read_docx · emit_docx · blueprint(+lint,+ops) ·
+│       │                          #     kits · lift · fingerprint · family_matcher · inheritance
+│       │   ├── parsers/           #     docx_parser · docx_prescan · docx_safety
+│       │   └── kits/              #     5 starter kits (en/ja/ko/zh grammar YAML is at app/conventions/)
+│       ├── compiler/              #   agentic_compiler · rule_compiler · llm_compiler ·
+│       │                          #     assertions · confidence · blueprint_agent · mapping_agent
+│       ├── manifests/             #   envelope · validator · versioning · diff
+│       ├── expressions/           #   documind-expr/1.0 · plain_english · token_parser
+│       ├── generation/            #   docx_renderer (the fill engine) · batch_runner ·
+│       │                          #     resolution_engine · pdf_renderer · value_format ·
+│       │                          #     missing_policy · source_ingestion · document_status
+│       ├── qa/                    #   16 gates + policy routing + package diff
+│       ├── retrieval/             #   hybrid · lexical · vector · embeddings · mapping_memory
+│       ├── llm/                   #   provider (3 vendors) · boundary · redaction · metering · pricing
+│       ├── audit/, tenancy.py, authz.py, ownership.py, security.py, retention.py
+│       └── metrics.py, analytics.py, downloads.py, rate_limit.py, bootstrap.py
+└── docs/
+    ├── BACKEND_SPEC.md
+    └── TEMPLATE_COMPILER_RESEARCH.md
+```
+
+---
+
+## 16. Documentation index
+
+| Document | What's in it |
+|---|---|
+| **`README.md`** (this file) | The living overview — verified against the code. Keep it current. |
+| **`APPLICATION_FLOW.md`** | Layer-by-layer technical briefing: repository map, data model, every flow, the full route inventory, and what was removed and why. |
+| **`docs/BACKEND_SPEC.md`** | The backend engineering **specification** — full DDL, scalability/security/reliability design, roadmap. Parts describe a target rather than the code; its "Implementation status" block says which. Its §-numbers do not match those cited in code comments ([§12](#12-what-is-wired-and-what-is-a-seam)). |
+| **`docs/TEMPLATE_COMPILER_RESEARCH.md`** | The research behind the compiler + fill engine, grounded in analysis of the real Hospira/Pfizer template, including the RAG-vs-deterministic decision framework. |
+| **`AGENTS.md`** | Lovable sync notes. **This repo syncs commits back to the Lovable editor — do not force-push or rebase.** |
+| `/docs` (frontend) | Public, login-free product and API reference: the five steps, marking up a template, the condition grammar, both document status axes, and 35 endpoints with an end-to-end example, each checked against the running server's OpenAPI document. |
+| `http://localhost:8000/docs` | Live Swagger UI generated from the actual FastAPI routes. |
+
+---
+
+<sub>Originally scaffolded as a Lovable frontend (`docucraft-ai`); it has since grown an independent FastAPI backend, a deterministic template-compilation engine, and this documentation set.</sub>

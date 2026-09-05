@@ -37,7 +37,9 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { FadeIn, Stagger, StaggerItem } from "@/components/motion";
+import { FadeIn, Stagger, StaggerItem, SwapIn } from "@/components/motion";
+import { PolishedEmpty, SkeletonBar, StageSkeleton } from "@/components/skeletons";
+import { ErrorBanner } from "@/components/error-banner";
 
 export const Route = createFileRoute("/_app/review")({
   head: () => ({
@@ -162,20 +164,19 @@ function ReviewQueue() {
           <div className="px-4 py-3 border-b border-border text-xs uppercase tracking-wider text-muted-foreground">
             {items.length} item{items.length === 1 ? "" : "s"}
           </div>
+          {/* A refresh keeps the rows it already has and says so with one line of
+              shimmer, because a queue that empties itself into placeholders every
+              time the filter changes looks like work disappearing. */}
+          {loading && items.length > 0 && <span aria-hidden className="ai-skeleton block h-0.5 w-full" />}
           <div className="flex-1 overflow-auto divide-y divide-border">
-            {loading && (
-              <div className="p-6 text-sm text-muted-foreground flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-              </div>
-            )}
+            {loading && items.length === 0 && <QueueSkeleton />}
             {!loading && items.length === 0 && (
-              <div className="p-8 text-center">
-                <CheckCircle2 className="h-8 w-8 text-success mx-auto mb-3" />
-                <div className="font-medium">Nothing waiting</div>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Every document accepted and every unit resolved on its own.
-                </p>
-              </div>
+              <PolishedEmpty
+                className="m-3 border-0"
+                icon={<CheckCircle2 className="h-6 w-6" />}
+                title="Nothing waiting"
+                subtitle="Every document was accepted and every unit resolved on its own."
+              />
             )}
             {/* Grouped by project. The queue is one flat list across the whole
                 workspace, and an inbox of forty items from six projects is one a
@@ -252,16 +253,54 @@ function ReviewQueue() {
           </div>
         </div>
 
-        {selected == null ? (
-          <div className="rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
-            Pick something from the queue.
+        {loading && selected == null ? (
+          // The pane holds its size while the queue loads, so the first pick does
+          // not shove the list column upwards as the detail arrives.
+          <div className="rounded-xl surface-raised p-6">
+            <StageSkeleton lines={4} />
           </div>
-        ) : selected.kind === "document_review" ? (
-          <ReviewDetail key={selected.id} reviewId={selected.id} onDone={refresh} />
+        ) : selected == null ? (
+          <PolishedEmpty
+            icon={<ClipboardCheck className="h-6 w-6" />}
+            title="Nothing picked"
+            subtitle="Choose an item on the left to read what the engine stopped on, or what somebody objected to."
+          />
         ) : (
-          <TaskDetailLoader key={selected.id} taskId={selected.id} onDone={refresh} />
+          // Keyed on the picked item, because the two detail views are different
+          // components and a swap between them is otherwise indistinguishable
+          // from the same pane redrawing itself.
+          <SwapIn k={`${selected.kind}:${selected.id}`}>
+            {selected.kind === "document_review" ? (
+              <ReviewDetail key={selected.id} reviewId={selected.id} onDone={refresh} />
+            ) : (
+              <TaskDetailLoader key={selected.id} taskId={selected.id} onDone={refresh} />
+            )}
+          </SwapIn>
         )}
       </div>
+    </div>
+  );
+}
+
+/** The queue at the size it will be.
+ *
+ *  A row is a badge strip over two lines of text, and the placeholder repeats
+ *  that shape rather than centring a spinner: the list is the tallest thing on
+ *  the page, and a column that collapses to one line and then springs back moves
+ *  everything beside it. */
+function QueueSkeleton({ rows = 6 }: { rows?: number }) {
+  return (
+    <div className="divide-y divide-border">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="space-y-2 px-4 py-3.5">
+          <div className="flex items-center gap-2">
+            <SkeletonBar className="h-4 w-20 rounded-full" />
+            <SkeletonBar className="h-4 w-14 rounded-full" />
+          </div>
+          <SkeletonBar className="h-3 w-[86%]" />
+          <SkeletonBar className="h-2.5 w-1/3" />
+        </div>
+      ))}
     </div>
   );
 }
@@ -273,6 +312,7 @@ function ReviewDetail({ reviewId, onDone }: { reviewId: string; onDone: () => vo
   const currentUserId = useStore((s) => s.currentUserId);
 
   const [review, setReview] = useState<DocumentReview | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
@@ -280,15 +320,25 @@ function ReviewDetail({ reviewId, onDone }: { reviewId: string; onDone: () => vo
 
   const load = () =>
     api.documentReview(reviewId)
-      .then(setReview)
-      .catch((e: any) => toast.error("Could not load this review", { description: e?.message ?? String(e) }));
+      .then((r) => { setReview(r); setError(null); })
+      .catch((e: any) => setError(e?.message ?? String(e)));
 
   useEffect(() => { void load(); }, [reviewId]);
 
+  // A failure that leaves nothing on screen is the one worth a whole pane; a
+  // failure to re-read after an action still has the previous answer behind it,
+  // and that one is banner-over-content further down.
   if (!review) {
-    return (
-      <div className="rounded-xl surface-raised p-6 text-sm text-muted-foreground flex items-center gap-2">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+    return error ? (
+      <ErrorBanner
+        title="Could not load this review"
+        message="The objection is still there — this pane could not fetch it."
+        detail={error}
+        onRetry={() => void load()}
+      />
+    ) : (
+      <div className="rounded-xl surface-raised p-6">
+        <StageSkeleton lines={3} />
       </div>
     );
   }
@@ -321,6 +371,16 @@ function ReviewDetail({ reviewId, onDone }: { reviewId: string; onDone: () => vo
 
   return (
     <div className="rounded-xl surface-raised p-6 space-y-5">
+      {error && (
+        <ErrorBanner
+          title="Could not refresh this review"
+          message="What is below is the state from before the last action."
+          detail={error}
+          onRetry={() => void load()}
+          onDismiss={() => setError(null)}
+        />
+      )}
+
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-2 flex-wrap">
@@ -447,7 +507,7 @@ function Conversation({ comments, currentUserId, onResolve }: {
         >
           <div className="flex items-center gap-2 text-xs text-muted-foreground mb-0.5">
             <span>{c.author_id === currentUserId ? "You" : c.author_name ?? "Someone"}</span>
-            {c.resolved_at && <span className="text-success">· done</span>}
+            {c.resolved_at && <span className="text-ai-confident">· done</span>}
             {!c.resolved_at && (
               <button
                 onClick={() => onResolve(c.id)}
@@ -500,10 +560,21 @@ function DocumentText({ versionId }: { versionId: string }) {
       </button>
       {open && (
         <div className="max-h-80 overflow-auto border-t border-border p-4 space-y-2 text-sm">
-          {error && <div className="text-destructive">{error}</div>}
+          {/* No retry offered: the fetch is fired once per open, so a button that
+              re-ran nothing would only teach people it does nothing. Closing and
+              re-opening the panel is the retry. */}
+          {error && (
+            <ErrorBanner
+              title="Could not read the document"
+              message="Close this panel and open it again to try once more."
+              detail={error}
+            />
+          )}
           {!error && !paragraphs && (
-            <div className="text-muted-foreground flex items-center gap-2">
-              <Loader2 className="h-4 w-4 animate-spin" /> Reading…
+            <div className="space-y-2.5" aria-label="Reading the document">
+              {["w-[96%]", "w-full", "w-[88%]", "w-[93%]", "w-2/3"].map((w, i) => (
+                <SkeletonBar key={i} className={cn("h-3", w)} />
+              ))}
             </div>
           )}
           {paragraphs?.filter((p) => p.text.trim()).map((p) => (
@@ -535,16 +606,18 @@ function TaskDetailLoader({ taskId, onDone }: { taskId: string; onDone: () => vo
 
   if (error) {
     return (
-      <div className="rounded-xl surface-raised p-6 text-sm space-y-2">
-        <p className="text-destructive">{error}</p>
-        <Button variant="outline" size="sm" onClick={() => void load()}>Try again</Button>
-      </div>
+      <ErrorBanner
+        title="Could not load this question"
+        message="Nothing has been answered or dismissed — the queue is unchanged."
+        detail={error}
+        onRetry={() => void load()}
+      />
     );
   }
   if (!task) {
     return (
-      <div className="rounded-xl surface-raised p-6 text-sm text-muted-foreground flex items-center gap-2">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+      <div className="rounded-xl surface-raised p-6">
+        <StageSkeleton lines={3} />
       </div>
     );
   }
@@ -582,7 +655,7 @@ function TaskDetail({ task, onDone }: { task: ReviewTask; onDone: () => void | P
       });
       toast.success("Resolved", {
         description: r.promoted?.applied
-          ? "Promoted into the manifest — this won't be asked again."
+          ? "Remembered as a rule — this won't be asked again."
           : r.promoted?.reason,
       });
       await onDone();
@@ -627,7 +700,7 @@ function TaskDetail({ task, onDone }: { task: ReviewTask; onDone: () => void | P
             {Object.entries({ ...(context.available ?? {}), ...(context.inputs ?? {}) }).map(([k, v]) => (
               <div key={k} className="flex items-center justify-between gap-3 px-3 py-2">
                 <code className="text-xs font-mono text-brand">{k}</code>
-                <span className={cn("truncate", v == null && "text-destructive")}>{v == null ? "(missing)" : String(v)}</span>
+                <span className={cn("truncate", v == null && "text-ai-blocked")}>{v == null ? "(missing)" : String(v)}</span>
               </div>
             ))}
           </div>
@@ -637,7 +710,9 @@ function TaskDetail({ task, onDone }: { task: ReviewTask; onDone: () => void | P
       {readOnly ? (
         <div className={cn(
           "rounded-lg border p-4 text-sm space-y-1",
-          task.status === "resolved" ? "border-success/30 bg-success/10" : "border-border bg-muted/40",
+          task.status === "resolved"
+            ? "border-ai-confident/30 bg-ai-confident/10"
+            : "border-border bg-muted/40",
         )}>
           <div>
             <span className="font-medium">
@@ -673,7 +748,7 @@ function TaskDetail({ task, onDone }: { task: ReviewTask; onDone: () => void | P
 
           <div className="flex items-center justify-between rounded-lg border border-border p-3">
             <div>
-              <div className="text-sm font-medium">Promote into the manifest</div>
+              <div className="text-sm font-medium">Remember this answer</div>
               <div className="text-xs text-muted-foreground">
                 Turn this decision into a rule so the same question isn't asked on every future document.
               </div>

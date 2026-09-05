@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { createFileRoute, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { AppShell } from "@/components/app-shell";
+import { Atmosphere } from "@/components/atmosphere";
+import { RouteTransition } from "@/components/route-transition";
 import { api } from "@/lib/api";
 
 export const Route = createFileRoute("/_app")({
@@ -35,12 +37,29 @@ function RequireAuth() {
   }, [navigate, pathname]);
 
   if (!authed) {
-    return <div className="min-h-screen grid place-items-center text-sm text-muted-foreground">Checking your session…</div>;
+    return (
+      <>
+        <Atmosphere />
+        <div className="min-h-screen grid place-items-center text-sm text-muted-foreground">
+          Checking your session…
+        </div>
+      </>
+    );
   }
 
   return (
-    <AppShell>
-      <Outlet />
-    </AppShell>
+    <>
+      {/* Mounted outside the shell so it is one fixed layer for the life of the
+          session: navigating does not restart the drift, and the orbs do not
+          reflow when a page changes height. */}
+      <Atmosphere />
+      <AppShell>
+        {/* Only the page body transitions. The sidebar and header stay put --
+            re-animating the chrome on every click reads as a full page load. */}
+        <RouteTransition>
+          <Outlet />
+        </RouteTransition>
+      </AppShell>
+    </>
   );
 }

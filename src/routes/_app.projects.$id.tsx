@@ -7,7 +7,11 @@ import { api } from "@/lib/api";
 import { CompileProgressList, useCompileProgress } from "@/components/compile-progress";
 import { DocumentMapping } from "@/components/document-mapping";
 import { BatchProgressPanel, useBatchWatch, type BatchWatch } from "@/components/batch-progress";
-import { FadeIn, SwapIn } from "@/components/motion";
+import { motion } from "framer-motion";
+import { EASE_OUT, FadeIn, Stagger, StaggerItem, SwapIn, useReducedMotionFlag } from "@/components/motion";
+import { ErrorBanner } from "@/components/error-banner";
+import { PolishedEmpty, SkeletonBar, StageSkeleton } from "@/components/skeletons";
+import { plainly } from "@/components/processing-banner";
 import { SETTABLE_WORKFLOW, WORKFLOW_LABELS } from "@/lib/types";
 import type { SettableWorkflowStatus, WorkflowStatus } from "@/lib/types";
 import {
@@ -67,7 +71,7 @@ export const Route = createFileRoute("/_app/projects/$id")({
 const STAGES = [
   { key: "template", n: 1, title: "Template", short: "Blueprint", icon: UploadCloud, hint: "Upload the document to fill" },
   { key: "source", n: 2, title: "Sources", short: "Inputs", icon: FolderTree, hint: "Upload the spreadsheet of rows" },
-  { key: "mapping2", n: 3, title: "Document Mapping", short: "Fill", icon: Network, hint: "Compile, map columns, generate" },
+  { key: "mapping2", n: 3, title: "Document Mapping", short: "Fill", icon: Network, hint: "Map the columns, then generate" },
   { key: "drafts", n: 4, title: "Documents", short: "Output", icon: FileText, hint: "Everything this project has produced" },
 ] as const;
 
@@ -137,21 +141,29 @@ function ProjectDetail() {
 
   if (loadError) {
     return (
-      <div className="p-8 max-w-lg mx-auto text-center space-y-3">
-        <p className="text-muted-foreground">This project couldn't be loaded: {loadError}</p>
-        <Link to="/dashboard" className="text-brand hover:underline">Back to dashboard</Link>
+      <div className="p-6 md:p-8 max-w-2xl mx-auto space-y-4">
+        {/* The server's own words are kept verbatim rather than folded into the
+            sentence: "project is archived" and "connection refused" need
+            different things doing about them, and a single friendly paraphrase
+            of both is a sentence nobody can act on. */}
+        <ErrorBanner
+          title="This project couldn't be opened"
+          message="It may have been deleted or archived, or the server may not have answered in time."
+          detail={loadError}
+        />
+        <Link to="/dashboard" className="text-sm text-brand hover:underline">Back to dashboard</Link>
       </div>
     );
   }
-  if (!project) {
-    return <div className="p-8 text-muted-foreground">Loading project…</div>;
-  }
+  if (!project) return <ProjectSkeleton />;
 
   const activeKey = active ?? firstIncomplete;
   const activeIdx = STAGES.findIndex((s) => s.key === activeKey);
   const activeStage = STAGES[activeIdx];
   const completedCount = Object.values(done).filter(Boolean).length;
-  const progressPct = (completedCount / STAGES.length) * 100;
+  // A ratio rather than a percentage, because it is fed to `scaleX` rather than
+  // to `width` -- see the progress bar below.
+  const progressRatio = completedCount / STAGES.length;
 
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6">
@@ -184,9 +196,38 @@ function ProjectDetail() {
             <ProjectActions project={project} />
           </div>
         </div>
-        {/* Progress bar */}
+        {/* Progress bar.
+            `scaleX` from a left origin, not `width`. A width transition is laid
+            out and painted again on every one of its thirty frames; a transform
+            is composited, so the same movement costs the browser nothing. The
+            fill is full width and scaled down to the ratio, which reads
+            identically at 0 (nothing but the track) and at 1 (the full strip).
+
+            The sheen still travels across the filled part only -- the fill's own
+            `overflow: hidden` is what clips it -- but it sits inside a
+            counter-scaled wrapper, because the fill's `scaleX` would otherwise
+            squash the highlight horizontally along with the bar and turn a soft
+            sweep into a hard line. Both scales carry the same transition so the
+            two stay in step while the bar moves.
+
+            And it sweeps once, keyed on the count, rather than looping: this
+            strip measures how many stages are done, so the honest moment for it
+            to catch the light is the moment one of them is. */}
         <div className="h-1 bg-muted">
-          <div className="h-full bg-gradient-brand transition-all duration-500" style={{ width: `${progressPct}%` }} />
+          <div
+            className="sheen h-full w-full bg-gradient-brand transition-transform duration-500"
+            style={{ transformOrigin: "left", transform: `scaleX(${progressRatio})` }}
+          >
+            {completedCount > 0 && (
+              <span
+                aria-hidden
+                className="absolute inset-0 transition-transform duration-500"
+                style={{ transformOrigin: "left", transform: `scaleX(${1 / progressRatio})` }}
+              >
+                <span key={completedCount} className="sheen-layer sheen-layer-once" />
+              </span>
+            )}
+          </div>
         </div>
       </FadeIn>
 
@@ -197,8 +238,13 @@ function ProjectDetail() {
       <div className="rounded-2xl surface-raised">
         <div className="flex items-center gap-4 p-6 border-b border-border">
           <div className={cn(
-            "h-11 w-11 rounded-xl flex items-center justify-center border",
-            done[activeKey] ? "bg-success/10 text-success border-success/30" : "bg-brand/10 text-brand border-brand/30",
+            "h-11 w-11 rounded-xl flex items-center justify-center border transition-colors duration-200",
+            // Green here is the engine's verdict on a stage, not the product's
+            // own colour, so it comes from the ai-* set that every other verdict
+            // in the app is drawn from. Brand stays brand: "you are here".
+            done[activeKey]
+              ? "bg-ai-confident/10 text-ai-confident border-ai-confident/30"
+              : "bg-brand/10 text-brand border-brand/30",
           )}>
             <activeStage.icon className="h-5 w-5" />
           </div>
@@ -240,6 +286,56 @@ function ProjectDetail() {
         </SwapIn>
       </div>
     </div>
+  );
+}
+
+/**
+ * The project screen's own shape, held while it loads.
+ *
+ * Sized to the real thing -- the same page padding, the same three stacked
+ * cards, one placeholder per stage in the rail -- so the header and the panel
+ * land where their outlines already were instead of the whole page jumping down
+ * when the request returns. A spinner centred in an empty page guarantees the
+ * jump, and tells the reader nothing about what is arriving.
+ */
+function ProjectSkeleton() {
+  return (
+    <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6" role="status" aria-live="polite">
+      <span className="sr-only">Loading project…</span>
+      <SkeletonBar className="h-3 w-56" />
+      <div className="rounded-2xl surface-raised p-6 space-y-3">
+        <SkeletonBar className="h-2.5 w-64" />
+        <SkeletonBar className="h-7 w-80 max-w-full" />
+        <SkeletonBar className="h-3 w-full max-w-xl" />
+      </div>
+      <div
+        className="rounded-2xl surface-raised p-4 grid gap-3"
+        style={{ gridTemplateColumns: `repeat(${STAGES.length}, minmax(0, 1fr))` }}
+      >
+        {STAGES.map((s) => (
+          <div key={s.key} className="flex flex-col items-center gap-2">
+            <SkeletonBar className="h-10 w-10 rounded-full" />
+            <SkeletonBar className="h-3 w-20" />
+            <SkeletonBar className="h-2 w-12" />
+          </div>
+        ))}
+      </div>
+      <div className="rounded-2xl surface-raised p-6">
+        <StageSkeleton />
+      </div>
+    </div>
+  );
+}
+
+/** The dot in front of a one-line verdict. It inherits `currentColor`, so a row
+ *  names its state token once and the mark can never drift away from the words
+ *  beside it. */
+function StateDot() {
+  return (
+    <span
+      aria-hidden
+      className="mr-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-current align-middle"
+    />
   );
 }
 
@@ -397,7 +493,7 @@ function ProjectActions({ project }: { project: any }) {
         onOpenChange={setConfirmDelete}
         busy={busy === "delete"}
         title={`Delete "${project.name}"?`}
-        description="This permanently removes the project along with its templates, sources, manifests and generated documents. This cannot be undone."
+        description="This permanently removes the project along with its templates, sources, everything read from them and the generated documents. This cannot be undone."
         confirmLabel="Delete project"
         onConfirm={remove}
       />
@@ -428,35 +524,57 @@ function PipelineRail({
         {stages.map((s, i) => {
           const isActive = active === s.key;
           const isDone = done[s.key];
+          // A completed stage you are standing in keeps its number. The rail is
+          // a position indicator as well as a progress one, and once every stage
+          // is done a row of four identical ticks no longer says where you are.
+          const settled = isDone && !isActive;
           return (
             <div key={s.key} className="relative">
               {/* Connector line */}
               {i < stages.length - 1 && (
                 <div className={cn(
-                  "hidden md:block absolute top-5 left-[calc(50%+22px)] right-[-12px] h-px",
-                  done[stages[i + 1].key] || (isDone && !done[stages[i + 1].key]) ? "bg-brand/60" : "bg-border",
+                  "hidden md:block absolute top-5 left-[calc(50%+22px)] right-[-12px] h-px transition-colors duration-300",
+                  done[stages[i + 1].key] || (isDone && !done[stages[i + 1].key])
+                    ? "bg-ai-confident/50"
+                    : "bg-border",
                 )} />
               )}
               <button
                 onClick={() => onSelect(s.key)}
+                aria-current={isActive ? "step" : undefined}
                 className="w-full flex flex-col items-center text-center gap-2 group"
               >
                 <div className={cn(
-                  "h-10 w-10 rounded-full flex items-center justify-center border-2 font-mono text-sm font-semibold transition-all relative z-10",
+                  "h-10 w-10 rounded-full flex items-center justify-center border-2 font-mono text-sm font-semibold relative z-10",
+                  // Named properties rather than `transition-all`, which also
+                  // animated the border *width*: the ring thickened a beat after
+                  // its colour landed and the circle read as wobbling.
+                  "transition-[transform,color,background-color,border-color,box-shadow] duration-200 ease-out",
+                  // `glow-brand` is the coloured ring and the halo in one, both
+                  // as box-shadows, so lighting the current stage never moves it
+                  // or its neighbours by a pixel.
                   isActive
                     ? "bg-gradient-brand text-white border-transparent glow-brand scale-110"
-                    : isDone
-                    ? "bg-success/10 text-success border-success/40"
+                    : settled
+                    ? "bg-ai-confident/10 text-ai-confident border-ai-confident/45 group-hover:border-ai-confident/70"
                     : "bg-background text-muted-foreground border-border group-hover:border-border-strong group-hover:text-foreground",
                 )}>
-                  {isDone && !isActive ? <Check className="h-4 w-4" /> : s.n}
+                  {/* Keyed on which mark is showing, so the tick settles in on
+                      the render where the stage completes rather than swapping
+                      between two frames with nothing to mark the moment. */}
+                  <SwapIn k={settled ? "check" : "number"}>
+                    {settled ? <Check className="h-4 w-4" /> : s.n}
+                  </SwapIn>
                 </div>
                 <div className="min-w-0">
                   <div className={cn(
-                    "text-sm font-semibold truncate",
-                    isActive ? "text-foreground" : isDone ? "text-foreground" : "text-muted-foreground",
+                    "text-sm font-semibold truncate transition-colors duration-200",
+                    isActive || isDone ? "text-foreground" : "text-muted-foreground",
                   )}>{s.title}</div>
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-mono truncate">
+                  <div className={cn(
+                    "text-[10px] uppercase tracking-wider font-mono truncate transition-colors duration-200",
+                    settled ? "text-ai-confident" : isActive ? "text-brand" : "text-muted-foreground",
+                  )}>
                     {isDone ? "Complete" : isActive ? "Current" : s.short}
                   </div>
                 </div>
@@ -508,73 +626,83 @@ function Step1Template({ project }: { project: any }) {
            to go and find again. The per-row control below is the whole delete
            story for these two; documents and projects keep theirs, where the
            lists are long enough for one-at-a-time to be the wrong tool. */
-        <div className="space-y-2">
-          {project.templates.map((t: any) => (
-            <div key={t.id} className="rounded-lg border border-border bg-background/40 p-3">
-              <div className="flex items-center gap-3">
-              <FileText className="h-5 w-5 text-info shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="font-medium text-sm">{t.name}</div>
-                <div className="text-xs text-muted-foreground">
-                  {t.size} · uploaded {t.uploadedAt} by {t.uploadedBy}
-                </div>
-                {/* Compiling is a fact about the template, so it is stated on the
-                    template. A failed compile writes a manifest row too, so the
-                    status decides the wording -- reading only `manifestId`
-                    rendered a failure as "Compiled · 0 fields, 0 conditions" in
-                    green, which is what a clean compile of a template with no
-                    placeholders looks like and nothing like what happened. */}
-                <div className="mt-1 text-xs">
-                  {t.manifestId && t.manifestStatus === "failed" ? (
-                    <span className="text-destructive">
-                      Could not read this template — nothing was mapped.
-                      {t.compileError ? ` ${t.compileError}` : ""}
-                    </span>
-                  ) : t.manifestId ? (
-                    <span className={t.unfillableCount ? "text-amber-500" : "text-emerald-500"}>
-                      Read · {t.fieldCount} fields, {t.conditionCount} conditions
-                      {t.unfillableCount
-                        ? ` · ${t.unfillableCount} placeholder${t.unfillableCount === 1 ? "" : "s"} nothing will fill`
-                        : ""}
-                    </span>
-                  ) : (
-                    <span className="text-amber-500">Not read yet</span>
+        <Stagger className="space-y-2">
+          {project.templates.map((t: any, i: number) => (
+            <StaggerItem key={t.id} index={i}>
+              <div className="rounded-lg border border-border bg-background/40 p-3 transition-colors hover:border-border-strong">
+                <div className="flex items-center gap-3">
+                  <FileText className="h-5 w-5 text-info shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-sm">{t.name}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {t.size} · uploaded {t.uploadedAt} by {t.uploadedBy}
+                    </div>
+                    {/* Compiling is a fact about the template, so it is stated on
+                        the template. A failed compile writes a manifest row too,
+                        so the status decides the wording -- reading only
+                        `manifestId` rendered a failure as "Compiled · 0 fields, 0
+                        conditions" in green, which is what a clean compile of a
+                        template with no placeholders looks like and nothing like
+                        what happened.
+
+                        The three verdicts are drawn in the ai-* tokens rather
+                        than raw amber and emerald, so "this is fine" and "this
+                        stopped" are the same two colours here as they are on
+                        every other screen. */}
+                    <div className="mt-1 text-xs">
+                      {t.manifestId && t.manifestStatus === "failed" ? (
+                        <span className="text-ai-blocked">
+                          <StateDot />
+                          Could not read this template — nothing was mapped.
+                          {t.compileError ? ` ${plainly(String(t.compileError))}` : ""}
+                        </span>
+                      ) : t.manifestId ? (
+                        <span className={t.unfillableCount ? "text-ai-uncertain" : "text-ai-confident"}>
+                          <StateDot />
+                          Read · {t.fieldCount} fields, {t.conditionCount} conditions
+                          {t.unfillableCount
+                            ? ` · ${t.unfillableCount} placeholder${t.unfillableCount === 1 ? "" : "s"} nothing will fill`
+                            : ""}
+                        </span>
+                      ) : (
+                        <span className="text-ai-uncertain"><StateDot />Not read yet</span>
+                      )}
+                    </div>
+                  </div>
+                  {t.manifestId && t.manifestStatus !== "failed" && <TemplateDataButton manifestId={t.manifestId} />}
+                  {/* Only as a retry. Reading happens at upload now, so a Compile
+                      button on a template that has already been read is an offer
+                      to pay for a model call to learn what is already known. */}
+                  {(!t.manifestId || t.manifestStatus === "failed") && (
+                    <CompileTemplateButton templateId={t.id} projectId={project.id} />
                   )}
+                  <EditTemplateButton
+                    templateId={t.id}
+                    projectId={project.id}
+                    blueprintId={t.blueprintId}
+                    readable={Boolean(t.manifestId) && t.manifestStatus !== "failed"}
+                  />
+                  <RowDeleteButton
+                    label="Delete template"
+                    title={`Delete "${t.name}"?`}
+                    description="The template is removed from this project. What was already read from it, and any documents already generated, are kept."
+                    confirmLabel="Delete template"
+                    successMessage="Template deleted"
+                    errorMessage="Couldn't delete the template"
+                    onDelete={async () => {
+                      await api.deleteTemplate(t.id);
+                      await loadProjectDetail(project.id);
+                    }}
+                  />
                 </div>
+                <UnfillablePanel template={t} projectId={project.id} />
               </div>
-              {t.manifestId && t.manifestStatus !== "failed" && <TemplateDataButton manifestId={t.manifestId} />}
-              {/* Only as a retry. Reading happens at upload now, so a Compile
-                  button on a template that has already been read is an offer to
-                  pay for a model call to learn what is already known. */}
-              {(!t.manifestId || t.manifestStatus === "failed") && (
-                <CompileTemplateButton templateId={t.id} projectId={project.id} />
-              )}
-              <EditTemplateButton
-                templateId={t.id}
-                projectId={project.id}
-                blueprintId={t.blueprintId}
-                readable={Boolean(t.manifestId) && t.manifestStatus !== "failed"}
-              />
-              <RowDeleteButton
-                label="Delete template"
-                title={`Delete "${t.name}"?`}
-                description="The template is removed from this project. Manifests already compiled from it, and any documents already generated, are kept."
-                confirmLabel="Delete template"
-                successMessage="Template deleted"
-                errorMessage="Couldn't delete the template"
-                onDelete={async () => {
-                  await api.deleteTemplate(t.id);
-                  await loadProjectDetail(project.id);
-                }}
-              />
-              </div>
-              <UnfillablePanel template={t} projectId={project.id} />
-            </div>
+            </StaggerItem>
           ))}
           <Button variant="outline" onClick={() => setUploadOpen(true)}>
             <Plus className="h-4 w-4 mr-1.5" /> Add another template
           </Button>
-        </div>
+        </Stagger>
       )}
       <TemplateUploadDialog
         open={uploadOpen}
@@ -615,9 +743,9 @@ function UnfillablePanel({ template, projectId }: { template: any; projectId: st
   const shown = open ? items : items.slice(0, 3);
 
   return (
-    <div className="mt-2.5 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+    <div className="mt-2.5 rounded-lg border border-ai-uncertain/30 bg-ai-uncertain/5 p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
-        <p className="flex items-center gap-1.5 text-xs font-medium text-amber-500">
+        <p className="flex items-center gap-1.5 text-xs font-medium text-ai-uncertain">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
           {template.unfillableCount} placeholder{template.unfillableCount === 1 ? "" : "s"} nothing
           will fill
@@ -627,7 +755,7 @@ function UnfillablePanel({ template, projectId }: { template: any; projectId: st
           params={{ blueprintId: template.blueprintId ?? "" }}
           search={{ project: projectId, template: template.id }}
           className={cn(
-            "text-xs font-medium text-amber-500 hover:underline",
+            "text-xs font-medium text-ai-uncertain hover:underline",
             !template.blueprintId && "pointer-events-none opacity-40",
           )}
         >
@@ -649,7 +777,7 @@ function UnfillablePanel({ template, projectId }: { template: any; projectId: st
       <ul className="mt-2 space-y-1">
         {shown.map((w, i) => (
           <li key={i} className="flex flex-wrap items-baseline gap-x-2 text-xs">
-            <code className="rounded bg-amber-500/10 px-1.5 py-0.5 font-mono text-[11px] text-amber-500">
+            <code className="rounded bg-ai-uncertain/10 px-1.5 py-0.5 font-mono text-[11px] text-ai-uncertain">
               {w.placeholder || "unnamed"}
             </code>
             {w.paragraph_index != null && (
@@ -736,13 +864,20 @@ function TemplateUploadDialog({ open, onOpenChange, projectId }: {
         {busy ? (
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-sm">
-              <Loader2 className="h-4 w-4 animate-spin text-brand" />
+              <Loader2 className="h-4 w-4 animate-spin text-ai-active" />
               <span className="truncate font-medium">{busy}</span>
             </div>
             {/* No time estimate. An uncoloured template goes to a model and can
                 take a couple of minutes; a colour-coded one is read by the rules
                 almost instantly. Promising a duration we cannot predict is worse
-                than naming the stage that is running. */}
+                than naming the stage that is running.
+
+                And no `result`: on this path the compile is issued inside
+                `addTemplate`, which uploads, compiles and reloads as one action
+                and answers `void`. The body never reaches this component, so the
+                panel narrates the stages and stops -- which is the honest end of
+                what this screen knows. Reaching around the store to re-request
+                it would be a second compile of the same template. */}
             <CompileProgressList stages={stages} failed={failed} />
           </div>
         ) : (
@@ -765,13 +900,16 @@ function TemplateUploadDialog({ open, onOpenChange, projectId }: {
           </label>
         )}
 
+        {/* `plainly` runs over the server's own sentence on its way to the
+            screen: the stage labels it is built from are read by the transcript
+            and the audit row as well, so they are reworded here rather than at
+            the source, where renaming them would have changed a record somebody
+            may have to defend later. */}
         {error && (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
-            {error}
-            <div className="mt-1 text-muted-foreground">
-              The file was uploaded. Use “Read again” on its row to try once more.
-            </div>
-          </div>
+          <ErrorBanner
+            title="Couldn't read this template"
+            message={`${plainly(error)} The file itself was uploaded — use “Read again” on its row to try once more.`}
+          />
         )}
       </DialogContent>
     </Dialog>
@@ -807,35 +945,37 @@ function Step2Source({ project }: { project: any }) {
         />
       ) : (
         <div className="space-y-3">
-          <div className="grid md:grid-cols-2 gap-3">
-          {project.sources.map((s: any) => (
-            <div key={s.id} className="rounded-lg border border-border bg-background/40 p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <FileText className="h-4 w-4 text-purple" />
-                <div className="font-medium text-sm truncate flex-1">{s.name}</div>
-                <RowDeleteButton
-                  label="Delete source"
-                  title={`Delete "${s.name}"?`}
-                  description="The source is removed from this project. Column mappings already saved against it are kept, and so is anything already generated. The uploaded file and the embeddings built from it are destroyed later by the retention sweep, on the schedule your organisation set."
-                  confirmLabel="Delete source"
-                  successMessage="Source deleted"
-                  errorMessage="Couldn't delete the source"
-                  onDelete={async () => {
-                    await api.deleteSource(s.id);
-                    await loadProjectDetail(project.id);
-                  }}
-                />
-              </div>
-              <div className="text-xs text-muted-foreground">{s.type.toUpperCase()} · {s.rows ?? "—"} rows · {s.size}</div>
-            </div>
-          ))}
-          <button
-            onClick={() => setUploadOpen(true)}
-            className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground hover:text-foreground hover:border-border-strong"
-          >
-            <Plus className="h-4 w-4 inline mr-1.5" /> Add another source
-          </button>
-          </div>
+          <Stagger className="grid md:grid-cols-2 gap-3">
+            {project.sources.map((s: any, i: number) => (
+              <StaggerItem key={s.id} index={i} className="h-full">
+                <div className="h-full rounded-lg border border-border bg-background/40 p-4 transition-colors hover:border-border-strong">
+                  <div className="flex items-center gap-2 mb-2">
+                    <FileText className="h-4 w-4 text-purple" />
+                    <div className="font-medium text-sm truncate flex-1">{s.name}</div>
+                    <RowDeleteButton
+                      label="Delete source"
+                      title={`Delete "${s.name}"?`}
+                      description="The source is removed from this project. Column mappings already saved against it are kept, and so is anything already generated. The uploaded file and the embeddings built from it are destroyed later by the retention sweep, on the schedule your organisation set."
+                      confirmLabel="Delete source"
+                      successMessage="Source deleted"
+                      errorMessage="Couldn't delete the source"
+                      onDelete={async () => {
+                        await api.deleteSource(s.id);
+                        await loadProjectDetail(project.id);
+                      }}
+                    />
+                  </div>
+                  <div className="text-xs text-muted-foreground">{s.type.toUpperCase()} · {s.rows ?? "—"} rows · {s.size}</div>
+                </div>
+              </StaggerItem>
+            ))}
+            <button
+              onClick={() => setUploadOpen(true)}
+              className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground transition-colors hover:text-foreground hover:border-border-strong"
+            >
+              <Plus className="h-4 w-4 inline mr-1.5" /> Add another source
+            </button>
+          </Stagger>
         </div>
       )}
       <UploadDialog
@@ -866,13 +1006,66 @@ async function saveBlob(url: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * A padlock that engages, drawn rather than swapped between two glyphs.
+ *
+ * The shackle has to retract into the body for the gesture to read as "this just
+ * locked" rather than as a picture of a lock, and no pair of static icons can do
+ * that. It is one `scaleY` on one path from the shackle's own base, so the whole
+ * thing is a composited transform and nothing is laid out again.
+ *
+ * It plays on mount, which is when the document arrives on screen carrying the
+ * QA verdict that locked it -- during a batch that is one row at a time, as each
+ * one lands.
+ */
+function EngagingLock({ className }: { className?: string }) {
+  const reduced = useReducedMotionFlag();
+  const settle = reduced ? { duration: 0 } : { duration: 0.25, ease: EASE_OUT };
+  return (
+    <svg viewBox="0 0 16 16" className={cn("h-4 w-4", className)} aria-hidden focusable="false">
+      <motion.path
+        d="M5.3 7.6V5.3a2.7 2.7 0 0 1 5.4 0v2.3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        style={{ transformBox: "fill-box", transformOrigin: "bottom" }}
+        initial={reduced ? false : { scaleY: 1.6, y: -1.6 }}
+        animate={{ scaleY: 1, y: 0 }}
+        transition={settle}
+      />
+      <motion.rect
+        x="3" y="7.3" width="10" height="6.5" rx="1.6"
+        fill="currentColor"
+        style={{ transformBox: "fill-box", transformOrigin: "bottom" }}
+        initial={reduced ? false : { scaleY: 0.8, opacity: 0.65 }}
+        animate={{ scaleY: 1, opacity: 1 }}
+        transition={settle}
+      />
+    </svg>
+  );
+}
+
 /** `allowed` mirrors the server's own gate. Disabling with a reason beats letting
- *  somebody press it and read a 409 in a toast. */
-function DownloadDocButton({ documentId, filename, allowed }: {
+ *  somebody press it and read a 409 in a toast.
+ *
+ *  `status === "blocked"` is the one refusal that gets its own treatment. It is
+ *  not "not approved yet" -- it is the QA gate having found something wrong with
+ *  the file itself, which is the only one of these a person has to go and fix. So
+ *  the control locks visibly and stays pressable, because what it does when
+ *  pressed is name the reason: `reasons` is the QA engine's own prose, and a
+ *  greyed-out icon with a tooltip is where that text goes to die. */
+function DownloadDocButton({ documentId, filename, allowed, status, reasons = [] }: {
   documentId: string; filename: string; allowed: boolean;
+  status?: string;
+  /** Why it is locked, in the engine's words. Empty is a real answer and is
+   *  rendered as one -- a freshly generated blocked document has a verdict and
+   *  no recorded sentence, and saying so beats inventing a sentence for it. */
+  reasons?: string[];
 }) {
   const [busy, setBusy] = useState<null | "docx" | "pdf">(null);
   const [open, setOpen] = useState(false);
+  const lockedByQa = status === "blocked";
 
   async function go(format: "docx" | "pdf") {
     setBusy(format);
@@ -895,29 +1088,63 @@ function DownloadDocButton({ documentId, filename, allowed }: {
   return (
     <div className="relative">
       <button
-        onClick={() => { if (allowed) setOpen((v) => !v); }}
-        disabled={busy !== null || !allowed}
-        className="p-1.5 rounded hover:bg-accent text-muted-foreground disabled:opacity-40 disabled:cursor-not-allowed"
-        title={allowed
-          ? "Download"
-          : "Only approved documents can be downloaded. Approve this one first."}
-        aria-label="Download"
-        aria-haspopup="menu"
+        onClick={() => { if (allowed || lockedByQa) setOpen((v) => !v); }}
+        disabled={busy !== null || (!allowed && !lockedByQa)}
+        className={cn(
+          "rounded p-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+          lockedByQa
+            ? "text-ai-blocked hover:bg-ai-blocked/10"
+            : "text-muted-foreground hover:bg-accent",
+        )}
+        title={lockedByQa
+          ? reasons.length
+            ? `Locked — ${plainly(String(reasons[0]))}`
+            : "Locked — this document failed its checks when it was generated."
+          : allowed
+            ? "Download"
+            : "Only approved documents can be downloaded. Approve this one first."}
+        aria-label={lockedByQa ? "Download locked — why?" : "Download"}
+        aria-haspopup={lockedByQa ? "dialog" : "menu"}
         aria-expanded={open}
       >
-        <Download className="h-4 w-4" />
+        {lockedByQa ? <EngagingLock /> : <Download className="h-4 w-4" />}
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} aria-hidden />
-          <div role="menu" className="absolute right-0 z-20 mt-1 w-40 overflow-hidden rounded-md border border-border bg-popover shadow-md">
-            <button role="menuitem" onClick={() => go("docx")} className="block w-full px-3 py-2 text-left text-sm hover:bg-accent">
-              Download .docx
-            </button>
-            <button role="menuitem" onClick={() => go("pdf")} className="block w-full px-3 py-2 text-left text-sm hover:bg-accent">
-              Download .pdf
-            </button>
-          </div>
+          {lockedByQa ? (
+            <div className="absolute right-0 z-20 mt-1 w-72 rounded-lg border border-ai-blocked/40 bg-popover p-3 shadow-md">
+              <p className="text-[12px] font-semibold leading-snug text-ai-blocked">
+                Locked by the QA checks
+              </p>
+              {reasons.length > 0 ? (
+                <ul className="mt-2 space-y-1.5">
+                  {reasons.map((r, i) => (
+                    <li key={i} className="flex items-start gap-1.5 text-[11.5px] leading-relaxed text-muted-foreground">
+                      <span aria-hidden className="mt-[6px] h-1 w-1 shrink-0 rounded-full bg-ai-blocked/70" />
+                      {/* The checker's own sentence, scrubbed of internal
+                          vocabulary on its way to the screen. */}
+                      <span>{plainly(String(r))}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-2 text-[11.5px] leading-relaxed text-muted-foreground">
+                  No note was recorded against this document. Regenerate the batch to see what the
+                  checks object to.
+                </p>
+              )}
+            </div>
+          ) : (
+            <div role="menu" className="absolute right-0 z-20 mt-1 w-40 overflow-hidden rounded-md border border-border bg-popover shadow-md">
+              <button role="menuitem" onClick={() => go("docx")} className="block w-full px-3 py-2 text-left text-sm hover:bg-accent">
+                Download .docx
+              </button>
+              <button role="menuitem" onClick={() => go("pdf")} className="block w-full px-3 py-2 text-left text-sm hover:bg-accent">
+                Download .pdf
+              </button>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -1025,6 +1252,27 @@ function StageDocuments({ project, watch }: { project: any; watch: BatchWatch })
     return out;
   }, [project.generated]);
 
+  /**
+   * Why each blocked document is blocked, in the QA engine's own sentences,
+   * keyed by the version the row wrote.
+   *
+   * This is the only place those sentences exist while the batch is the thing
+   * that produced them. The runner writes the version with the verdict and
+   * nothing else -- `status_reason` stays null until something later calls
+   * `refresh_status` -- so a document that has just come off a batch has a
+   * `blocked` status and no recorded reason at all. The job's `rows[]` has both,
+   * and `document_version_id` is the join.
+   */
+  const qaNotesByVersion = useMemo(() => {
+    const out = new Map<string, string[]>();
+    for (const row of (watch.job?.progress?.rows ?? []) as any[]) {
+      const versionId = row?.document_version_id;
+      const notes: string[] = row?.qa_notes ?? [];
+      if (versionId && notes.length) out.set(String(versionId), notes);
+    }
+    return out;
+  }, [watch.job]);
+
   const shown = useMemo(
     () => (filter === "all"
       ? project.generated
@@ -1112,9 +1360,14 @@ function StageDocuments({ project, watch }: { project: any; watch: BatchWatch })
           />
 
           {shown.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              No documents are {WORKFLOW_FILTERS.find((f) => f.key === filter)?.label.toLowerCase()}.
-            </p>
+            /* An empty filter is an empty state, not a failure -- there are
+               documents here, none of them are in the state being asked about --
+               so this is `PolishedEmpty` and never `ErrorBanner`. */
+            <PolishedEmpty
+              icon={<FileText className="h-6 w-6" />}
+              title={`No documents are ${WORKFLOW_FILTERS.find((f) => f.key === filter)?.label.toLowerCase()}`}
+              subtitle="The rest of this project's documents are in one of the other states. Choose All to see every one of them."
+            />
           ) : shown.map((g: any) => (
             <div key={g.id} className={cn(
               "flex flex-wrap items-center gap-3 rounded-lg border bg-background/40 p-3",
@@ -1160,6 +1413,15 @@ function StageDocuments({ project, watch }: { project: any; watch: BatchWatch })
                 documentId={g.id}
                 filename={g.filename}
                 allowed={g.downloadable}
+                status={g.status}
+                // The batch's own notes where this screen is still holding the
+                // job, and the document's recorded reason where it is not.
+                // Nothing beyond those two: if neither exists there is no reason
+                // to give, and the control says that rather than inventing one.
+                reasons={
+                  (g.currentVersionId ? qaNotesByVersion.get(g.currentVersionId) : undefined)
+                  ?? (g.statusReason ? [g.statusReason] : [])
+                }
               />
               <Link
                 to="/projects/$id/edit/$docId"
@@ -1220,12 +1482,12 @@ function WorkflowSelect({ document, onDone }: { document: any; onDone: () => voi
       <span
         title={document.workflowStatus === "approved"
           ? "Somebody has signed this off. Withdraw the approval to move it again."
-          : "This failed its QA checks when it was generated. Fix the manifest or the source row and generate again — or cancel it."}
+          : "This failed its QA checks when it was generated. Fix the template or the source row and generate again — or cancel it."}
         className={cn(
           "inline-flex h-8 items-center rounded-lg border px-2.5 text-xs font-medium",
           document.workflowStatus === "approved"
-            ? "border-success/30 bg-success/10 text-success"
-            : "border-destructive/30 bg-destructive/10 text-destructive",
+            ? "border-ai-confident/30 bg-ai-confident/10 text-ai-confident"
+            : "border-ai-blocked/30 bg-ai-blocked/10 text-ai-blocked",
         )}
       >
         {WORKFLOW_LABELS[document.workflowStatus as WorkflowStatus]}
@@ -1423,22 +1685,32 @@ function ConfirmDialog({
 function CompileTemplateButton({ templateId, projectId }: { templateId: string; projectId: string }) {
   const loadProjectDetail = useStore((s) => s.loadProjectDetail);
   const [busy, setBusy] = useState(false);
+  // The response body, kept so the reveal can close its own loop.
+  //
+  // The stage list and the compile's answer are two separate arrivals: the
+  // stages come off a poll against the progress token, the counts come off the
+  // request that started it. Without this the panel could narrate the work and
+  // then had nothing to say about what was found -- it was the caller holding
+  // the answer and dropping it on the floor.
+  const [compiled, setCompiled] = useState<any>(null);
   const { newToken, stages, failed } = useCompileProgress(busy);
   const run = async () => {
     const progressToken = newToken();
+    setCompiled(null);
     setBusy(true);
     // No toast up front and no time estimate: an uncoloured template goes to a
     // model and can take a couple of minutes, while a colour-coded one is read
     // by the rules almost instantly. Promising a duration we cannot predict is
     // worse than a spinner that plainly means "working".
     try {
-      await api.compileManifest(templateId, { progressToken });
+      const manifest = await api.compileManifest(templateId, { progressToken });
+      setCompiled(manifest);
       await loadProjectDetail(projectId);
       toast.success("Template read", {
         description: "Download the data template to get a spreadsheet with the right columns.",
       });
     } catch (e: any) {
-      toast.error("Could not compile this template", { description: e?.message ?? String(e) });
+      toast.error("Could not read this template", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(false);
     }
@@ -1459,7 +1731,7 @@ function CompileTemplateButton({ templateId, projectId }: { templateId: string; 
           behind would say the same thing twice. */}
       {busy && (
         <div className="w-full min-w-[22rem]">
-          <CompileProgressList stages={stages} failed={failed} />
+          <CompileProgressList stages={stages} failed={failed} result={compiled} />
         </div>
       )}
     </div>
