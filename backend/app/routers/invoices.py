@@ -218,6 +218,7 @@ def _owned_invoice(db: Session, invoice_id: str, user: User) -> Invoice:
 
 @router.get("/invoices")
 def list_invoices(customer_id: str | None = None,
+                  project_id: str | None = None,
                   status_: str | None = Query(None, alias="status"),
                   limit: int = Query(200, ge=1, le=500),
                   db: Session = Depends(get_db), user: User = Depends(get_current_user)):
@@ -225,6 +226,8 @@ def list_invoices(customer_id: str | None = None,
         Invoice.org_id == user.org_id, Invoice.deleted_at.is_(None))
     if customer_id:
         stmt = stmt.where(Invoice.customer_id == customer_id)
+    if project_id:
+        stmt = stmt.where(Invoice.project_id == project_id)
     if status_:
         stmt = stmt.where(Invoice.status == status_)
     rows = db.scalars(stmt.order_by(Invoice.created_at.desc()).limit(limit)).all()

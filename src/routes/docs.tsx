@@ -121,9 +121,10 @@ const API: { id: string; title: string; blurb: string; endpoints: Endpoint[] }[]
     id: "api-invoices",
     title: "Invoices",
     blurb:
-      "The first per-industry service: a client book, an org-scoped numbering, and one call "
-      + "that turns a published invoice template plus line items into a numbered document. "
-      + "Every figure is computed server-side in Decimal.",
+      "The first per-industry service, opened by creating a project whose document type is "
+      + "Invoice: a client book, an org-scoped numbering, and one call that turns a published "
+      + "invoice template plus line items into a numbered document. Every figure is computed "
+      + "server-side in Decimal.",
     endpoints: [
       { method: "POST", path: "/template-blueprints:from-description", what: "A whole template authored from a plain description; falls back to a shipped kit when no model is configured.", note: "service: invoice" },
       { method: "GET", path: "/customers", what: "The client book." },

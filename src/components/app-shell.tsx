@@ -12,7 +12,6 @@ import {
   Settings,
   ClipboardCheck,
   Search,
-  ReceiptText,
   Sparkles,
   HelpCircle,
   PanelLeftClose,
@@ -36,7 +35,6 @@ const NAV = [
   { to: "/dashboard", label: "Projects", icon: FolderKanban },
   { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/templates", label: "Templates", icon: FileText },
-  { to: "/invoices", label: "Invoices", icon: ReceiptText },
   { to: "/review", label: "Review", icon: ClipboardCheck },
   { to: "/analytics", label: "Analytics", icon: BarChart3 },
   // §22's numbers, which were measured continuously and shown nowhere. A

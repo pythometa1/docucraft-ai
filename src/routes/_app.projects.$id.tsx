@@ -10,6 +10,7 @@ import { BatchProgressPanel, useBatchWatch, type BatchWatch } from "@/components
 import { motion } from "framer-motion";
 import { EASE_OUT, FadeIn, Stagger, StaggerItem, SwapIn, useReducedMotionFlag } from "@/components/motion";
 import { ErrorBanner } from "@/components/error-banner";
+import { InvoiceStudio } from "@/components/invoice-studio";
 import { PolishedEmpty, SkeletonBar, StageSkeleton } from "@/components/skeletons";
 import { plainly } from "@/components/processing-banner";
 import { SETTABLE_WORKFLOW, WORKFLOW_LABELS } from "@/lib/types";
@@ -157,6 +158,12 @@ function ProjectDetail() {
   }
   if (!project) return <ProjectSkeleton />;
 
+  // An Invoice project is the invoice service's home: the spreadsheet-driven
+  // four-stage pipeline gives way to describe -> template -> line items ->
+  // numbered invoice, scoped to this project. Same breadcrumb, same header,
+  // different machine underneath.
+  const isInvoiceProject = project.documentType === "Invoice";
+
   const activeKey = active ?? firstIncomplete;
   const activeIdx = STAGES.findIndex((s) => s.key === activeKey);
   const activeStage = STAGES[activeIdx];
@@ -188,10 +195,12 @@ function ProjectDetail() {
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <div className="text-right pr-3 border-r border-border">
-              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Progress</div>
-              <div className="text-sm font-semibold">{completedCount}/{STAGES.length} stages</div>
-            </div>
+            {!isInvoiceProject && (
+              <div className="text-right pr-3 border-r border-border">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Progress</div>
+                <div className="text-sm font-semibold">{completedCount}/{STAGES.length} stages</div>
+              </div>
+            )}
             <ShareButton />
             <ProjectActions project={project} />
           </div>
@@ -213,6 +222,7 @@ function ProjectDetail() {
             And it sweeps once, keyed on the count, rather than looping: this
             strip measures how many stages are done, so the honest moment for it
             to catch the light is the moment one of them is. */}
+        {!isInvoiceProject && (
         <div className="h-1 bg-muted">
           <div
             className="sheen h-full w-full bg-gradient-brand transition-transform duration-500"
@@ -229,8 +239,13 @@ function ProjectDetail() {
             )}
           </div>
         </div>
+        )}
       </FadeIn>
 
+      {isInvoiceProject ? (
+        <InvoiceStudio project={project} />
+      ) : (
+        <>
       {/* Pipeline rail */}
       <PipelineRail stages={STAGES} done={done} active={activeKey} onSelect={setActive} />
 
@@ -285,6 +300,8 @@ function ProjectDetail() {
           )}
         </SwapIn>
       </div>
+        </>
+      )}
     </div>
   );
 }

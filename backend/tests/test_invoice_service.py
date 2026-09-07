@@ -423,3 +423,17 @@ def test_generate_refuses_a_template_whose_project_was_deleted(
             db.commit()
         finally:
             db.close()
+
+
+def test_invoice_list_filters_by_project(app_client, published_invoice_manifest):
+    token, project_id, manifest_id = published_invoice_manifest
+    made = app_client.post("/api/v1/invoices:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "customer": {"name": "P"}, "line_items": [{"amount": 10}], "fields": FIELDS}).json()
+
+    scoped = app_client.get("/api/v1/invoices", headers=_auth(token),
+                            params={"project_id": project_id}).json()["items"]
+    assert any(i["id"] == made["id"] for i in scoped)
+    other = app_client.get("/api/v1/invoices", headers=_auth(token),
+                           params={"project_id": "no-such-project"}).json()["items"]
+    assert not other

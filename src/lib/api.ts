@@ -399,7 +399,7 @@ export const api = {
     request<Customer>("PATCH", `/customers/${id}`, { json: body }),
   deleteCustomer: (id: string) =>
     request<{ deleted: boolean }>("DELETE", `/customers/${id}`),
-  listInvoices: (params: { customer_id?: string; status?: string } = {}) =>
+  listInvoices: (params: { customer_id?: string; project_id?: string; status?: string } = {}) =>
     request<{ items: InvoiceSummary[] }>("GET", "/invoices", { query: params }),
   getInvoice: (id: string) =>
     request<InvoiceSummary & { source_record: Record<string, unknown> }>("GET", `/invoices/${id}`),
