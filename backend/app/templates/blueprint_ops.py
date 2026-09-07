@@ -331,7 +331,7 @@ def apply_operations(body: dict, objects, ops) -> OperationResult:
                     "iterate_over": iterate_over,
                     "columns": columns,
                     "column_refs": {c["field_id"]: c["source_key"] for c in columns},
-                    "anchor_row": {"kind": "run_path", "note": "located by column tokens at fill time"},
+                    "anchor_row": {"kind": "run_path", "token": columns[0]["token"]},
                     "empty_behaviour": empty_behaviour,
                     "required": bool(op.get("required")),
                     "status": "PROPOSED",

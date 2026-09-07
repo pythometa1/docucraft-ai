@@ -142,7 +142,7 @@ def table_row_objects(body: dict, specs, *, status: str = "PROPOSED") -> list:
             "iterate_over": iterate_over,
             "columns": columns,
             "column_refs": {c["field_id"]: c["source_key"] for c in columns},
-            "anchor_row": {"kind": "run_path", "note": "located by column tokens at fill time"},
+            "anchor_row": {"kind": "run_path", "token": columns[0]["token"]},
             "empty_behaviour": str(spec.get("empty_behaviour") or "REMOVE_ROW").upper(),
             "required": bool(spec.get("required")),
             "status": status,

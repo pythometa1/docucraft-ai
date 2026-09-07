@@ -248,15 +248,24 @@ def _locate_prototype_row(spec: dict, paragraphs: list):
     tokens = [c.get("token") for c in (spec.get("columns") or ()) if c.get("token")]
     if not tokens:
         return None
-    row_el = None
+    # Score every candidate row by how many of THIS spec's tokens it carries,
+    # and take the best. First-any-token binding was how two repeating tables
+    # sharing a column name ("Amount" on both services and expenses) both bound
+    # the first table's row -- the second then rendered nothing, quietly.
+    candidates: list = []   # (score, order, row_el)
+    seen_rows: list = []
     for p_el in paragraphs:
-        text = "".join(t.text or "" for t in p_el.iter(_q("t")))
-        if any(token in text for token in tokens):
-            row_el = _paragraph_row_ancestor(p_el)
-            if row_el is not None:
-                break
-    if row_el is None:
+        row = _paragraph_row_ancestor(p_el)
+        if row is None or any(row is r for r in seen_rows):
+            continue
+        seen_rows.append(row)
+        text = "".join(t.text or "" for t in row.iter(_q("t")))
+        score = sum(1 for token in tokens if token in text)
+        if score:
+            candidates.append((score, len(candidates), row))
+    if not candidates:
         return None
+    row_el = max(candidates, key=lambda c: (c[0], -c[1]))[2]
     indices = {i for i, p in enumerate(paragraphs) if _paragraph_row_ancestor(p) is row_el}
     return row_el, indices
 
@@ -317,7 +326,8 @@ def _column_field(column: dict) -> dict:
     }
 
 
-def _apply_row_repeats(repeat_rows: list, source_record: dict, locale: str, result: "FillResult") -> None:
+def _apply_row_repeats(repeat_rows: list, source_record: dict, locale: str,
+                       result: "FillResult", drop_paragraph_indices: set) -> None:
     """Render each prototype row once per record, then remove the prototype.
 
     Runs *last*, after every coordinate-driven pass, so the clones never enter
@@ -332,12 +342,23 @@ def _apply_row_repeats(repeat_rows: list, source_record: dict, locale: str, resu
         columns = list(spec.get("columns") or ())
 
         if tr.getparent() is None:
-            # The condition machinery dropped the region holding this table.
-            # That is a decision the manifest already recorded, not a failure.
-            result.repeat_lineage.append({
-                "object_id": object_id, "iterate_over": iterate_over,
-                "rows_rendered": 0, "skipped": "row removed by a condition",
-            })
+            if entry.get("paragraphs", set()) & drop_paragraph_indices:
+                # The condition machinery dropped the region holding this
+                # table. That is a decision the manifest already recorded.
+                result.repeat_lineage.append({
+                    "object_id": object_id, "iterate_over": iterate_over,
+                    "rows_rendered": 0, "skipped": "row removed by a condition",
+                })
+            else:
+                # Nothing legitimate removed it. Rendering zero rows quietly
+                # here is how a second collection disappears from a document
+                # with QA green.
+                result.block(
+                    f"The prototype row for '{object_id}' is no longer in the document, and "
+                    "no condition removed it. The template's repeating rows overlap; give "
+                    "each its own tokens.",
+                    check=ROW_REPEAT, object_id=object_id,
+                )
             continue
 
         items = source_record.get(iterate_over)
@@ -529,7 +550,17 @@ def fill_template(
             )
             continue
         row_el, row_paragraphs = located
-        repeat_rows.append({"spec": spec, "row_el": row_el})
+        taken = next((entry for entry in repeat_rows if entry["row_el"] is row_el), None)
+        if taken is not None:
+            result.block(
+                f"Repeating rows '{spec.get('id') or spec.get('object_id')}' and "
+                f"'{taken['spec'].get('id') or taken['spec'].get('object_id')}' both resolve "
+                "to the same table row -- their column tokens overlap too much to tell the "
+                "rows apart. Give each table's columns distinct tokens.",
+                check=ROW_REPEAT, object_id=spec.get("id") or spec.get("object_id"),
+            )
+            continue
+        repeat_rows.append({"spec": spec, "row_el": row_el, "paragraphs": row_paragraphs})
         repeat_paragraph_indices |= row_paragraphs
 
     # A field whose every slot sits inside a prototype row has no single value:
@@ -736,10 +767,27 @@ def fill_template(
     # let the second field clobber the first. Instead: gather every
     # (bracket_token -> resolved_value) pair per span, then resolve the span's
     # final text in one pass.
+    # A field that is BOTH a repeating column and a scalar slot (the same
+    # <Amount> token inside the row and after "Total payable:") has no scalar
+    # value -- its values live per record inside the collection -- so BLANK
+    # would print an empty total with QA green. Missing + column-owned blocks.
+    repeat_column_field_ids = {
+        c.get("field_id")
+        for entry in repeat_rows
+        for c in (entry["spec"].get("columns") or ())
+        if c.get("field_id")
+    }
     field_values: dict[str, tuple[str | None, str]] = {}
     field_policies: dict[str, str] = {}
     for f in scalar_fields:
         value, source = _resolve_field_value(f, source_record, locale)
+        if source == "missing" and f["id"] in repeat_column_field_ids:
+            result.block(
+                f"Field '{f['id']}' is a repeating-row column but its token also appears "
+                "outside the row, where no single value exists for it. Give the outside "
+                "slot its own token (a total wants <Grand Total>, not the row's <Amount>).",
+                check=ROW_REPEAT, object_id=f["id"],
+            )
         policy = field_on_missing(f)
         field_policies[f["id"]] = policy
         if source == "missing" and policy == DEFAULT:
@@ -893,9 +941,28 @@ def fill_template(
                     t_el.text = t_el.text.rstrip() + "."
                     break
 
-    # ---- 5b2. Korean postposition agreement ----
-    # Runs after filling, because the syllable that decides the form is the value
-    # that was just inserted. The decision is made on the whole paragraph's text
+    # ---- 5c. highlights are markup, not formatting ----
+    # Green/yellow annotation tells the assembler what to do with a run; it is
+    # not something the recipient of the letter should ever see. Only touched
+    # when the template actually used the highlight convention, so a red/blue
+    # template keeps whatever highlighting its author intended.
+    if uses_highlight_markup:
+        for hl in list(body_el.iter(_q("highlight"))):
+            if (hl.get(_q("val")) or "").lower() in HIGHLIGHT_ROLES and hl.getparent() is not None:
+                hl.getparent().remove(hl)
+
+    # ---- 5e. repeating table rows: clone the prototype once per record ----
+    # Dead last on purpose: every coordinate-driven pass above is finished, so
+    # the clones never shift an index anything still needs. See step 0.
+    if repeat_rows:
+        _apply_row_repeats(repeat_rows, source_record, locale, result, drop_paragraph_indices)
+
+    # ---- 5f. Korean postposition agreement ----
+    # Runs after filling AND after the repeat pass, because the syllable that
+    # decides the form is the value that was just inserted -- and for a
+    # particle beside a line-item token, that value only exists in the
+    # clones. Resolving earlier read the raw token's '>' and fixed the vowel
+    # form into every row. The decision is made on the whole paragraph's text
     # -- the deciding syllable and the alternation routinely sit in different runs
     # -- while the edit is applied to the single run that carries the alternation,
     # so no run's formatting is disturbed.
@@ -903,9 +970,9 @@ def fill_template(
         from app.generation.korean import ALTERNATION_RE, choose, has_batchim  # noqa: F401
         from app.generation.korean import _final_consonant
 
-        for p_el in paragraphs:
-            if p_el.getparent() is None:
-                continue
+        # body_el.iter yields only attached paragraphs -- the same set the
+        # old paragraphs-list walk visited, plus the clones.
+        for p_el in body_el.iter(_q("p")):
             t_els = [t for t in p_el.iter(_q("t"))]
             joined = "".join(t.text or "" for t in t_els)
             if not ALTERNATION_RE.search(joined):
@@ -943,22 +1010,6 @@ def fill_template(
                         f"Korean particle after {preceding[-12:]!r} could not be decided from the "
                         f"value's script; the vowel form was used. Confirm with a native reader."
                     )
-
-    # ---- 5c. highlights are markup, not formatting ----
-    # Green/yellow annotation tells the assembler what to do with a run; it is
-    # not something the recipient of the letter should ever see. Only touched
-    # when the template actually used the highlight convention, so a red/blue
-    # template keeps whatever highlighting its author intended.
-    if uses_highlight_markup:
-        for hl in list(body_el.iter(_q("highlight"))):
-            if (hl.get(_q("val")) or "").lower() in HIGHLIGHT_ROLES and hl.getparent() is not None:
-                hl.getparent().remove(hl)
-
-    # ---- 5e. repeating table rows: clone the prototype once per record ----
-    # Dead last on purpose: every coordinate-driven pass above is finished, so
-    # the clones never shift an index anything still needs. See step 0.
-    if repeat_rows:
-        _apply_row_repeats(repeat_rows, source_record, locale, result)
 
     document.save(output_path)
 

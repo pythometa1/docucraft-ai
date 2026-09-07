@@ -239,6 +239,25 @@ def assemble_body(data: dict) -> tuple[dict, list, list]:
             "repeat: true with placeholder cells")
 
     body = bp.normalise_body({"blocks": blocks, "sect_pr_from": None})
+
+    # A column token that also appears elsewhere is a template whose total can
+    # never fill: the values live per record inside the collection, so the
+    # outside slot has no single value and the fill engine blocks it. Caught
+    # here so the retry fixes it, rather than at the first generation.
+    column_tokens = {c["token"] for spec in specs for c in spec["columns"]}
+    if column_tokens:
+        counts: dict = {}
+        for _index, block, _in_table in bp.walk_paragraphs(body):
+            for seg in block.get("segments") or ():
+                if seg.get("role") == bp.PLACEHOLDER and seg.get("text") in column_tokens:
+                    counts[seg["text"]] = counts.get(seg["text"], 0) + 1
+        reused = sorted(token for token, count in counts.items() if count > 1)
+        if reused:
+            problems.append(
+                f"{', '.join(reused)} appear(s) both as a line-item column and elsewhere "
+                "in the document. A value outside the repeating row needs its own token -- "
+                "a total is <Grand Total> or <Subtotal>, never the row's own column token")
+
     return body, specs, problems
 
 

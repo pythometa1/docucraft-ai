@@ -257,3 +257,106 @@ def test_gst_kit_renders_cgst_sgst_split(tmp_path):
     assert "SGST: ₹ 900.00" in text
     table = docx.Document(out).tables[0]
     assert table.rows[1].cells[1].text == "9985"
+
+
+def _emit_body(body, path):
+    from app.templates.emit_docx import emit
+    emit(body, str(path))
+
+
+def test_two_repeating_tables_bind_their_own_rows(tmp_path):
+    """Two collections sharing a column name must each render into their own
+    table -- first-any-token binding once sent both to the first row."""
+    from app.templates import blueprint as bp
+    from app.templates.kits import table_row_objects
+    from app.templates.blueprint_lint import legacy_manifest
+
+    def row(*texts, roles=None):
+        roles = roles or ["placeholder"] * len(texts)
+        return [[bp.paragraph([bp.segment(role, text)])]
+                for role, text in zip(roles, texts)]
+
+    body = bp.normalise_body({"blocks": [
+        bp.paragraph([bp.segment("static", "Services")]),
+        bp.table([row("Item", "Amount", roles=["static", "static"]),
+                  row("<Service Description>", "<Amount>")]),
+        bp.paragraph([bp.segment("static", "Expenses")]),
+        bp.table([row("Expense", "Amount", roles=["static", "static"]),
+                  row("<Expense Description>", "<Expense Amount>")]),
+    ], "sect_pr_from": None})
+
+    specs = [
+        {"id": "services", "iterate_over": "services", "columns": [
+            {"token": "<Service Description>", "source_key": "description"},
+            {"token": "<Amount>", "source_key": "amount", "type": "currency"}]},
+        {"id": "expenses", "iterate_over": "expenses", "columns": [
+            {"token": "<Expense Description>", "source_key": "description"},
+            {"token": "<Expense Amount>", "source_key": "amount", "type": "currency"}]},
+    ]
+    objects = table_row_objects(body, specs)
+    assert len(objects) == 2
+    from app.templates.kits import objects_for
+    manifest = legacy_manifest(objects_for(body) + objects, delete_always=[])
+
+    template = tmp_path / "two_tables.docx"
+    _emit_body(body, template)
+    out = tmp_path / "out.docx"
+    fill = fill_template(str(template), str(out), manifest, {
+        "services": [{"description": "Design", "amount": 100},
+                     {"description": "Build", "amount": 200}],
+        "expenses": [{"description": "Travel", "amount": 50}],
+    })
+    assert fill.qa_passed, fill.qa_notes
+    tables = docx.Document(str(out)).tables
+    assert len(tables[0].rows) == 3  # header + 2 services
+    assert len(tables[1].rows) == 2  # header + 1 expense
+    assert tables[1].rows[1].cells[0].text == "Travel"
+
+
+def test_a_column_token_reused_outside_the_row_blocks(tmp_path):
+    """<Amount> in the row AND after "Total payable:" has no scalar value; a
+    silent blank total is the one outcome this must never produce."""
+    from app.templates import blueprint as bp
+    from app.templates.kits import objects_for, table_row_objects
+    from app.templates.blueprint_lint import legacy_manifest
+
+    body = bp.normalise_body({"blocks": [
+        bp.table([
+            [[bp.paragraph([bp.segment("static", "Item")])],
+             [bp.paragraph([bp.segment("static", "Amount")])]],
+            [[bp.paragraph([bp.segment("placeholder", "<Item Description>")])],
+             [bp.paragraph([bp.segment("placeholder", "<Amount>")])]],
+        ]),
+        bp.paragraph([bp.segment("static", "Total payable: "),
+                      bp.segment("placeholder", "<Amount>")]),
+    ], "sect_pr_from": None})
+    specs = [{"id": "line_items", "iterate_over": "line_items", "columns": [
+        {"token": "<Item Description>", "source_key": "item_description"},
+        {"token": "<Amount>", "source_key": "amount", "type": "currency"}]}]
+    manifest = legacy_manifest(objects_for(body) + table_row_objects(body, specs),
+                               delete_always=[])
+    template = tmp_path / "reused.docx"
+    _emit_body(body, template)
+    fill = fill_template(str(template), str(tmp_path / "out.docx"), manifest, {
+        "line_items": [{"item_description": "X", "amount": 10}]})
+    assert not fill.qa_passed
+    assert any("outside the row" in n for n in fill.qa_notes)
+
+
+def test_author_retry_catches_column_token_reuse():
+    from app.compiler.blueprint_author import assemble_body
+
+    seg = lambda role, text: {"role": role, "text": text}  # noqa: E731
+    reply = {
+        "blocks": [
+            {"kind": "table_row", "style": "", "repeat": False, "segments": [],
+             "cells": [[seg("static", "Item")], [seg("static", "Amount")]]},
+            {"kind": "table_row", "style": "", "repeat": True, "segments": [],
+             "cells": [[seg("placeholder", "<Item>")], [seg("placeholder", "<Amount>")]]},
+            {"kind": "paragraph", "style": "", "repeat": False, "cells": [],
+             "segments": [seg("static", "Total: "), seg("placeholder", "<Amount>")]},
+        ],
+        "line_items_key": "line_items", "field_types": [], "notes": [],
+    }
+    _body, _specs, problems = assemble_body(reply)
+    assert any("its own token" in p for p in problems)
