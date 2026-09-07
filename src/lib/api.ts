@@ -10,9 +10,10 @@
  */
 
 import type {
-  AnalyticsKpis, AnalyticsRange, Blueprint, BlueprintBody, BlueprintVersion, CompileReport,
+  AnalyticsKpis, AnalyticsRange, Blueprint, BlueprintBody, BlueprintVersion,
+  ClinicalDocGenerated, ClinicalDocSummary, CompileReport,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
-  SettableWorkflowStatus, TopTemplates, TrendSeries,
+  SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
 } from "@/lib/types";
 
 const API_URL = (import.meta as any).env?.VITE_API_URL ?? "http://localhost:8000/api/v1";
@@ -419,6 +420,40 @@ export const api = {
     due_date?: string;
     locale?: string;
   }) => request<InvoiceGenerated>("POST", "/invoices:generate", { json: body }),
+  /* ---- Clinical: the study book and numbered study documents ----
+   * The same shape as the invoice service: a published clinical template plus
+   * typed values becomes a numbered document (CSR-0001, PA-0001, ...). The
+   * study snapshot and any derived table totals are computed server-side. */
+  listStudies: (q?: string) =>
+    request<{ items: Study[] }>("GET", "/studies", { query: { q } }),
+  createStudy: (body: Partial<Study> & { protocol_number: string }) =>
+    request<Study>("POST", "/studies", { json: body }),
+  updateStudy: (id: string, body: Partial<Study>) =>
+    request<Study>("PATCH", `/studies/${id}`, { json: body }),
+  deleteStudy: (id: string) =>
+    request<{ deleted: boolean }>("DELETE", `/studies/${id}`),
+  listClinicalDocuments: (params: { study_id?: string; project_id?: string; document_type?: string; status?: string } = {}) =>
+    request<{ items: ClinicalDocSummary[] }>("GET", "/clinical-documents", { query: params }),
+  getClinicalDocument: (id: string) =>
+    request<ClinicalDocSummary & { source_record: Record<string, unknown> }>("GET", `/clinical-documents/${id}`),
+  voidClinicalDocument: (id: string) =>
+    request<ClinicalDocSummary>("POST", `/clinical-documents/${id}:void`),
+  generateClinicalDocument: (body: {
+    manifest_id: string;
+    document_type: string;
+    project_id?: string;
+    study_id?: string;
+    study?: {
+      protocol_number?: string; title?: string; sponsor?: string;
+      phase?: string; indication?: string; principal_investigator?: string;
+    };
+    rows?: Record<string, unknown>[];
+    fields?: Record<string, unknown>;
+    title?: string;
+    document_date?: string;
+    version_label?: string;
+    locale?: string;
+  }) => request<ClinicalDocGenerated>("POST", "/clinical-documents:generate", { json: body }),
   /** A whole template, authored by a model from a plain description. The server
    *  proves the result (emit round-trip) before persisting, and stands a kit in
    *  -- reason recorded in `generation` -- when no model is configured. */

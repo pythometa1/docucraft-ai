@@ -360,3 +360,50 @@ def test_author_retry_catches_column_token_reuse():
     }
     _body, _specs, problems = assemble_body(reply)
     assert any("its own token" in p for p in problems)
+
+
+def test_clinical_kit_renders_disposition_rows_and_totals(tmp_path):
+    """The clinical CSR kit is a real TABLE_ROW citizen: typed columns, a
+    repeat row per site, and total tokens that are their own fields outside
+    the table -- the same contract the invoice kits carry."""
+    from app.templates.emit_docx import emit
+
+    kit = load_kit("clinical")
+    assert kit["table_rows"], "the CSR kit must declare its repeating row"
+    objects = kit_objects(kit)
+    rows = [o for o in objects if o["object_type"] == "TABLE_ROW"]
+    assert len(rows) == 1
+    assert rows[0]["iterate_over"] == "disposition_rows"
+    assert {c["type"] for c in rows[0]["columns"]} == {"string", "number"}
+
+    template = str(tmp_path / "csr.docx")
+    emit(kit["body"], template)
+    manifest = legacy_manifest(objects, delete_always=[])
+
+    record = {
+        "study_title": "A Phase 2 study of drug X", "protocol_number": "ONC-2026-014",
+        "sponsor_name": "Acme Pharma", "phase": "2", "indication": "NSCLC",
+        "document_number": "CSR-0007", "report_date": "2026-09-08",
+        "version_label": "1.0",
+        "total_subjects_enrolled": 120, "total_subjects_completed": 104,
+        "total_subjects_withdrawn": 16,
+        "efficacy_summary": "The primary endpoint was met.",
+        "safety_summary": "No new signals.", "conclusions": "Continue development.",
+        "investigator_name": "Dr. A. Rao",
+        "disposition_rows": [
+            {"site_name": "Pune General", "subjects_enrolled": 80,
+             "subjects_completed": 70, "subjects_withdrawn": 10},
+            {"site_name": "Mumbai Central", "subjects_enrolled": 40,
+             "subjects_completed": 34, "subjects_withdrawn": 6},
+        ],
+    }
+    out = str(tmp_path / "csr_out.docx")
+    fill = fill_template(template, out, manifest, record, locale="en_US")
+    assert fill.qa_passed, fill.qa_notes
+    document = docx.Document(out)
+    table = document.tables[0]
+    assert len(table.rows) == 3  # header + two sites, prototype gone
+    assert table.rows[2].cells[0].text == "Mumbai Central"
+    text = "\n".join(p.text for p in document.paragraphs)
+    assert "CSR-0007" in text
+    assert "Total enrolled: 120" in text

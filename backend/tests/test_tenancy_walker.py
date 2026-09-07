@@ -50,9 +50,9 @@ def org_a_resources(app_client, two_orgs):
     """
     from app.db import SessionLocal
     from app.models import (
-        Conversation, Customer, DocumentReview, DocumentVersion, DraftDocument,
+        ClinicalDocument, Conversation, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
-        GenerationJob, Invoice, Mapping, Project, ReviewComment, ReviewTask, SourceFile,
+        GenerationJob, Invoice, Mapping, Project, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
         TemplateBlueprint,
         TemplateBlueprintVersion, TemplateFile, TemplateLibrary, TemplateLibraryVersion,
@@ -132,6 +132,17 @@ def org_a_resources(app_client, two_orgs):
         db.add(invoice)
         db.flush()
 
+        study = Study(org_id=org, protocol_number="PROTO-9001", title="A study",
+                      created_by=user.id)
+        db.add(study)
+        db.flush()
+        clinical_doc = ClinicalDocument(org_id=org, project_id=project_a,
+                                        number="CSR-9001", study_id=study.id,
+                                        study_snapshot={"protocol_number": "PROTO-9001"},
+                                        document_type="csr", created_by=user.id)
+        db.add(clinical_doc)
+        db.flush()
+
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
             "source_id": sf.id, "draft_id": draft.id, "document_id": gd.id,
@@ -142,6 +153,7 @@ def org_a_resources(app_client, two_orgs):
             "blueprint_id": blueprint.id,
             "review_id": review.id, "comment_id": comment.id,
             "customer_id": customer.id, "invoice_id": invoice.id,
+            "study_id": study.id, "clinical_document_id": clinical_doc.id,
         }
         db.commit()
     finally:
@@ -288,6 +300,15 @@ ROUTES: list[dict] = [
     {"method": "DELETE", "path": "/customers/{customer_id}"},
     {"method": "GET", "path": "/invoices/{invoice_id}"},
     {"method": "POST", "path": "/invoices/{invoice_id}:void"},
+
+    # The clinical service. Study rows carry protocol numbers, sponsors and
+    # investigators; document rows carry the study snapshot -- the same class
+    # of tenant data as the invoice registry, with the same stakes.
+    {"method": "GET", "path": "/studies/{study_id}"},
+    {"method": "PATCH", "path": "/studies/{study_id}", "body": {"title": "x"}},
+    {"method": "DELETE", "path": "/studies/{study_id}"},
+    {"method": "GET", "path": "/clinical-documents/{clinical_document_id}"},
+    {"method": "POST", "path": "/clinical-documents/{clinical_document_id}:void"},
 ]
 
 

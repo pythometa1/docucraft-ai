@@ -33,6 +33,22 @@ export const SERVER_COMPUTED_FIELD_IDS = new Set([
   "grand_total", "total", "total_due",
 ]);
 
+/** What the clinical endpoint computes: document control, the study snapshot,
+ *  and the derived table totals. The totals' ids are dynamic
+ *  (`total_<column>`), so they arrive as a pattern rather than a set. */
+export const CLINICAL_SERVER_COMPUTED_FIELD_IDS = new Set([
+  "document_number", "document_date", "report_date", "version_label",
+  "document_title", "study_title", "protocol_number", "sponsor_name",
+  "investigator_name", "principal_investigator", "phase", "indication",
+  "row_count",
+]);
+export const CLINICAL_COMPUTED_PATTERN = /^total_/;
+
+/** Which fields a service's endpoint overwrites: a set of exact ids, an
+ *  optional pattern for dynamic ones. Defaults to the invoice set, so the
+ *  first consumer's call sites read exactly as they always did. */
+export type ServerComputed = { ids?: Set<string>; pattern?: RegExp };
+
 export type ManifestFieldLike = {
   id: string;
   type?: string;
@@ -56,10 +72,16 @@ export function tableRowSpec(blocks: unknown[] | undefined): TableRowSpec | null
 export function typedFields(
   fields: ManifestFieldLike[] | undefined,
   spec: TableRowSpec | null,
+  computed: ServerComputed = {},
 ): ManifestFieldLike[] {
+  const ids = computed.ids ?? SERVER_COMPUTED_FIELD_IDS;
   const rowOwned = new Set((spec?.columns ?? []).map((c) => c.field_id));
   return (fields ?? []).filter(
-    (f) => f.id && !SERVER_COMPUTED_FIELD_IDS.has(f.id) && !rowOwned.has(f.id),
+    (f) =>
+      f.id &&
+      !ids.has(f.id) &&
+      !(computed.pattern?.test(f.id) ?? false) &&
+      !rowOwned.has(f.id),
   );
 }
 
@@ -135,15 +157,20 @@ function ScalarInput({ field, value, onChange }: {
   return <Input type="text" {...common} />;
 }
 
-export function FieldValueForm({ fields, spec, values, onValues, rows, onRows }: {
+export function FieldValueForm({ fields, spec, values, onValues, rows, onRows, serverComputed, minRowNote }: {
   fields: ManifestFieldLike[];
   spec: TableRowSpec | null;
   values: Record<string, unknown>;
   onValues: (next: Record<string, unknown>) => void;
   rows: Record<string, unknown>[];
   onRows: (next: Record<string, unknown>[]) => void;
+  serverComputed?: ServerComputed;
+  minRowNote?: string;
 }) {
-  const scalars = useMemo(() => typedFields(fields, spec), [fields, spec]);
+  const scalars = useMemo(
+    () => typedFields(fields, spec, serverComputed ?? {}),
+    [fields, spec, serverComputed],
+  );
 
   return (
     <div className="space-y-6">
@@ -169,16 +196,17 @@ export function FieldValueForm({ fields, spec, values, onValues, rows, onRows }:
       )}
 
       {spec && (
-        <LineItemsGrid spec={spec} rows={rows} onRows={onRows} />
+        <LineItemsGrid spec={spec} rows={rows} onRows={onRows} minRowNote={minRowNote} />
       )}
     </div>
   );
 }
 
-function LineItemsGrid({ spec, rows, onRows }: {
+function LineItemsGrid({ spec, rows, onRows, minRowNote }: {
   spec: TableRowSpec;
   rows: Record<string, unknown>[];
   onRows: (next: Record<string, unknown>[]) => void;
+  minRowNote?: string;
 }) {
   const columns = spec.columns ?? [];
 
@@ -235,7 +263,7 @@ function LineItemsGrid({ spec, rows, onRows }: {
                     onClick={() => onRows(rows.filter((_, i) => i !== rowIndex))}
                     disabled={rows.length <= 1}
                     className="rounded p-1 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
-                    title={rows.length <= 1 ? "An invoice needs at least one line" : "Remove this row"}
+                    title={rows.length <= 1 ? (minRowNote ?? "An invoice needs at least one line") : "Remove this row"}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>

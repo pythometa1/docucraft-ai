@@ -1343,4 +1343,5 @@ class NumberSequence(Base):
 # These imports MUST stay at the tail: service model modules import `uid` and
 # `now` back from this module mid-initialisation, which is safe only because
 # those names are defined above this line.
+from app.clinical.models import ClinicalDocument, Study  # noqa: E402,F401
 from app.finance.models import Customer, Invoice  # noqa: E402,F401

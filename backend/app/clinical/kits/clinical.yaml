@@ -1,6 +1,28 @@
 name: Clinical study report
-description: Study identification and a results section with a table.
-fields: [study_title, protocol_number, sponsor_name, investigator_name, report_date]
+description: Study identification, per-site subject disposition with derived totals, results and signatures.
+fields: [study_title, protocol_number, sponsor_name, phase, indication, document_number,
+         report_date, version_label, site_name, subjects_enrolled, subjects_completed,
+         subjects_withdrawn, total_subjects_enrolled, total_subjects_completed,
+         total_subjects_withdrawn, efficacy_summary, safety_summary, conclusions,
+         investigator_name]
+field_types:
+  report_date: date
+  subjects_enrolled: number
+  subjects_completed: number
+  subjects_withdrawn: number
+  total_subjects_enrolled: number
+  total_subjects_completed: number
+  total_subjects_withdrawn: number
+table_rows:
+  - id: disposition_rows
+    iterate_over: disposition_rows
+    empty_behaviour: REMOVE_ROW
+    required: true
+    columns:
+      - {token: "<Site Name>", source_key: site_name, type: string}
+      - {token: "<Subjects Enrolled>", source_key: subjects_enrolled, type: number}
+      - {token: "<Subjects Completed>", source_key: subjects_completed, type: number}
+      - {token: "<Subjects Withdrawn>", source_key: subjects_withdrawn, type: number}
 blocks:
   - kind: paragraph
     style: Heading 1
@@ -16,6 +38,60 @@ blocks:
       - {role: static, text: ", sponsored by "}
       - {role: placeholder, text: "<Sponsor Name>"}
       - {role: static, text: "."}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Phase: "}
+      - {role: placeholder, text: "<Phase>"}
+      - {role: static, text: "   Indication: "}
+      - {role: placeholder, text: "<Indication>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Document "}
+      - {role: placeholder, text: "<Document Number>"}
+      - {role: static, text: ", version "}
+      - {role: placeholder, text: "<Version Label>"}
+      - {role: static, text: ", dated "}
+      - {role: placeholder, text: "<Report Date>"}
+      - {role: static, text: "."}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Subject disposition"}]
+  - kind: table
+    rows:
+      - - [{kind: paragraph, segments: [{role: static, text: "Site"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Enrolled"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Completed"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Withdrawn"}]}]
+      - - [{kind: paragraph, segments: [{role: placeholder, text: "<Site Name>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Subjects Enrolled>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Subjects Completed>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Subjects Withdrawn>"}]}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Total enrolled: "}
+      - {role: placeholder, text: "<Total Subjects Enrolled>"}
+      - {role: static, text: "   Completed: "}
+      - {role: placeholder, text: "<Total Subjects Completed>"}
+      - {role: static, text: "   Withdrawn: "}
+      - {role: placeholder, text: "<Total Subjects Withdrawn>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Efficacy results"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Efficacy Summary>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Safety results"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Safety Summary>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Conclusions"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Conclusions>"}
   - kind: paragraph
     style: Heading 1
     segments: [{role: static, text: "Signatures"}]

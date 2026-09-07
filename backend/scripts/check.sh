@@ -102,6 +102,10 @@ FLOORS = {
     # invoice endpoint execute; `blueprint_author` is the only place a model's
     # output becomes a template, and its refusals are the whole safety story.
     "finance/invoicing.py": 85,
+    # The clinical service's derived counts: a partial sum on a study report
+    # is a wrong number that looks deliberate, so every branch of the
+    # all-or-nothing rule is exercised.
+    "clinical/derivations.py": 95,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

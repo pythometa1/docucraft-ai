@@ -223,3 +223,31 @@ def test_endpoint_without_a_service_answers_503_when_unconfigured(app_client, tw
     res = app_client.post("/api/v1/template-blueprints:from-description",
                           headers=_auth(token), json={"description": "a memo template"})
     assert res.status_code == 503
+
+
+def test_the_clinical_pack_reaches_the_prompt(stub_provider):
+    """service=clinical_csr appends the CSR scaffolding -- the registry's pack,
+    not the invoice one."""
+    provider = stub_provider(GOOD_REPLY)
+    author_blueprint("a phase 2 oncology study across 12 sites",
+                     service="clinical_csr", llm_policy=None)
+    assert "CLINICAL STUDY REPORT" in provider.prompts[0]
+    assert "disposition_rows" in provider.prompts[0]
+    assert "INVOICE" not in provider.prompts[0]
+
+
+def test_endpoint_falls_back_to_the_doc_types_own_kit(app_client, two_orgs):
+    """Each clinical service key degrades to ITS kit: a consent form falls back
+    to the ICF kit with its visit table, never to the CSR kit."""
+    token, project_id, _tb, _pb = two_orgs
+    res = app_client.post("/api/v1/template-blueprints:from-description",
+                          headers=_auth(token), json={
+                              "description": "informed consent for a diabetes study",
+                              "service": "clinical_icf", "project_id": project_id})
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert body["generation"]["source"] == "kit_fallback"
+    assert body["kind"] == "kit"
+    rows = [o for o in body["version"]["objects"] if o.get("object_type") == "TABLE_ROW"]
+    assert len(rows) == 1
+    assert rows[0]["iterate_over"] == "visits"

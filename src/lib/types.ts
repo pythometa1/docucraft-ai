@@ -415,6 +415,54 @@ export type InvoiceGenerated = InvoiceSummary & {
   locale_source: string;
 };
 
+/* ---- The clinical service ---- */
+
+export type Study = {
+  id: string;
+  protocol_number: string;
+  title: string | null;
+  sponsor: string | null;
+  phase: string | null;
+  indication: string | null;
+  principal_investigator: string | null;
+  status: string; // active | closed
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ClinicalDocSummary = {
+  id: string;
+  number: string;
+  status: string; // final | draft | void
+  project_id: string;
+  study_id: string | null;
+  /** The study as reported -- a snapshot, deliberately not a live join. */
+  study: {
+    protocol_number?: string | null; title?: string | null; sponsor?: string | null;
+    phase?: string | null; indication?: string | null;
+    principal_investigator?: string | null;
+  };
+  document_type: string; // csr | protocol_amendment | icf | investigator_brochure
+  title: string | null;
+  version_label: string | null;
+  manifest_id: string | null;
+  document_id: string | null;
+  document_version_id: string | null;
+  document_date: string | null;
+  qa_passed: boolean;
+  created_at: string;
+};
+
+export type ClinicalDocGenerated = ClinicalDocSummary & {
+  filename: string;
+  qa_notes: string[];
+  /** Why the document was NOT auto-approved -- null when it was. */
+  approval_note: string | null;
+  locale: string;
+  locale_source: string;
+};
+
 /** One column of a §6 TABLE_ROW: the token in the prototype row, the key each
  *  line-item record supplies, and how the value renders. */
 export type TableRowColumn = {

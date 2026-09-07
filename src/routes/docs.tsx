@@ -136,6 +136,24 @@ const API: { id: string; title: string; blurb: string; endpoints: Endpoint[] }[]
     ],
   },
   {
+    id: "api-clinical",
+    title: "Clinical",
+    blurb:
+      "The clinical service, opened by creating a project under the Clinical function: a study "
+      + "book, per-type numbering (CSR-, PA-, ICF-, IB-), and one call that turns a published "
+      + "clinical template plus typed values into a numbered study document. The study snapshot "
+      + "and any table totals are computed server-side.",
+    endpoints: [
+      { method: "POST", path: "/template-blueprints:from-description", what: "A whole template authored from a plain study description; falls back to a shipped kit when no model is configured.", note: "service: clinical_csr | clinical_icf | …" },
+      { method: "GET", path: "/studies", what: "The study book." },
+      { method: "POST", path: "/studies", what: "Save a study for reuse: protocol number, sponsor, investigator." },
+      { method: "POST", path: "/clinical-documents:generate", what: "Study + rows + fields in, a numbered document out. Allocates CSR-#### in the same transaction that stores the document.", note: "document_type: csr | protocol_amendment | icf | investigator_brochure" },
+      { method: "GET", path: "/clinical-documents", what: "Every study document, newest first.", note: "?status=&study_id=&document_type=" },
+      { method: "POST", path: "/clinical-documents/{id}:void", what: "Void a document. The number is kept — a numbering with silent gaps is worse." },
+      { method: "GET", path: "/document-versions/{id}/download", what: "The document as a file.", note: "?format=docx|pdf" },
+    ],
+  },
+  {
     id: "api-documents",
     title: "Documents",
     blurb:

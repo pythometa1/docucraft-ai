@@ -39,9 +39,9 @@ DocuMind AI is a document-generation platform for regulated, template-heavy work
 
 The central design decision: **a model reads the template once; nothing reads the data.** Compiling a template is hard language understanding and happens once per template family. Filling it is deterministic OOXML surgery that runs per document, makes zero model calls, costs nothing but CPU, and cannot hallucinate a salary figure.
 
-It is a running application, not a prototype: 148 HTTP endpoints across a FastAPI backend on PostgreSQL 17 + pgvector and Redis, a 17-route React 19 frontend, 48 database tables, 45 of them under row-level security, and a 2,266-test suite behind a coverage gate CI runs verbatim.
+It is a running application, not a prototype: 157 HTTP endpoints across a FastAPI backend on PostgreSQL 17 + pgvector and Redis, a 17-route React 19 frontend, 50 database tables, 47 of them under row-level security, and a 2,303-test suite behind a coverage gate CI runs verbatim.
 
-It also ships its first per-industry **service**: invoice generation. Describe your business, a model authors the invoice template (proven by the same emit round-trip every template passes, with shipped kits standing in when no model is configured), type the line items, and a numbered invoice comes back as DOCX or PDF - customer book, org-scoped INV-#### sequences and server-side Decimal money included. The primitive underneath it, the TABLE_ROW (one template row rendered once per record of a collection), is the same one clinical listings and batch records will need.
+It also ships per-industry **services**, each in its own backend package declaring itself to a registry (`app/verticals.py`). **Invoices**: describe your business, a model authors the template (proven by the same emit round-trip every template passes, with shipped kits standing in when no model is configured), type the line items, and a numbered invoice comes back as DOCX or PDF - customer book, org-scoped INV-#### sequences and server-side Decimal money included. **Clinical**: the same flow for study documents - a study book instead of a customer book, per-type CSR-/PA-/ICF-/IB- sequences, subject-disposition tables whose totals are derived server-side (all rows sum or the total honestly stays blank), and four document types each with its own prompt pack. The primitive underneath both, the TABLE_ROW (one template row rendered once per record of a collection), is the same one batch records will need next.
 
 ---
 
@@ -270,7 +270,7 @@ flowchart TB
 | **Cache** | Redis 7 — token bucket, JWT revocation, download grants |
 | **Documents** | python-docx, lxml (raw OOXML surgery), pypdf, openpyxl, babel, beautifulsoup4 |
 | **Retrieval** | scikit-learn TF-IDF + a local hashing embedder, pgvector storage |
-| **Testing** | pytest — 89 modules, 2,266 tests, golden-DOCX comparison by C14N canonicalisation |
+| **Testing** | pytest — 85 test modules, 2,303 tests, golden-DOCX comparison by C14N canonicalisation |
 
 ---
 
@@ -346,7 +346,7 @@ The repo contains **zero `TODO`, `FIXME`, `XXX`, `HACK` or `NotImplementedError`
 - **A tenth assertion, `scaffolding_conflict`, is declared and never raised.** So is the compiler's optional test-fill assertion: `compile_template(test_fill=...)` is passed only from tests, so `test_fill_failure` cannot fire through the API.
 - **Retrieval evidence reaches one of four compile call sites.** Only the single-template compile passes it; bulk onboarding and both blueprint compiles do not — so a template onboarded in bulk is read with no knowledge of the organisation's existing column names, which is the case the feature was built for.
 - **Settings is mostly mock.** Only the Profile tab reads real data. Workspace, AI Models, Notifications, Security, API keys and Billing are static JSX. Audit-log filters, export and pagination have no handlers, and the team screen has no invite or role-change controls at all.
-- **PDF export needs LibreOffice on the host.** The Docker image now installs `libreoffice-writer` (the invoice service delivers PDFs), so the container converts; a dev machine without `soffice` still answers `503 PDF_UNAVAILABLE` on the single download, and the bulk zip lists the failure per document in `_FAILED.txt`.
+- **PDF export needs LibreOffice on the host.** The Docker image now installs `libreoffice-writer` (the invoice and clinical services deliver PDFs), so the container converts; a dev machine without `soffice` still answers `503 PDF_UNAVAILABLE` on the single download, and the bulk zip lists the failure per document in `_FAILED.txt`.
 - **`docs/BACKEND_SPEC.md` §-numbers cited in code comments do not resolve to that document.** The code quotes an architecture record not present in this repository — treat those references as provenance notes, not lookups.
 
 ---
@@ -455,7 +455,7 @@ One script, run identically locally and in CI, so *"green locally"* and *"green 
 
 | | |
 |---|---|
-| Tests collected | **2,266** across 89 modules |
+| Tests collected | **2,303** across 85 modules |
 | Last verified run | 2,220 passed, 2 skipped, exit 0 |
 | Measured coverage | **87.33%** (14,995 statements, 1,900 missed) |
 | Global floor | 76%, env-overridable |
