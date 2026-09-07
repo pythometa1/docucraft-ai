@@ -25,7 +25,7 @@ from app.audit.service import log_audit
 from app.authz import APPROVE_DOCUMENT, has_capability, require
 from app.db import get_db
 from app.generation.single import FillFailed, generate_one
-from app.invoicing import UncomputableAmount, compute_totals
+from app.finance.invoicing import UncomputableAmount, compute_totals
 from app.metrics import record_qa_overrides
 from app.models import (
     Counter, Customer, Invoice, Project, TemplateFile, TemplateManifest,

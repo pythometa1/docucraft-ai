@@ -26,13 +26,21 @@ from pathlib import Path
 import yaml
 
 from app.templates import blueprint as bp
+from app.verticals import KIT_DIRS, KIT_IDS
 
+#: The kits no vertical owns -- just `blank`. Every other kit lives in its
+#: service's own folder and reaches this loader through the registry.
 KIT_DIR = Path(__file__).parent / "kits"
 
-#: The order they are offered in. `blank` first because an author who knows what
-#: they are writing should not have to delete somebody else's prose first.
-KIT_ORDER = ("blank", "offer", "contract", "clinical", "medaff",
-             "invoice", "invoice_gst", "invoice_intl")
+#: The order they are offered in: `blank` first, because an author who knows
+#: what they are writing should not have to delete somebody else's prose
+#: first; then every service's kits in registry order (app/verticals.py).
+KIT_ORDER = ("blank",) + KIT_IDS
+
+
+def _kit_path(name: str) -> Path:
+    """Where a kit's YAML lives: its owning service's folder, or the shared one."""
+    return KIT_DIRS.get(name, KIT_DIR) / f"{name}.yaml"
 
 
 class UnknownKit(ValueError):
@@ -59,7 +67,7 @@ def load_kit(name: str) -> dict:
     segments side by side is stored the way Word would store it -- one run, one
     span -- rather than describing a document that cannot exist.
     """
-    path = KIT_DIR / f"{name}.yaml"
+    path = _kit_path(name)
     if name not in KIT_ORDER or not path.exists():
         raise UnknownKit(
             f"there is no template kit called {name!r}; the ones that exist are "

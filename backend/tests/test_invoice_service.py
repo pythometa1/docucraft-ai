@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.invoicing import UncomputableAmount, compute_totals
+from app.finance.invoicing import UncomputableAmount, compute_totals
 
 
 def _auth(token: str) -> dict:

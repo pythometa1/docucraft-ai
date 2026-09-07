@@ -48,6 +48,7 @@ from app.storage import abs_path, save_bytes
 from app.templates import blueprint as bp
 from app.templates.emit_docx import EmitError, emit, emit_from_base
 from app.templates.kits import UnknownKit, kit_objects, list_kits, load_kit
+from app.verticals import FALLBACK_KITS as FALLBACK_KIT_BY_SERVICE
 from app.templates.blueprint_lint import Finding as LintFinding
 from app.templates.blueprint_lint import lint as lint_blueprint
 from app.templates.lift import (
@@ -359,9 +360,9 @@ class FromDescriptionRequest(BaseModel):
     service: str | None = None
 
 
-#: The kit that stands in when the model cannot author for a service. A wizard
-#: that dead-ends on a missing API key is a wizard nobody finishes.
-FALLBACK_KIT_BY_SERVICE = {"invoice": "invoice"}
+# FALLBACK_KIT_BY_SERVICE (imported at the top, from the registry) names the
+# kit that stands in when the model cannot author for a service -- a wizard
+# that dead-ends on a missing API key is a wizard nobody finishes.
 
 
 @router.post("/template-blueprints:from-description", status_code=201)

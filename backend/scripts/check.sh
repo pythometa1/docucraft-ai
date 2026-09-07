@@ -101,7 +101,7 @@ FLOORS = {
     # shared single-record generation core both the manifest endpoint and the
     # invoice endpoint execute; `blueprint_author` is the only place a model's
     # output becomes a template, and its refusals are the whole safety story.
-    "invoicing.py": 85,
+    "finance/invoicing.py": 85,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

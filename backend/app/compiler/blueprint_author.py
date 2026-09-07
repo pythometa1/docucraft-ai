@@ -25,6 +25,7 @@ from app.llm.provider import get_llm_provider
 from app.templates import blueprint as bp
 from app.templates.blueprint_lint import lint as lint_blueprint
 from app.templates.kits import table_row_objects
+from app.verticals import PROMPT_PACKS  # noqa: F401 - the per-service scaffolding, aggregated
 
 #: The capability string metering buckets on; see `llm.metering`.
 CAPABILITY = "Authoring a template from a description"
@@ -109,26 +110,10 @@ Rules that are not negotiable:
 Write complete, professional documents a real business would send -- full
 sentences, sensible order, nothing left as an exercise."""
 
-#: Per-service scaffolding appended to the prompt. The invoice pack is the
-#: first; a later vertical adds its own entry rather than a new mechanism.
-PROMPT_PACKS = {
-    "invoice": """This template is an INVOICE. It must contain, in a sensible order:
-  - a heading, and the business's own identity: <Business Name>, <Business Address>,
-    plus tax registration when the description implies one (<Business GSTIN> for
-    Indian GST businesses, <Business Tax ID> elsewhere)
-  - invoice metadata: <Invoice Number>, <Invoice Date>, and <Due Date> when
-    payment terms exist
-  - a bill-to section: <Customer Name>, <Customer Address>, and the customer's
-    tax id when relevant
-  - ONE line-item table: a static header row, then the repeat row with
-    placeholders such as <Item Description>, <Quantity>, <Unit Price>, <Amount>
-    (line_items_key: line_items)
-  - totals after the table: <Subtotal>, tax (<Tax Rate>, <Tax Amount> -- or
-    <CGST Amount> and <SGST Amount> for Indian GST), and <Grand Total>,
-    all typed currency except the rate
-  - payment terms or instructions.
-Currency conventions come from the description (GST and rupees for India)."""
-}
+#: PROMPT_PACKS (imported above) is the per-service scaffolding appended to
+#: the prompt. Each service declares its own pack in its `service.py`; the
+#: registry (app/verticals.py) aggregates them. Adding a vertical never edits
+#: this module.
 
 
 class AuthoringFailed(Exception):

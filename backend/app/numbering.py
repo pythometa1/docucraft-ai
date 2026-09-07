@@ -17,12 +17,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import NumberSequence
+from app.verticals import NUMBER_PREFIXES as DEFAULT_PREFIXES
 
-#: The one sequence this vertical uses today. A later vertical adds its own key
-#: and its own default prefix here rather than inventing a second allocator.
+#: Finance's key, kept as the default argument below because the allocator
+#: predates the registry. A new vertical declares its keys and prefixes in its
+#: own `service.py` rather than inventing a second allocator.
 INVOICE_KEY = "invoice"
-
-DEFAULT_PREFIXES = {INVOICE_KEY: "INV-"}
 
 
 def allocate(db: Session, org_id: str, key: str = INVOICE_KEY) -> str:
