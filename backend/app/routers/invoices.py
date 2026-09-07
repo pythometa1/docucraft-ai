@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit.service import log_audit
-from app.authz import APPROVE_DOCUMENT, has_capability
+from app.authz import APPROVE_DOCUMENT, has_capability, require
 from app.db import get_db
 from app.generation.single import FillFailed, generate_one
 from app.invoicing import UncomputableAmount, compute_totals
@@ -240,9 +240,12 @@ def get_invoice(invoice_id: str, db: Session = Depends(get_db),
 
 @router.post("/invoices/{invoice_id}:void")
 def void_invoice(invoice_id: str, db: Session = Depends(get_db),
-                 user: User = Depends(get_current_user)):
+                 user: User = Depends(require(APPROVE_DOCUMENT))):
     """Mark an invoice void. The row and its number remain -- a numbering with
-    silent gaps is what voiding exists to avoid."""
+    silent gaps is what voiding exists to avoid.
+
+    Gated on APPROVE_DOCUMENT: voiding is the sign-off decision run backwards,
+    and a role that cannot approve an invoice has no business cancelling one."""
     inv = _owned_invoice(db, invoice_id, user)
     if inv.status == "void":
         raise error("INVOICE_ALREADY_VOID", "This invoice is already void.", 409)
@@ -320,9 +323,10 @@ def generate_invoice(body: InvoiceGenerateRequest, db: Session = Depends(get_db)
     if body.project_id:
         project = owned_project(db, body.project_id, user)
     elif tf is not None and tf.project_id:
-        project = db.get(Project, tf.project_id)
-        if not project or project.org_id != user.org_id:
-            raise error("PROJECT_NOT_FOUND", "Project not found", 404)
+        # `owned_project` and not a raw get: it refuses another org's project
+        # AND a soft-deleted one, and new invoices must not be written into a
+        # project the organisation deleted.
+        project = owned_project(db, tf.project_id, user)
     else:
         project = _workspace_project(db, user)
 
@@ -372,9 +376,13 @@ def generate_invoice(body: InvoiceGenerateRequest, db: Session = Depends(get_db)
 
     # -- the fill input. Caller's fields first; what this endpoint computes
     # wins over anything the caller typed, because the server's Decimal math is
-    # the authoritative one for every figure the document prints. --
-    source_record = {
-        **body.fields,
+    # the authoritative one for every figure the document prints.
+    #
+    # Only *values* win, never absences. The computed dict is filtered for None
+    # BEFORE the merge: a book customer with no recorded email must not erase a
+    # customer_email the caller supplied in `fields`, and an unset due_date must
+    # not delete theirs. Filtering after the merge did exactly that. --
+    computed = {
         "customer_name": snapshot.get("name"),
         "customer_email": snapshot.get("email"),
         "customer_phone": snapshot.get("phone"),
@@ -389,7 +397,10 @@ def generate_invoice(body: InvoiceGenerateRequest, db: Session = Depends(get_db)
         **totals.record_values(),
         "line_items": totals.line_items,
     }
-    source_record = {k: v for k, v in source_record.items() if v is not None}
+    source_record = {
+        **{k: v for k, v in body.fields.items() if v is not None},
+        **{k: v for k, v in computed.items() if v is not None},
+    }
 
     try:
         outcome = generate_one(

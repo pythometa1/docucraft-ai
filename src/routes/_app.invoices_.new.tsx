@@ -208,6 +208,14 @@ function NewInvoicePage() {
           <TemplateStep
             projectId={projectId}
             onReady={(m, name) => {
+              // A different template means different fields and different
+              // line-item columns; values typed against the old one would ride
+              // along invisibly -- ghost rows that look empty but are counted
+              // and sent.
+              if (manifest && manifest.id !== m.id) {
+                setValues({});
+                setRows([{}]);
+              }
               setManifest(m);
               setBlueprintName(name);
               setStep(1);
@@ -608,11 +616,18 @@ function SuccessPanel({ result, onAnother, onDone }: {
       <div>
         <h2 className="text-xl font-semibold text-foreground">{result.number}</h2>
         <p className="text-sm text-muted-foreground">
-          {result.qa_passed
-            ? "Generated, checked, and stored."
-            : "Generated, but its checks found problems — it is stored as a draft."}
+          {!result.qa_passed
+            ? "Generated, but its checks found problems — it is stored as a draft."
+            : result.approval_note
+              ? "Generated and checked — waiting for sign-off."
+              : "Generated, checked, and stored."}
         </p>
       </div>
+      {result.qa_passed && result.approval_note && (
+        <p className="mx-auto max-w-lg rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-foreground">
+          {result.approval_note} Downloads unlock once it is approved.
+        </p>
+      )}
       {!result.qa_passed && result.qa_notes.length > 0 && (
         <ul className="mx-auto max-w-lg space-y-1 text-left text-xs text-ai-blocked">
           {result.qa_notes.slice(0, 4).map((note, i) => <li key={i}>• {note}</li>)}

@@ -337,3 +337,89 @@ def test_tax_rate_snapshot_is_plain_decimal_notation():
     assert totals.record_values()["tax_rate"] == "18"
     fractional = compute_totals([{"amount": 100}], tax_rate=12.5)
     assert fractional.record_values()["tax_rate"] == "12.5"
+
+
+def test_a_sparse_book_customer_does_not_erase_supplied_fields(
+        app_client, published_invoice_manifest):
+    """A book customer with no recorded email must not delete the
+    customer_email the caller typed into fields -- absences never win."""
+    token, project_id, manifest_id = published_invoice_manifest
+    customer = app_client.post("/api/v1/customers", headers=_auth(token), json={
+        "name": "Sparse Client"}).json()  # no email, no address
+
+    res = app_client.post("/api/v1/invoices:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "customer_id": customer["id"],
+        "line_items": [{"amount": 10}],
+        "fields": {**FIELDS, "customer_email": "billing@sparse.example",
+                   "due_date": "2026-10-01"}})
+    assert res.status_code == 201, res.text
+    record = app_client.get(f"/api/v1/invoices/{res.json()['id']}",
+                            headers=_auth(token)).json()["source_record"]
+    assert record["customer_email"] == "billing@sparse.example"
+    assert record["due_date"] == "2026-10-01"
+    assert record["customer_name"] == "Sparse Client"  # real values still win
+
+
+def test_void_needs_sign_off_authority(app_client, published_invoice_manifest, two_orgs):
+    """A role that cannot approve an invoice has no business cancelling one."""
+    token, project_id, manifest_id = published_invoice_manifest
+    made = app_client.post("/api/v1/invoices:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "customer": {"name": "V"}, "line_items": [{"amount": 10}], "fields": FIELDS}).json()
+
+    from app.db import SessionLocal
+    from app.models import User
+    from app.security import create_access_token, hash_password
+
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.email == "user-a@tenant.test").one()
+        clerk = db.query(User).filter(User.email == "clerk-a@tenant.test").one_or_none()
+        if clerk is None:
+            clerk = User(org_id=admin.org_id, email="clerk-a@tenant.test",
+                         full_name="Clerk A", password_hash=hash_password("pw"),
+                         role_key="generator")
+            db.add(clerk)
+            db.commit()
+        clerk_token = create_access_token(clerk.id, clerk.org_id)
+    finally:
+        db.close()
+
+    refused = app_client.post(f"/api/v1/invoices/{made['id']}:void",
+                              headers=_auth(clerk_token))
+    assert refused.status_code == 403
+
+    allowed = app_client.post(f"/api/v1/invoices/{made['id']}:void", headers=_auth(token))
+    assert allowed.status_code == 200
+
+
+def test_generate_refuses_a_template_whose_project_was_deleted(
+        app_client, published_invoice_manifest):
+    """The tf.project_id fallback must not write invoices into a project the
+    organisation deleted."""
+    token, project_id, manifest_id = published_invoice_manifest
+
+    from app.db import SessionLocal
+    from app.models import Project, now as model_now
+
+    db = SessionLocal()
+    try:
+        project = db.get(Project, project_id)
+        project.deleted_at = model_now()
+        db.commit()
+    finally:
+        db.close()
+    try:
+        res = app_client.post("/api/v1/invoices:generate", headers=_auth(token), json={
+            "manifest_id": manifest_id,  # no project_id: exercises the fallback
+            "customer": {"name": "X"}, "line_items": [{"amount": 10}], "fields": FIELDS})
+        assert res.status_code == 404
+    finally:
+        db = SessionLocal()
+        try:
+            project = db.get(Project, project_id)
+            project.deleted_at = None
+            db.commit()
+        finally:
+            db.close()

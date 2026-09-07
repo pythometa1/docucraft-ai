@@ -407,6 +407,10 @@ export type InvoiceSummary = {
 export type InvoiceGenerated = InvoiceSummary & {
   filename: string;
   qa_notes: string[];
+  /** Why the invoice was NOT auto-approved (role cannot approve, or the
+   *  template is legally binding) -- null when it was. Downloads 409 until a
+   *  person with the capability signs it off. */
+  approval_note: string | null;
   locale: string;
   locale_source: string;
 };

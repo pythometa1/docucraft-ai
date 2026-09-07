@@ -55,7 +55,16 @@ class SingleGeneration:
 
 
 def _next_display_id(db: Session, counter_name: str, start: int) -> int:
-    counter = db.get(Counter, counter_name)
+    """The next display id, with the counter row locked on PostgreSQL.
+
+    The read-modify-write here is racy without the lock: two concurrent
+    generations both read value N and both store N+1, and two documents share
+    a display id. SQLite's single writer makes the plain path equivalent
+    there. (The older copies of this helper in `routers/projects.py` and
+    `batch_runner.py` predate the lock and carry the same race.)
+    """
+    lock = db.get_bind().dialect.name == "postgresql"
+    counter = db.get(Counter, counter_name, with_for_update=True if lock else None)
     if counter is None:
         counter = Counter(name=counter_name, value=start)
         db.add(counter)

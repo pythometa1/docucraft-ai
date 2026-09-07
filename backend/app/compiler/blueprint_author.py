@@ -62,9 +62,15 @@ BODY_SCHEMA = {
         },
         # "" when the document has no repeating table.
         "line_items_key": {"type": "string"},
+        # No "percent" on purpose. The renderer's percent type treats a value
+        # as a *fraction* and multiplies by 100, while every rate this service
+        # supplies (tax_rate=18 for 18%) is in percent-points -- a model that
+        # typed <Tax Rate> as percent would print "Tax (1,800%)" on a tax
+        # document. Rates are numbers; the % sign is static text beside them,
+        # exactly as the shipped kits write it.
         "field_types": _array_of(
             token={"type": "string"},
-            type={"type": "string", "enum": ["string", "currency", "date", "number", "percent"]},
+            type={"type": "string", "enum": ["string", "currency", "date", "number"]},
             on_missing={"type": "string", "enum": ["BLANK", "BLOCK"]},
         ),
         "notes": {"type": "array", "items": {"type": "string"}},
@@ -94,7 +100,9 @@ Rules that are not negotiable:
     each cell holding one placeholder -- and name the collection in
     line_items_key. The header row and any totals rows are NOT the repeat row.
   - Type every numeric or date placeholder in field_types: amounts as currency,
-    counts as number, dates as date. Untyped placeholders print as strings.
+    counts and rates as number, dates as date. Untyped placeholders print as
+    strings. A rate like a tax percentage is a number with the % sign written
+    as static text beside it ("Tax (<Tax Rate>%)"), never part of the value.
   - You cannot place images or logos; where one belongs, use the business name
     styled as a heading and say so in notes.
 
@@ -251,7 +259,10 @@ def _decorated_objects(body: dict, specs: list, field_types: dict) -> list:
         if not entry:
             continue
         declared = entry.get("type")
-        if declared in ("string", "currency", "date", "number", "percent"):
+        # "percent" is deliberately absent: see BODY_SCHEMA. A reply that
+        # somehow carries it falls through to the placeholder's default type
+        # rather than arming the x100 formatter.
+        if declared in ("string", "currency", "date", "number"):
             obj["type"] = obj["value_type"] = declared
         if entry.get("on_missing") in ("BLANK", "BLOCK"):
             obj["on_missing"] = entry["on_missing"]
