@@ -18,8 +18,8 @@ import threading
 
 from sqlalchemy import select
 
-from app.csr.chunking import chunk_extraction
-from app.csr.extraction import ExtractorUnavailable, UnsupportedSource, extract
+from app.docgen.chunking import chunk_extraction
+from app.docgen.extraction import ExtractorUnavailable, UnsupportedSource, extract
 from app.db import SessionLocal
 from app.models import CsrChunk, CsrDocument
 from app.storage import abs_path
@@ -30,6 +30,14 @@ DOC_TYPES = (
     "protocol", "sap", "tlf", "narrative", "ib", "icf", "crf",
     "randomization", "prior_csr", "other",
 )
+
+#: This module's chunking policy, bound explicitly at every call rather than
+#: left to the shared engine's defaults. The engine defaults to these values
+#: today, which is exactly why the binding is written out: a default that
+#: silently stops matching would move every TLF citation onto the wrong page
+#: and the draft would still read perfectly.
+PAGE_LOCAL_TYPES = ("tlf", "narrative")
+TABLE_LABEL = "Table"
 
 #: What a CSR cannot be written without (spec §4).
 REQUIRED_DOC_TYPES = ("protocol", "sap", "tlf")
@@ -72,7 +80,9 @@ def ingest_document(document_id: str) -> None:
         document.page_count = extraction.page_count
         _set_status(db, document, "chunking")
         try:
-            rows = chunk_extraction(extraction, doc_type=document.doc_type)
+            rows = chunk_extraction(extraction, doc_type=document.doc_type,
+                                    page_local_types=PAGE_LOCAL_TYPES,
+                                    table_label=TABLE_LABEL)
         except Exception as exc:  # noqa: BLE001
             _set_status(db, document, "failed",
                         error=f"The file could not be split into sources: {exc}")

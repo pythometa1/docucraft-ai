@@ -1,9 +1,15 @@
 """An Extraction split into the pieces a section is allowed to cite.
 
-Pure: no session, no filesystem, no embedding call. It takes the dataclasses
-`app.csr.extraction` produced and returns dicts shaped like `CsrChunk` rows,
-so the whole splitting policy can be tested without a database and stays the
-same whatever the caller does with the rows.
+Shared by every document module (CSR, CMC, ...). Pure: no session, no
+filesystem, no embedding call. It takes the dataclasses `docgen.extraction`
+produced and returns dicts shaped like a chunk row, so the whole splitting
+policy can be tested without a database and stays the same whatever the
+caller does with the rows.
+
+Two things vary by module and arrive as arguments rather than as edits here:
+which document types treat a page as a hard boundary, and the word a table's
+header line is introduced by. Both default to what the clinical module has
+always used, so a caller that does not care is not made to choose.
 
 The policy exists because retrieval only ever returns whole chunks, which
 makes the chunk -- not the document -- the unit a writer cites:
@@ -25,12 +31,19 @@ TARGET_TOKENS = 1000
 OVERLAP_TOKENS = 120
 MAX_TABLE_TOKENS = 1200
 
-#: Doc types whose pages are hard boundaries. A TLF page is one table plus
-#: the footnotes belonging to THAT table; a chunk spanning the page break
-#: attaches page 12's "excludes 3 patients" to page 13's table, and a footnote
-#: read against the wrong table is a wrong number with a citation on it. A
-#: safety narrative is one patient per document section for the same reason.
+#: Doc types whose pages are hard boundaries, as the clinical module set them.
+#: A TLF page is one table plus the footnotes belonging to THAT table; a chunk
+#: spanning the page break attaches page 12's "excludes 3 patients" to page
+#: 13's table, and a footnote read against the wrong table is a wrong number
+#: with a citation on it. A safety narrative is one patient per document
+#: section for the same reason. A module with different boundaries passes its
+#: own tuple to `chunk_extraction`.
 PAGE_LOCAL_TYPES = ("tlf", "narrative")
+
+#: What a table's header line calls it. Clinical output is Tables, Listings
+#: and Figures and renders them all as "Table"; a module whose sources are
+#: specifications or batch records passes its own word.
+TABLE_LABEL = "Table"
 
 #: Longest line still plausible as a heading. Past this it is a sentence, and
 #: a sentence stored as `section_hint` tells a reviewer nothing about where in
@@ -277,7 +290,7 @@ def _render_row(cells) -> str:
     return " | ".join(str(cell or "").replace("|", r"\|") for cell in cells)
 
 
-def _header_line(table) -> str:
+def _header_line(table, label: str = TABLE_LABEL) -> str:
     """The line that makes the table findable by id.
 
     Always first in the chunk, and repeated in every part of a split table,
@@ -288,12 +301,12 @@ def _header_line(table) -> str:
     table_id = (getattr(table, "table_id", None) or "").strip()
     title = (getattr(table, "title", None) or "").strip()
     if table_id and title:
-        return f"Table {table_id} -- {title}"
+        return f"{label} {table_id} -- {title}"
     if table_id:
-        return f"Table {table_id}"
+        return f"{label} {table_id}"
     if title:
         return title
-    return "Table (untitled)"
+    return f"{label} (untitled)"
 
 
 #: The words a post-text caption starts with. Stripped before a caption row is
@@ -349,14 +362,14 @@ def _drop_caption_rows(rows, header_line: str) -> list:
     return rows
 
 
-def _table_chunks(table) -> list:
+def _table_chunks(table, table_label: str = TABLE_LABEL) -> list:
     rows = [[str(cell or "").strip() for cell in (row or ())]
             for row in (getattr(table, "rows", None) or ())]
     rows = [row for row in rows if any(row)]
     if not rows:
         return []
 
-    header_line = _header_line(table)
+    header_line = _header_line(table, table_label)
     rows = _drop_caption_rows(rows, header_line)
     column_header = _render_row(rows[0])
     prefix = f"{header_line}\n{column_header}"
@@ -398,16 +411,22 @@ def _table_chunks(table) -> list:
 
 # ------------------------------------------------------------------ entry point
 
-def chunk_extraction(extraction, *, doc_type: str) -> list:
-    """`CsrChunk`-shaped dicts for one extracted document.
+def chunk_extraction(extraction, *, doc_type: str,
+                     page_local_types=PAGE_LOCAL_TYPES,
+                     table_label: str = TABLE_LABEL) -> list:
+    """Chunk-shaped dicts for one extracted document.
 
     Prose first in page order, then the tables. Not interleaved: a table
     lifted out of a spreadsheet has no page to interleave AT, and ordering
     chunks by a page number half of them do not have would be an invented
     sequence rather than the document's own.
+
+    `page_local_types` and `table_label` are the module's, not this module's --
+    see the header. Their defaults are the clinical values, so the caller that
+    forgets them gets yesterday's behaviour rather than a subtly different one.
     """
     kind = (doc_type or "").strip().lower()
-    chunks = _narrative_chunks(_units(extraction, page_local=kind in PAGE_LOCAL_TYPES))
+    chunks = _narrative_chunks(_units(extraction, page_local=kind in tuple(page_local_types)))
     for table in getattr(extraction, "tables", None) or ():
-        chunks.extend(_table_chunks(table))
+        chunks.extend(_table_chunks(table, table_label=table_label))
     return [chunk for chunk in chunks if chunk["content"].strip()]

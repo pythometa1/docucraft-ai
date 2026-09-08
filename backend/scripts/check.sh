@@ -106,6 +106,13 @@ FLOORS = {
     # is a wrong number that looks deliberate, so every branch of the
     # all-or-nothing rule is exercised.
     "clinical/derivations.py": 95,
+    # The shared document engine. Every module's sources pass through these:
+    # a chunking bug does not produce a wrong sentence, it produces a right
+    # sentence citing the wrong page, which no reviewer can catch by reading.
+    "docgen/chunking.py": 90,
+    "docgen/extraction.py": 85,
+    "docgen/markers.py": 90,
+    "docgen/ranking.py": 88,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

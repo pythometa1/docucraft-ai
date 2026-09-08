@@ -13,10 +13,10 @@ import importlib
 import docx
 import pytest
 
-from app.csr.chunking import (
+from app.docgen.chunking import (
     MAX_TABLE_TOKENS, OVERLAP_TOKENS, TARGET_TOKENS, chunk_extraction, estimate_tokens,
 )
-from app.csr.extraction import (
+from app.docgen.extraction import (
     ExtractedPage, ExtractedTable, Extraction, ExtractorUnavailable, UnsupportedSource,
     extract, table_identity,
 )

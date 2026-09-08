@@ -1,6 +1,7 @@
 """Turn one uploaded source file into pages and tables, and nothing else.
 
-The whole CSR pipeline is downstream of this module, so it holds one line:
+Every document module's pipeline is downstream of this one, so it holds a
+single line:
 what comes out was IN the file. No summarising, no repair, no filling of a
 blank cell with a plausible zero -- a fabricated number that reaches a chunk
 becomes a fabricated number with a citation on it, which is the one defect a
@@ -15,7 +16,7 @@ Two consequences shape the code:
   and a QC reviewer both refer to it.
 * Optional readers are imported INSIDE the function that needs them.
   PyMuPDF and striprtf are not installed here, and an import at module scope
-  would take the entire CSR router down at startup over a file type nobody in
+  would take a whole module's router down at startup over a file type nobody in
   this deployment uploads. A missing reader is one file type refused with the
   pip package named in the message, not an outage.
 """
@@ -416,6 +417,6 @@ def extract(path: str, *, mime_type: str | None = None) -> Extraction:
         hint = _LEGACY_HINTS.get(suffix)
         detail = f" -- {hint}" if hint else ""
         raise UnsupportedSource(
-            f"{suffix or 'this file'} cannot be read as a CSR source{detail}. "
+            f"{suffix or 'this file'} cannot be read as a source document{detail}. "
             f"Supported: {', '.join(sorted(_EXTRACTORS))}")
     return extractor(path)
