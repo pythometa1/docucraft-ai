@@ -451,3 +451,117 @@ def test_document_list_filters(app_client, published_csr_manifest):
     by_project = app_client.get("/api/v1/clinical-documents", headers=_auth(token),
                                 params={"project_id": "no-such-project"}).json()["items"]
     assert not by_project
+
+
+# ------------------------------------------------- review-hardening cases
+
+def test_nan_and_comma_cells_leave_the_total_honestly_blank():
+    """Decimal('NaN') constructs without raising, and '1,5' is 1.5 in half
+    the world -- both must mean 'no total', never a printed guess."""
+    cols = [{"source_key": "n", "type": "number"}]
+    assert "total_n" not in derive_row_totals([{"n": "5"}, {"n": "NaN"}], cols)
+    assert "total_n" not in derive_row_totals([{"n": "inf"}], cols)
+    assert "total_n" not in derive_row_totals([{"n": "1,5"}], cols)
+    assert derive_row_totals([{"n": "1.5"}, {"n": 2}], cols)["total_n"] == "3.5"
+
+
+def test_a_caller_cannot_fabricate_a_derived_total(app_client, published_csr_manifest):
+    """When a column cannot sum, its honest blank must not be fillable by a
+    caller-typed fields['total_...'] wearing the server's clothes."""
+    token, project_id, manifest_id = published_csr_manifest
+    rows = [dict(DISPOSITION_ROWS[0]),
+            {"site_name": "Delhi", "subjects_enrolled": "n/a",
+             "subjects_completed": 1, "subjects_withdrawn": 0}]
+    res = app_client.post("/api/v1/clinical-documents:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "document_type": "csr", "study": STUDY, "rows": rows,
+        "fields": {**FIELDS, "total_subjects_enrolled": "999"},
+        "version_label": "1.0"})
+    assert res.status_code == 201, res.text
+    record = app_client.get(f"/api/v1/clinical-documents/{res.json()['id']}",
+                            headers=_auth(token)).json()["source_record"]
+    assert "total_subjects_enrolled" not in record  # not 999, not anything
+    # Columns that DID sum still carry the server's own figure.
+    assert record["total_subjects_completed"] == "71"
+
+
+def test_rows_cannot_be_smuggled_through_fields(app_client, org_a):
+    """An optional table with no rows must stay empty: a row list hidden in
+    fields[<collection>] would bypass the row filter and the derivations."""
+    token, project_id = org_a
+    made = app_client.post(
+        "/api/v1/template-blueprints", headers=_auth(token),
+        json={"name": "ICF smuggle", "kit": "clinical_icf", "project_id": project_id})
+    published = app_client.post(
+        f"/api/v1/template-blueprints/{made.json()['id']}:publish",
+        headers=_auth(token), json={"recompile": False})
+    manifest_id = published.json()["manifest_id"]
+
+    res = app_client.post("/api/v1/clinical-documents:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "document_type": "icf", "study": STUDY, "rows": [],
+        "fields": {"purpose_description": "p", "procedures_description": "p",
+                   "risks_description": "r", "benefits_description": "b",
+                   "participant_name": "____",
+                   "visits": [{"visit_name": "Ghost", "visit_week": 1,
+                               "visit_procedures": "smuggled"}]},
+        "version_label": "1.0"})
+    assert res.status_code == 201, res.text
+    record = app_client.get(f"/api/v1/clinical-documents/{res.json()['id']}",
+                            headers=_auth(token)).json()["source_record"]
+    assert "visits" not in record
+
+
+def test_an_inline_study_with_only_a_title_is_refused(app_client, published_csr_manifest):
+    """The error text says 'at least a protocol number', and the gate agrees."""
+    token, project_id, manifest_id = published_csr_manifest
+    res = app_client.post("/api/v1/clinical-documents:generate", headers=_auth(token), json={
+        "manifest_id": manifest_id, "project_id": project_id,
+        "document_type": "csr", "study": {"title": "A study with no protocol"},
+        "rows": DISPOSITION_ROWS, "fields": FIELDS})
+    assert res.status_code == 422
+    assert res.json()["detail"]["error"]["code"] == "CLINICAL_NEEDS_STUDY"
+
+
+def test_a_template_whose_collection_clashes_or_is_unnamed_is_refused(
+        app_client, published_csr_manifest):
+    """iterate_over = 'document_number' would have the rows list clobber the
+    allocated number; an empty iterate_over would file rows under a name the
+    renderer never looks up. Both are template defects, both refuse loudly."""
+    token, project_id, manifest_id = published_csr_manifest
+
+    from app.db import SessionLocal
+    from app.models import TemplateManifest
+
+    def set_iterate_over(value):
+        db = SessionLocal()
+        try:
+            m = db.get(TemplateManifest, manifest_id)
+            blocks = [dict(b) for b in (m.blocks or [])]
+            for b in blocks:
+                if str(b.get("object_type") or "").upper() == "TABLE_ROW":
+                    b["iterate_over"] = value
+            m.blocks = blocks
+            db.commit()
+        finally:
+            db.close()
+
+    original = "disposition_rows"
+    payload = {
+        "manifest_id": manifest_id, "project_id": project_id,
+        "document_type": "csr", "study": STUDY,
+        "rows": DISPOSITION_ROWS, "fields": FIELDS, "version_label": "1.0"}
+    try:
+        set_iterate_over("document_number")
+        clash = app_client.post("/api/v1/clinical-documents:generate",
+                                headers=_auth(token), json=payload)
+        assert clash.status_code == 422
+        assert clash.json()["detail"]["error"]["code"] == "CLINICAL_BAD_TEMPLATE"
+
+        set_iterate_over("")
+        unnamed = app_client.post("/api/v1/clinical-documents:generate",
+                                  headers=_auth(token), json=payload)
+        assert unnamed.status_code == 422
+        assert unnamed.json()["detail"]["error"]["code"] == "CLINICAL_BAD_TEMPLATE"
+    finally:
+        set_iterate_over(original)

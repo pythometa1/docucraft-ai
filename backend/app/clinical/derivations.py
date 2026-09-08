@@ -43,10 +43,19 @@ def derive_row_totals(rows: list, columns: list) -> dict:
                 complete = False
                 break
             try:
-                total += Decimal(str(raw).replace(",", "").strip())
+                value = Decimal(str(raw).strip())
             except (InvalidOperation, ValueError):
                 complete = False
                 break
+            # NaN and Infinity *construct* without raising, and "Total
+            # enrolled: NaN" is exactly the confident-looking wrong number
+            # this module exists to refuse. Commas are refused the same way:
+            # "1,5" is 1.5 in half the world and 15 in the other, and a guess
+            # off by 10x is worse than the honest blank.
+            if not value.is_finite():
+                complete = False
+                break
+            total += value
         if complete:
             # format(..., "f"), never str(normalize()): Decimal("120").normalize()
             # prints 1.2E+2, and a total in scientific notation on a study

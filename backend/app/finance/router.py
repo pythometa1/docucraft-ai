@@ -3,7 +3,7 @@ that turns a manifest plus line items into a stored, numbered invoice.
 
 The generation itself is `generation.single.generate_one` -- the same core the
 manifest endpoint uses -- wrapped in what makes an invoice an invoice: the
-money is computed server-side in Decimal (`app.invoicing`), the number comes
+money is computed server-side in Decimal (`app.finance.invoicing`), the number
 from an org-scoped sequence (`app.numbering`), and both happen inside the one
 transaction that also stores the document. A failed fill therefore rolls the
 number allocation back instead of burning INV-0042 on a document that never
@@ -24,11 +24,11 @@ from sqlalchemy.orm import Session
 from app.audit.service import log_audit
 from app.authz import APPROVE_DOCUMENT, has_capability, require
 from app.db import get_db
-from app.generation.single import FillFailed, generate_one
+from app.generation.single import FillFailed, _next_display_id, generate_one
 from app.finance.invoicing import UncomputableAmount, compute_totals
 from app.metrics import record_qa_overrides
 from app.models import (
-    Counter, Customer, Invoice, Project, TemplateFile, TemplateManifest,
+    Customer, Invoice, Project, TemplateFile, TemplateManifest,
     TemplateVersion, User, now,
 )
 from app.numbering import INVOICE_KEY, allocate
@@ -143,16 +143,6 @@ def delete_customer(customer_id: str, db: Session = Depends(get_db),
 
 
 # ---------------------------------------------------------------- workspace
-
-def _next_display_id(db: Session, counter_name: str, start: int) -> int:
-    counter = db.get(Counter, counter_name)
-    if counter is None:
-        counter = Counter(name=counter_name, value=start)
-        db.add(counter)
-    counter.value += 1
-    db.flush()
-    return counter.value
-
 
 def _workspace_project(db: Session, user: User) -> Project:
     """The org's Invoices project, created on first use.

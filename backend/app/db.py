@@ -1,8 +1,23 @@
+import uuid
+from datetime import datetime, timezone
+
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import settings
 from app.tenancy import apply_scope_to_session, release_org_scope
+
+
+def uid() -> str:
+    """Primary-key default for every table. Lives HERE, in the leaf the model
+    modules already import `Base` from, so a service's models module
+    (app/finance/models.py, ...) never has to import back into the middle of
+    `app.models`'s own initialisation to get it."""
+    return str(uuid.uuid4())
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
 
 def _connect_args() -> dict:
     """Driver options that make the two backends agree about time.

@@ -10,7 +10,7 @@ import { BatchProgressPanel, useBatchWatch, type BatchWatch } from "@/components
 import { motion } from "framer-motion";
 import { EASE_OUT, FadeIn, Stagger, StaggerItem, SwapIn, useReducedMotionFlag } from "@/components/motion";
 import { ErrorBanner } from "@/components/error-banner";
-import { ClinicalStudio } from "@/components/clinical-studio";
+import { ClinicalStudio, hasClinicalService } from "@/components/clinical-studio";
 import { InvoiceStudio } from "@/components/invoice-studio";
 import { PolishedEmpty, SkeletonBar, StageSkeleton } from "@/components/skeletons";
 import { plainly } from "@/components/processing-banner";
@@ -166,7 +166,8 @@ function ProjectDetail() {
   // same header, different machine underneath. documentType wins for Invoice:
   // the taxonomy keeps the two disjoint, but the tiebreak is stated anyway.
   const isInvoiceProject = project.documentType === "Invoice";
-  const isClinicalProject = !isInvoiceProject && project.function === "Clinical";
+  const isClinicalProject =
+    !isInvoiceProject && project.function === "Clinical" && hasClinicalService(project.documentType);
   const hasVerticalStudio = isInvoiceProject || isClinicalProject;
 
   const activeKey = active ?? firstIncomplete;

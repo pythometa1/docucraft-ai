@@ -25,10 +25,10 @@ from app.authz import APPROVE_DOCUMENT, has_capability, require
 from app.clinical.derivations import derive_row_totals
 from app.clinical.service import DOC_TYPES
 from app.db import get_db
-from app.generation.single import FillFailed, generate_one
+from app.generation.single import FillFailed, _next_display_id, generate_one
 from app.metrics import record_qa_overrides
 from app.models import (
-    ClinicalDocument, Counter, Project, Study, TemplateFile, TemplateManifest,
+    ClinicalDocument, Project, Study, TemplateFile, TemplateManifest,
     TemplateVersion, User, now,
 )
 from app.numbering import allocate
@@ -150,16 +150,6 @@ def delete_study(study_id: str, db: Session = Depends(get_db),
 
 # ---------------------------------------------------------------- workspace
 
-def _next_display_id(db: Session, counter_name: str, start: int) -> int:
-    counter = db.get(Counter, counter_name)
-    if counter is None:
-        counter = Counter(name=counter_name, value=start)
-        db.add(counter)
-    counter.value += 1
-    db.flush()
-    return counter.value
-
-
 def _workspace_project(db: Session, user: User, doc_type_label: str) -> Project:
     """The org's project for this clinical document type, created on first use.
 
@@ -237,15 +227,15 @@ def list_clinical_documents(study_id: str | None = None,
     return {"items": [_document_out(d) for d in rows]}
 
 
-@router.get("/clinical-documents/{document_id}")
-def get_clinical_document(document_id: str, db: Session = Depends(get_db),
+@router.get("/clinical-documents/{clinical_document_id}")
+def get_clinical_document(clinical_document_id: str, db: Session = Depends(get_db),
                           user: User = Depends(get_current_user)):
-    doc = _owned_clinical_document(db, document_id, user)
+    doc = _owned_clinical_document(db, clinical_document_id, user)
     return {**_document_out(doc), "source_record": doc.source_record}
 
 
-@router.post("/clinical-documents/{document_id}:void")
-def void_clinical_document(document_id: str, db: Session = Depends(get_db),
+@router.post("/clinical-documents/{clinical_document_id}:void")
+def void_clinical_document(clinical_document_id: str, db: Session = Depends(get_db),
                            user: User = Depends(require(APPROVE_DOCUMENT))):
     """Mark a clinical document void. The row and its number remain -- a
     numbering with silent gaps is what voiding exists to avoid.
@@ -253,7 +243,7 @@ def void_clinical_document(document_id: str, db: Session = Depends(get_db),
     Gated on APPROVE_DOCUMENT, exactly like voiding an invoice: it is the
     sign-off decision run backwards, and a role that cannot approve a study
     document has no business cancelling one."""
-    doc = _owned_clinical_document(db, document_id, user)
+    doc = _owned_clinical_document(db, clinical_document_id, user)
     if doc.status == "void":
         raise error("CLINICAL_DOCUMENT_ALREADY_VOID",
                     "This document is already void.", 409)
@@ -371,12 +361,31 @@ def generate_clinical_document(body: ClinicalGenerateRequest,
         raise error("CLINICAL_NEEDS_ROWS",
                     "This template's table repeats per record and is required -- "
                     "add at least one row.", 422)
-    if not ((snapshot.get("protocol_number") or "").strip()
-            or (snapshot.get("title") or "").strip()):
+    if not (snapshot.get("protocol_number") or "").strip():
         raise error(
             "CLINICAL_NEEDS_STUDY",
             "A clinical document is about a study: pass study_id from the study book, or "
             "an inline study with at least a protocol number.", 422)
+
+    # -- what the server owns, the caller cannot supply. Without this, an
+    # incomplete column's honestly-absent total would let a caller-typed
+    # fields["total_subjects_enrolled"] print as if the server had derived it,
+    # and fields[<collection name>] would smuggle rows past the filter above. --
+    reserved_keys: set = set()
+    collection_key = None
+    if spec is not None:
+        collection_key = str(spec.get("iterate_over") or "").strip()
+        if not collection_key:
+            raise error(
+                "CLINICAL_BAD_TEMPLATE",
+                "This template's repeating table names no collection to iterate over. "
+                "Fix the template and publish it again.", 422)
+        reserved_keys.add(collection_key)
+        reserved_keys.add("row_count")
+        for column in spec.get("columns") or ():
+            source_key = str((column or {}).get("source_key") or "").strip()
+            if source_key:
+                reserved_keys.add(f"total_{source_key}")
 
     totals = derive_row_totals(rows, (spec or {}).get("columns") or [])
     doc_date = _parse_date(body.document_date, "document_date") or now()
@@ -406,13 +415,22 @@ def generate_clinical_document(body: ClinicalGenerateRequest,
         "indication": snapshot.get("indication"),
         **totals,
     }
-    if spec is not None and rows:
+    if collection_key is not None and rows:
         # Under the manifest's own collection name (disposition_rows, visits,
         # amendment_items, or whatever a model-authored template chose) --
-        # never a name hardcoded here.
-        computed[str(spec.get("iterate_over") or "rows")] = rows
+        # never a name hardcoded here. A template whose collection name is
+        # also a computed scalar would have the rows list clobber a number or
+        # a date, so the clash is refused loudly rather than resolved quietly.
+        if collection_key in computed:
+            raise error(
+                "CLINICAL_BAD_TEMPLATE",
+                f"This template's repeating table is named {collection_key!r}, which is "
+                "also a value this endpoint computes. Rename the collection in the "
+                "template.", 422)
+        computed[collection_key] = rows
     source_record = {
-        **{k: v for k, v in body.fields.items() if v is not None},
+        **{k: v for k, v in body.fields.items()
+           if v is not None and k not in reserved_keys},
         **{k: v for k, v in computed.items() if v is not None},
     }
 

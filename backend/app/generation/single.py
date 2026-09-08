@@ -60,8 +60,10 @@ def _next_display_id(db: Session, counter_name: str, start: int) -> int:
     The read-modify-write here is racy without the lock: two concurrent
     generations both read value N and both store N+1, and two documents share
     a display id. SQLite's single writer makes the plain path equivalent
-    there. (The older copies of this helper in `routers/projects.py` and
-    `batch_runner.py` predate the lock and carry the same race.)
+    there. The finance and clinical routers import THIS helper for their lazy
+    workspace projects -- a third unlocked copy is how the race came back once
+    already. (The older copies in `routers/projects.py` and `batch_runner.py`
+    predate the lock and still carry it.)
     """
     lock = db.get_bind().dialect.name == "postgresql"
     counter = db.get(Counter, counter_name, with_for_update=True if lock else None)

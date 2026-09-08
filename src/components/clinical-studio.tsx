@@ -58,6 +58,14 @@ function serviceFor(documentType: string): { service: string; docTypeKey: string
   return SERVICE_BY_DOC_TYPE[documentType] ?? SERVICE_BY_DOC_TYPE["Clinical Study Report"];
 }
 
+/** Whether this studio actually serves a document type. The project page
+ *  gates on this, so a NEW clinical document type added to the taxonomy gets
+ *  the generic pipeline until it gets a real service here -- never a CSR
+ *  prompt pack and a CSR-#### number wearing the wrong label. */
+export function hasClinicalService(documentType: string): boolean {
+  return documentType in SERVICE_BY_DOC_TYPE;
+}
+
 const CLINICAL_COMPUTED = {
   ids: CLINICAL_SERVER_COMPUTED_FIELD_IDS,
   pattern: CLINICAL_COMPUTED_PATTERN,
@@ -546,15 +554,16 @@ function ClinicalWizard({ projectId, documentType, onIssued, onViewAll }: {
   // shown only when every row parses, the same honesty rule the server's
   // Decimal derivation applies before a total may print.
   const rowPreview = useMemo(() => {
-    const cleanRows = rows.filter((row) => Object.values(row).some((v) => v !== "" && v != null));
+    const cleanRows = rows.filter((row) => Object.values(row).some((v) => v != null && String(v).trim() !== ""));
     const sums: { label: string; value: number }[] = [];
     for (const column of spec?.columns ?? []) {
       if (column.type !== "number" && column.type !== "currency") continue;
       let total = 0;
       let complete = cleanRows.length > 0;
       for (const row of cleanRows) {
-        const n = Number(row[column.source_key]);
-        if (row[column.source_key] === "" || row[column.source_key] == null || !Number.isFinite(n)) {
+        const cell = row[column.source_key];
+        const n = Number(cell);
+        if (cell == null || String(cell).trim() === "" || !Number.isFinite(n)) {
           complete = false;
           break;
         }
@@ -572,12 +581,12 @@ function ClinicalWizard({ projectId, documentType, onIssued, onViewAll }: {
 
   async function generate() {
     if (!manifest) return;
-    if (!studyId && !oneOff.protocol_number.trim() && !oneOff.title.trim()) {
+    if (!studyId && !oneOff.protocol_number.trim()) {
       toast.error("A clinical document is about a study — pick one or type at least a protocol number.");
       setStep(1);
       return;
     }
-    const cleanRows = rows.filter((row) => Object.values(row).some((v) => v !== "" && v != null));
+    const cleanRows = rows.filter((row) => Object.values(row).some((v) => v != null && String(v).trim() !== ""));
     setResult(null);
     try {
       const generated = await api.generateClinicalDocument({
@@ -755,11 +764,12 @@ function ClinicalWizard({ projectId, documentType, onIssued, onViewAll }: {
           <ReviewStep
             studyName={
               selectedStudy?.protocol_number
-              ?? (oneOff.protocol_number.trim() || oneOff.title.trim() || "— no study yet —")
+              ?? (oneOff.protocol_number.trim() || "— no study yet —")
             }
             documentType={documentType}
             rowCount={rowPreview.count}
             hasTable={spec !== null}
+            requiredRows={spec?.required === true}
             onBack={() => setStep(2)}
             onGenerate={generate}
           />
@@ -977,11 +987,12 @@ function TemplateStep({ projectId, documentType, onReady }: {
 
 /* ------------------------------------------------------------------ steps 3-4 */
 
-function ReviewStep({ studyName, documentType, rowCount, hasTable, onBack, onGenerate }: {
+function ReviewStep({ studyName, documentType, rowCount, hasTable, requiredRows, onBack, onGenerate }: {
   studyName: string;
   documentType: string;
   rowCount: number;
   hasTable: boolean;
+  requiredRows: boolean;
   onBack: () => void;
   onGenerate: () => Promise<void>;
 }) {
@@ -1015,7 +1026,7 @@ function ReviewStep({ studyName, documentType, rowCount, hasTable, onBack, onGen
         </Button>
         <Button
           onClick={async () => { setBusy(true); try { await onGenerate(); } finally { setBusy(false); } }}
-          disabled={busy}
+          disabled={busy || (requiredRows && rowCount === 0)}
         >
           <Stethoscope className="mr-1.5 h-4 w-4" />
           {busy ? "Generating…" : "Generate document"}

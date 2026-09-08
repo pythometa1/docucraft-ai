@@ -2,8 +2,9 @@
 
 Imported from the tail of `app.models`, so the single `from app import models`
 in alembic/env.py registers these on Base.metadata with everything else. The
-one rule of that arrangement: this module may import from `app.models` only
-names defined above its tail import block (`uid`, `now` -- top of the file).
+one rule of that arrangement: this module never imports from `app.models` --
+everything it needs (`Base`, `uid`, `now`) lives in the `app.db` leaf, so
+importing THIS module first cannot meet a partially initialised `app.models`.
 """
 
 from datetime import datetime
@@ -13,8 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db import Base
-from app.models import now, uid
+from app.db import Base, now, uid
 
 
 class Study(Base):

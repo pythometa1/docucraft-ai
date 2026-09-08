@@ -1,5 +1,4 @@
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import (
     JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text,
@@ -7,17 +6,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db import Base
+# Re-exported on purpose: half the codebase writes `from app.models import now`.
+from app.db import Base, now, uid  # noqa: F401
 from app.retrieval.embeddings import VectorColumn
 from app.retrieval.vector import DEFAULT_DIMENSIONS
-
-
-def uid() -> str:
-    return str(uuid.uuid4())
-
-
-def now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 class Organization(Base):
@@ -1340,8 +1332,8 @@ class NumberSequence(Base):
 
 # Service verticals' registry tables, imported last and re-exported so
 # `from app.models import Customer` keeps working everywhere it is written.
-# These imports MUST stay at the tail: service model modules import `uid` and
-# `now` back from this module mid-initialisation, which is safe only because
-# those names are defined above this line.
+# The service model modules import `uid`/`now` from `app.db` (the leaf), never
+# from here -- importing back into this module mid-initialisation is exactly
+# the partially-initialized-module crash that rule exists to prevent.
 from app.clinical.models import ClinicalDocument, Study  # noqa: E402,F401
 from app.finance.models import Customer, Invoice  # noqa: E402,F401
