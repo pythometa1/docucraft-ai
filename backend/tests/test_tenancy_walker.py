@@ -50,7 +50,7 @@ def org_a_resources(app_client, two_orgs):
     """
     from app.db import SessionLocal
     from app.models import (
-        ClinicalDocument, Conversation, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
+        ClinicalDocument, Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
         GenerationJob, Invoice, Mapping, Project, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
@@ -152,6 +152,11 @@ def org_a_resources(app_client, two_orgs):
                                  sort_order=0)
         db.add(csr_section)
         db.flush()
+        csr_document = CsrDocument(org_id=org, csr_project_id=csr_project.id,
+                                   doc_type="protocol", original_filename="protocol.txt",
+                                   storage_path="csr/none/none.txt", uploaded_by=user.id)
+        db.add(csr_document)
+        db.flush()
 
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
@@ -165,6 +170,7 @@ def org_a_resources(app_client, two_orgs):
             "customer_id": customer.id, "invoice_id": invoice.id,
             "study_id": study.id, "clinical_document_id": clinical_doc.id,
             "csr_project_id": csr_project.id, "csr_section_id": csr_section.id,
+            "csr_document_id": csr_document.id,
         }
         db.commit()
     finally:
@@ -330,6 +336,23 @@ ROUTES: list[dict] = [
      "body": {"source": "builtin_ich_e3"}},
     {"method": "GET", "path": "/csr/projects/{csr_project_id}/sections"},
     {"method": "PATCH", "path": "/csr/sections/{csr_section_id}", "body": {"enabled": False}},
+    # The CSR module's sources and drafts. These carry the study documents
+    # themselves -- protocols, safety narratives, patient-level listings --
+    # so a wrong-tenant read here is the leak the whole module is careful
+    # about, and a wrong-tenant WRITE would put one sponsor's protocol into
+    # another's report.
+    {"method": "GET", "path": "/csr/projects/{csr_project_id}/documents"},
+    {"method": "POST", "path": "/csr/projects/{csr_project_id}/documents",
+     "files": [("files", ("x.txt", b"x", "text/plain")), ("doc_types", (None, "protocol"))]},
+    {"method": "POST", "path": "/csr/projects/{csr_project_id}/process"},
+    {"method": "GET", "path": "/csr/projects/{csr_project_id}/processing-status"},
+    {"method": "PATCH", "path": "/csr/documents/{csr_document_id}", "body": {"doc_type": "sap"}},
+    {"method": "DELETE", "path": "/csr/documents/{csr_document_id}"},
+    {"method": "POST", "path": "/csr/documents/{csr_document_id}/retry"},
+    {"method": "POST", "path": "/csr/sections/{csr_section_id}/generate", "body": {}},
+    {"method": "GET", "path": "/csr/sections/{csr_section_id}/draft"},
+    {"method": "PUT", "path": "/csr/sections/{csr_section_id}/draft", "body": {"content": "x"}},
+    {"method": "PATCH", "path": "/csr/sections/{csr_section_id}/status", "body": {"status": "draft"}},
 ]
 
 

@@ -21,7 +21,7 @@ import {
 import { toast } from "sonner";
 
 import { api } from "@/lib/api";
-import type { CsrProject, CsrSection, Study } from "@/lib/types";
+import type { CsrProject, CsrReadiness, CsrSection, Study } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -29,6 +29,8 @@ import { ErrorBanner } from "@/components/error-banner";
 import { StageSkeleton } from "@/components/skeletons";
 import { SwapIn } from "@/components/motion";
 import { StudyDialog } from "@/components/clinical-studio";
+import { CsrSources } from "@/components/csr-sources";
+import { CsrEditor } from "@/components/csr-editor";
 import { cn } from "@/lib/utils";
 
 const BLINDING_OPTIONS = [
@@ -305,7 +307,9 @@ function CsrWizard({ projectId, onCreated }: { projectId: string; onCreated: () 
 /* ------------------------------------------------------------ overview */
 
 function CsrOverview({ csr, onChanged }: { csr: CsrProject; onChanged: () => void }) {
+  const [tab, setTab] = useState<"sources" | "write" | "structure">("sources");
   const [sections, setSections] = useState<CsrSection[] | null>(null);
+  const [readiness, setReadiness] = useState<CsrReadiness | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -315,6 +319,14 @@ function CsrOverview({ csr, onChanged }: { csr: CsrProject; onChanged: () => voi
       .catch(() => { if (live) setSections([]); });
     return () => { live = false; };
   }, [csr.id]);
+
+  // The writing tab only means anything once the required sources are indexed:
+  // a section drafted from nothing is a section of [DATA NEEDED].
+  useEffect(() => {
+    if (readiness?.ready_to_generate && tab === "sources" && sections?.some((s) => s.status !== "not_started")) {
+      setTab("write");
+    }
+  }, [readiness?.ready_to_generate]);
 
   async function toggle(section: CsrSection) {
     setBusy(section.id);
@@ -330,8 +342,8 @@ function CsrOverview({ csr, onChanged }: { csr: CsrProject; onChanged: () => voi
 
   async function purge() {
     if (!window.confirm(
-      "Delete this CSR project? Its sections and (in later milestones) its uploaded "
-      + "sources, index and drafts are purged. The portal project itself remains.")) return;
+      "Delete this CSR project? Its uploaded sources, their index, every draft and "
+      + "its section tree are purged. The portal project itself remains.")) return;
     setBusy("purge");
     try {
       await api.csrDeleteProject(csr.id);
@@ -345,6 +357,8 @@ function CsrOverview({ csr, onChanged }: { csr: CsrProject; onChanged: () => voi
   }
 
   const depth = (n: string) => n.split(".").length - 1;
+  const approved = (sections ?? []).filter((s) => !s.is_container && s.enabled && s.status === "approved").length;
+  const writable = (sections ?? []).filter((s) => !s.is_container && s.enabled).length;
 
   return (
     <div className="space-y-4">
@@ -352,73 +366,126 @@ function CsrOverview({ csr, onChanged }: { csr: CsrProject; onChanged: () => voi
         <div className="space-y-1 text-sm">
           <div className="flex items-center gap-2 font-semibold text-foreground">
             <FlaskConical className="h-4 w-4 text-brand" />
-            {csr.study?.protocol_number ?? "—"}
-            {csr.compound_name && <span className="text-muted-foreground">· {csr.compound_name}</span>}
+            {csr.study?.protocol_number ?? "\u2014"}
+            {csr.compound_name && <span className="text-muted-foreground">\u00b7 {csr.compound_name}</span>}
           </div>
           {csr.study?.title && <div className="text-muted-foreground">{csr.study.title}</div>}
           <div className="text-xs text-muted-foreground">
             {[csr.study?.sponsor, csr.study?.phase && `Phase ${csr.study.phase}`,
               csr.study?.indication, csr.therapeutic_area,
               BLINDING_OPTIONS.find(([v]) => v === csr.blinding)?.[1]]
-              .filter(Boolean).join(" · ")}
+              .filter(Boolean).join(" \u00b7 ")}
           </div>
         </div>
-        <Button variant="outline" onClick={purge} disabled={busy !== null}
-                className="text-destructive hover:bg-destructive/10">
-          <Trash2 className="mr-1.5 h-4 w-4" /> Delete CSR
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-        Next milestone: upload and index the source documents (protocol, SAP, TLFs) —
-        the section tree below is ready and waiting for them.
-      </div>
-
-      <div className="rounded-xl border border-border bg-card">
-        <div className="border-b border-border px-4 py-3 text-sm font-semibold text-foreground">
-          ICH E3 sections
+        <div className="flex items-center gap-3">
+          {writable > 0 && (
+            <div className="text-right text-xs">
+              <div className="text-muted-foreground">Approved</div>
+              <div className="text-sm font-semibold text-foreground">{approved}/{writable}</div>
+            </div>
+          )}
+          <Button variant="outline" onClick={purge} disabled={busy !== null}
+                  className="text-destructive hover:bg-destructive/10">
+            <Trash2 className="mr-1.5 h-4 w-4" /> Delete CSR
+          </Button>
         </div>
-        {sections === null ? (
-          <div className="p-4"><StageSkeleton lines={4} /></div>
-        ) : (
-          <ul className="divide-y divide-border/60">
-            {sections.map((section) => (
-              <li key={section.id}
-                  className={cn("flex items-center justify-between gap-3 px-4 py-2 text-sm",
-                                !section.enabled && "opacity-50")}>
-                <div className="flex min-w-0 items-baseline gap-2"
-                     style={{ paddingLeft: `${depth(section.section_number) * 16}px` }}>
-                  <span className="font-mono text-xs text-muted-foreground">{section.section_number}</span>
-                  <span className={cn("truncate", section.is_container ? "font-semibold text-foreground" : "text-foreground")}>
-                    {section.title}
-                  </span>
-                </div>
-                <div className="flex shrink-0 items-center gap-3">
-                  {!section.is_container && (
-                    <>
-                      <span className="text-xs text-muted-foreground">{STATUS_LABEL[section.status] ?? section.status}</span>
-                      <button
-                        onClick={() => toggle(section)}
-                        disabled={busy !== null}
-                        className={cn(
-                          "rounded-full border px-2 py-0.5 text-xs font-medium transition-colors",
-                          section.enabled
-                            ? "border-success/40 bg-success/10 text-success"
-                            : "border-border text-muted-foreground hover:text-foreground",
-                        )}
-                        title={section.enabled ? "Included in the report — click to exclude" : "Excluded — click to include"}
-                      >
-                        {section.enabled ? "Included" : "Excluded"}
-                      </button>
-                    </>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
       </div>
+
+      <div className="flex gap-1 border-b border-border">
+        {([["sources", "Source documents", FileText],
+           ["write", "Write the report", Wand2],
+           ["structure", "Structure", ListTree]] as const).map(([key, title, Icon]) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={cn(
+              "inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors",
+              tab === key
+                ? "border-brand text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Icon className="h-4 w-4" /> {title}
+          </button>
+        ))}
+      </div>
+
+      <SwapIn k={tab}>
+        {tab === "sources" && (
+          <CsrSources csrProjectId={csr.id} onReadiness={setReadiness} />
+        )}
+
+        {tab === "write" && (
+          sections === null ? <StageSkeleton lines={5} />
+            : !readiness?.ready_to_generate ? (
+              <div className="space-y-3 rounded-xl border border-border bg-card p-6 text-center">
+                <AlertTriangle className="mx-auto h-6 w-6 text-warning" />
+                <p className="text-sm text-foreground">
+                  The required sources are not indexed yet.
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Every section is written only from what you upload. Add the protocol,
+                  the statistical analysis plan and the statistical outputs, process them,
+                  then come back \u2014 a section drafted from nothing is a section of gaps.
+                </p>
+                <Button variant="outline" onClick={() => setTab("sources")}>Go to source documents</Button>
+              </div>
+            ) : (
+              <CsrEditor
+                csrProjectId={csr.id}
+                sections={sections}
+                onSectionsChanged={setSections}
+              />
+            )
+        )}
+
+        {tab === "structure" && (
+          <div className="rounded-xl border border-border bg-card">
+            <div className="border-b border-border px-4 py-3 text-sm font-semibold text-foreground">
+              ICH E3 sections
+            </div>
+            {sections === null ? (
+              <div className="p-4"><StageSkeleton lines={4} /></div>
+            ) : (
+              <ul className="divide-y divide-border/60">
+                {sections.map((section) => (
+                  <li key={section.id}
+                      className={cn("flex items-center justify-between gap-3 px-4 py-2 text-sm",
+                                    !section.enabled && "opacity-50")}>
+                    <div className="flex min-w-0 items-baseline gap-2"
+                         style={{ paddingLeft: `${depth(section.section_number) * 16}px` }}>
+                      <span className="font-mono text-xs text-muted-foreground">{section.section_number}</span>
+                      <span className={cn("truncate", section.is_container ? "font-semibold text-foreground" : "text-foreground")}>
+                        {section.title}
+                      </span>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      {!section.is_container && (
+                        <>
+                          <span className="text-xs text-muted-foreground">{STATUS_LABEL[section.status] ?? section.status}</span>
+                          <button
+                            onClick={() => toggle(section)}
+                            disabled={busy !== null}
+                            className={cn(
+                              "rounded-full border px-2 py-0.5 text-xs font-medium transition-colors",
+                              section.enabled
+                                ? "border-success/40 bg-success/10 text-success"
+                                : "border-border text-muted-foreground hover:text-foreground",
+                            )}
+                            title={section.enabled ? "Included in the report \u2014 click to exclude" : "Excluded \u2014 click to include"}
+                          >
+                            {section.enabled ? "Included" : "Excluded"}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </SwapIn>
     </div>
   );
 }

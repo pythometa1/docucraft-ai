@@ -12,7 +12,7 @@
 import type {
   AnalyticsKpis, AnalyticsRange, Blueprint, BlueprintBody, BlueprintVersion,
   ClinicalDocGenerated, ClinicalDocSummary, CompileReport,
-  CsrProject, CsrSection,
+  CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
 } from "@/lib/types";
@@ -481,6 +481,38 @@ export const api = {
     request<{ items: CsrSection[] }>("GET", `/csr/projects/${id}/sections`),
   csrToggleSection: (sectionId: string, enabled: boolean) =>
     request<CsrSection>("PATCH", `/csr/sections/${sectionId}`, { json: { enabled } }),
+  csrListDocuments: (id: string) =>
+    request<{ items: CsrDocument[]; readiness: CsrReadiness }>("GET", `/csr/projects/${id}/documents`),
+  /** Multipart: every file carries its own doc_type tag, in order. */
+  csrUploadDocuments: async (id: string, files: { file: File; doc_type: string }[]) => {
+    const form = new FormData();
+    for (const entry of files) {
+      form.append("files", entry.file);
+      form.append("doc_types", entry.doc_type);
+    }
+    return request<{ items: CsrDocument[] }>("POST", `/csr/projects/${id}/documents`, { formData: form });
+  },
+  csrRetagDocument: (documentId: string, doc_type: string) =>
+    request<CsrDocument>("PATCH", `/csr/documents/${documentId}`, { json: { doc_type } }),
+  csrDeleteDocument: (documentId: string) =>
+    request<{ deleted: boolean; purged_chunks: number }>("DELETE", `/csr/documents/${documentId}`),
+  csrProcess: (id: string) =>
+    request<{ queued: number; poll: string }>("POST", `/csr/projects/${id}/process`),
+  csrRetryDocument: (documentId: string) =>
+    request<{ queued: number }>("POST", `/csr/documents/${documentId}/retry`),
+  csrProcessingStatus: (id: string) =>
+    request<{ items: CsrDocument[]; total: number; settled: number; in_flight: boolean; readiness: CsrReadiness }>(
+      "GET", `/csr/projects/${id}/processing-status`),
+  csrGenerateSection: (sectionId: string, instruction?: string) =>
+    request<CsrDraft & { section: CsrSection; data_needed: string[] }>(
+      "POST", `/csr/sections/${sectionId}/generate`, { json: { instruction } }),
+  csrGetDraft: (sectionId: string, version?: number) =>
+    request<{ section: CsrSection; draft: CsrDraft | null; versions: number[]; sources: CsrSource[] }>(
+      "GET", `/csr/sections/${sectionId}/draft`, { query: { version } }),
+  csrSaveDraft: (sectionId: string, content: string) =>
+    request<CsrDraft>("PUT", `/csr/sections/${sectionId}/draft`, { json: { content } }),
+  csrSetSectionStatus: (sectionId: string, status: string) =>
+    request<CsrSection>("PATCH", `/csr/sections/${sectionId}/status`, { json: { status } }),
   /** A whole template, authored by a model from a plain description. The server
    *  proves the result (emit round-trip) before persisting, and stands a kit in
    *  -- reason recorded in `generation` -- when no model is configured. */

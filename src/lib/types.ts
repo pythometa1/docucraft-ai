@@ -494,6 +494,61 @@ export type CsrProject = {
   updated_at: string;
 };
 
+export type CsrDocument = {
+  id: string;
+  doc_type: string;
+  filename: string;
+  mime_type: string | null;
+  size_bytes: number;
+  page_count: number | null;
+  processing_status: string; // queued | parsing | chunking | indexing | done | failed
+  error_message: string | null;
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CsrReadiness = {
+  required: { doc_type: string; uploaded: boolean; indexed: boolean }[];
+  recommended: { doc_type: string; uploaded: boolean; indexed: boolean }[];
+  missing_required: string[];
+  ready_to_generate: boolean;
+};
+
+export type CsrCitation = {
+  id: string;
+  marker: string;
+  document_id: string | null;
+  chunk_id: string | null;
+  page: number | null;
+  table_ref: string | null;
+  cited_value: string | null;
+};
+
+export type CsrDraft = {
+  id: string;
+  version: number;
+  content: string;
+  created_by: string; // "ai" or a user id
+  model: string | null;
+  generation_params: Record<string, unknown>;
+  created_at: string;
+  citations: CsrCitation[];
+};
+
+/** One retrieved chunk as the Sources panel shows it. */
+export type CsrSource = {
+  marker: string;
+  chunk_id: string;
+  document_id: string;
+  filename: string | null;
+  doc_type: string;
+  page: number | null;
+  table_id: string | null;
+  is_table: boolean;
+  content: string;
+};
+
 /** One column of a §6 TABLE_ROW: the token in the prototype row, the key each
  *  line-item record supplies, and how the value renders. */
 export type TableRowColumn = {

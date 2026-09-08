@@ -95,6 +95,9 @@ OPERATION_BY_CAPABILITY = {
     "Editing a template": AUTHORING,
     "Explaining a template": AUTHORING,
     "Authoring a template from a description": AUTHORING,
+    # The CSR module drafts prose from retrieved study documents: a
+    # generation, not an authoring step -- the template already exists.
+    "Drafting a clinical study report section": GENERATE,
     "Suggesting a document edit": EDIT,
     "Chat": CHAT,
     "Token-template generation": GENERATE,
