@@ -69,7 +69,8 @@ def ingest_document(document_id: str) -> None:
         _set_status(db, document, "parsing")
         try:
             extraction = extract(str(abs_path(document.storage_path)),
-                                 mime_type=document.mime_type)
+                                 mime_type=document.mime_type,
+                                 source_name=document.original_filename)
         except (UnsupportedSource, ExtractorUnavailable) as exc:
             _set_status(db, document, "failed", error=str(exc))
             return

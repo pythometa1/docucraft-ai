@@ -347,7 +347,7 @@ def _extract_xlsx(path: str) -> Extraction:
     return Extraction(pages=[], tables=tables, page_count=0)
 
 
-def _extract_csv(path: str) -> Extraction:
+def _extract_csv(path: str, source_name: str | None = None) -> Extraction:
     text = _read_text(path)
     # Sniffed, because a semicolon-delimited European export read with a comma
     # delimiter parses as one column: every number lands in the first cell and
@@ -360,7 +360,7 @@ def _extract_csv(path: str) -> Extraction:
     rows = _clean_rows(list(csv.reader(text.splitlines(), delimiter=delimiter)))
     if not rows:
         return Extraction(pages=[], tables=[], page_count=0)
-    stem = os.path.splitext(os.path.basename(path))[0]
+    stem = source_name or os.path.splitext(os.path.basename(path))[0]
     table_id, title = table_identity(rows, caption=stem)
     return Extraction(
         pages=[],
@@ -397,7 +397,8 @@ _EXTRACTORS = {
 }
 
 
-def extract(path: str, *, mime_type: str | None = None) -> Extraction:
+def extract(path: str, *, mime_type: str | None = None,
+            source_name: str | None = None) -> Extraction:
     """Read `path` into pages and tables.
 
     Raises UnsupportedSource for a type with no extractor and
@@ -419,4 +420,12 @@ def extract(path: str, *, mime_type: str | None = None) -> Extraction:
         raise UnsupportedSource(
             f"{suffix or 'this file'} cannot be read as a source document{detail}. "
             f"Supported: {', '.join(sorted(_EXTRACTORS))}")
+    # `source_name` is the name the uploader gave the file. It matters because
+    # a caption feeds table identification downstream, and what sits on disk
+    # is a generated id: a stored name like
+    # "493b45e1-9fdc-43fe-82c4-5e8f71c77142" contains "-82c4-", which reads as
+    # a storage temperature of 82C to anything looking for one. Machine names
+    # must never reach a caption.
+    if source_name and extractor is _extract_csv:
+        return extractor(path, source_name)
     return extractor(path)

@@ -11,6 +11,7 @@ import { motion } from "framer-motion";
 import { EASE_OUT, FadeIn, Stagger, StaggerItem, SwapIn, useReducedMotionFlag } from "@/components/motion";
 import { ErrorBanner } from "@/components/error-banner";
 import { ClinicalStudio, hasClinicalService } from "@/components/clinical-studio";
+import { CmcWorkspace } from "@/components/cmc-workspace";
 import { CsrWorkspace } from "@/components/csr-workspace";
 import { InvoiceStudio } from "@/components/invoice-studio";
 import { PolishedEmpty, SkeletonBar, StageSkeleton } from "@/components/skeletons";
@@ -175,7 +176,12 @@ function ProjectDetail() {
   const isClinicalProject =
     !isInvoiceProject && !isCsrProject
     && project.function === "Clinical" && hasClinicalService(project.documentType);
-  const hasVerticalStudio = isInvoiceProject || isCsrProject || isClinicalProject;
+  // A Quality-CMC project is the quality dossier's home, whatever its
+  // document type: 3.2.S, 3.2.P and an APQR are deliverables inside one
+  // dossier rather than three different screens.
+  const isCmcProject = project.function === "Quality-CMC";
+  const hasVerticalStudio =
+    isInvoiceProject || isCsrProject || isClinicalProject || isCmcProject;
 
   const activeKey = active ?? firstIncomplete;
   const activeIdx = STAGES.findIndex((s) => s.key === activeKey);
@@ -259,6 +265,8 @@ function ProjectDetail() {
         <InvoiceStudio project={project} />
       ) : isCsrProject ? (
         <CsrWorkspace project={project} />
+      ) : isCmcProject ? (
+        <CmcWorkspace project={project} />
       ) : isClinicalProject ? (
         <ClinicalStudio project={project} />
       ) : (

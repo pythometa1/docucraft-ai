@@ -463,6 +463,169 @@ export type ClinicalDocGenerated = ClinicalDocSummary & {
   locale_source: string;
 };
 
+/* ---- The Quality/CMC module ---- */
+
+export type CmcSite = {
+  id: string;
+  name: string;
+  address: string | null;
+  identifier: string | null;
+  activities: string[];
+  gmp_evidence_document_id: string | null;
+};
+
+export type CmcDeliverable = {
+  id: string;
+  doc_type_key: string;
+  name: string;
+  structure_basis: string | null;
+  template_source: string;
+  status: string;
+  section_count: number | null;
+};
+
+export type CmcDeliverableType = {
+  key: string;
+  name: string;
+  structure_basis: string;
+  section_count: number;
+  required: string[];
+  recommended: string[];
+  /** The milestone that will build it, when it is not built yet. */
+  unbuilt: string | null;
+};
+
+export type CmcSection = {
+  id: string;
+  section_code: string;
+  title: string;
+  sort_order: number;
+  enabled: boolean;
+  is_container: boolean;
+  applicability: string; // applicable | not_applicable | referenced_dmf
+  applicability_justification: string | null;
+  guidance_text: string | null;
+  /** Set when this section renders a table from verified data, not prose. */
+  table_key: string | null;
+  status: string;
+};
+
+export type CmcProject = {
+  id: string;
+  project_id: string;
+  project_name: string | null;
+  product_name: string;
+  inn_or_ds_name: string | null;
+  dosage_form: string | null;
+  strengths: string[];
+  route_of_administration: string | null;
+  submission_type: string | null;
+  target_regions: string[];
+  development_phase: string | null;
+  baseline_version: string | null;
+  status: string;
+  sites: CmcSite[];
+  deliverables: CmcDeliverable[];
+  required_doc_types: string[];
+  recommended_doc_types: string[];
+};
+
+export type CmcDocument = {
+  id: string;
+  doc_type: string;
+  material_id: string | null;
+  filename: string;
+  size_bytes: number;
+  page_count: number | null;
+  processing_status: string;
+  error_message: string | null;
+  chunk_count: number;
+  /** How many structured values this source yielded. Zero is a real answer. */
+  value_count: number;
+};
+
+export type CmcMaterial = {
+  id: string;
+  kind: string;
+  name: string;
+  grade: string | null;
+  compendial_ref: string | null;
+  supplier: string | null;
+  dmf_reference: string | null;
+};
+
+export type CmcBatchRow = {
+  id: string;
+  material_id: string;
+  batch_number: string;
+  batch_size: string | null;
+  batch_size_unit: string | null;
+  manufacture_date: string | null;
+  purpose: string | null;
+  scale: string | null;
+  site_id: string | null;
+  site_name: string | null;
+  source_document_id: string | null;
+};
+
+export type CmcTestRow = {
+  id: string;
+  material_id: string;
+  test_name: string;
+  method_id: string | null;
+  method_type: string | null;
+  unit: string | null;
+  acceptance_criterion_text: string | null;
+  limit_lower: string | null;
+  limit_upper: string | null;
+  limit_operator: string | null;
+  stage: string;
+  source_document_id: string | null;
+};
+
+export type CmcResultRow = {
+  id: string;
+  batch_id: string;
+  batch_number: string | null;
+  material_id: string | null;
+  material_name: string | null;
+  test_id: string;
+  test_name: string | null;
+  acceptance_criterion_text: string | null;
+  storage_condition: string | null;
+  timepoint_months: number | null;
+  orientation: string | null;
+  /** The source's own string. This is what a document prints. */
+  value_text: string;
+  operator: string | null;
+  unit: string | null;
+  extraction_confidence: number;
+  verified_by: string | null;
+  verified_at: string | null;
+  conflict_with_id: string | null;
+  source_document_id: string | null;
+  page: number | null;
+  table_ref: string | null;
+  /** pass | fail | unknown, decided server-side so the grid and QC agree. */
+  conformance: string;
+  conformance_reason: string;
+};
+
+export type CmcDataSummary = {
+  total: number;
+  verified: number;
+  unverified: number;
+  conflicts: number;
+  all_verified: boolean;
+};
+
+export type CmcReadiness = {
+  required: { doc_type: string; uploaded: boolean; indexed: boolean }[];
+  recommended: { doc_type: string; uploaded: boolean; indexed: boolean }[];
+  missing_required: string[];
+  ready_to_generate: boolean;
+};
+
 /* ---- The CSR module ---- */
 
 export type CsrSection = {

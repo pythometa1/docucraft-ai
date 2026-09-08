@@ -261,3 +261,34 @@ def test_a_release_result_never_acquires_a_storage_condition(store):
     rows = db.query(CmcResult).filter(CmcResult.cmc_project_id == cmc.id).all()
     assert len(rows) == 2
     assert all(r.conflict_with_id for r in rows)
+
+
+def test_a_generated_storage_name_never_becomes_a_storage_condition():
+    """Uploads land on disk under a generated id. One of them was
+    "493b45e1-9fdc-43fe-82c4-5e8f71c77142", whose "-82c4-" read as a storage
+    temperature of 82C -- so every stability value in that file was filed
+    under a condition no chamber has ever held. Machine names must not reach a
+    caption, and a temperature must not be found inside a hex string."""
+    assert condition_from_text("493b45e1-9fdc-43fe-82c4-5e8f71c77142") is None
+    assert condition_from_text("82c4") is None
+    assert condition_from_text("a1b2c3d4") is None
+    # The real conditions still read.
+    assert condition_from_text("25C/60RH") == "25C/60RH"
+    assert condition_from_text("Stability - 30 °C / 65 % RH") == "30C/65RH"
+    assert condition_from_text(
+        "493b45e1-9fdc-43fe-82c4-5e8f71c77142 Stability Data - 25C/60RH") == "25C/60RH"
+
+
+def test_extraction_captions_use_the_uploaders_filename(tmp_path):
+    """The caption feeds table identification, so it must be the name a person
+    gave the file rather than the id storage gave it."""
+    from app.docgen.extraction import extract
+
+    stored = tmp_path / "493b45e1-9fdc-43fe-82c4-5e8f71c77142.csv"
+    stored.write_text("Test,Result\nAssay,99.2 %\n")
+
+    machine = extract(str(stored))
+    assert machine.tables[0].title == "493b45e1-9fdc-43fe-82c4-5e8f71c77142"
+
+    human = extract(str(stored), source_name="Stability Data - 25C-60RH")
+    assert human.tables[0].title == "Stability Data - 25C-60RH"

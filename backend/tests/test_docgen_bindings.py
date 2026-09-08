@@ -48,12 +48,14 @@ def test_csr_ingest_binds_its_own_chunking_policy(monkeypatch):
     monkeypatch.setattr(csr_ingest, "chunk_extraction", spy)
     monkeypatch.setattr(csr_ingest, "extract",
                         lambda *a, **k: Extraction(pages=[], tables=[], page_count=0))
+    # The adapter now also names the source for captions; the spy accepts it.
 
     class _Doc:
         id = "doc-1"
         org_id = "org-1"
         csr_project_id = "proj-1"
         doc_type = "tlf"
+        original_filename = "tlf_14_1_1.csv"
         storage_path = "csr/proj-1/x.txt"
         mime_type = "text/plain"
         processing_status = "queued"

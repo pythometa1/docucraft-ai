@@ -68,7 +68,7 @@ _BARE_BATCH_RE = re.compile(r"^[A-Za-z]{0,3}[-/]?\d{2,}[\w./-]*$")
 #: release value nobody can find. Without the leading one, the "26" of a batch
 #: number can start a temperature.
 _CONDITION_RE = re.compile(
-    r"(?<![A-Za-z0-9])(\d{1,2})\s*°?\s*C(?![A-Za-z])"
+    r"(?<![A-Za-z0-9])(\d{1,2})\s*°?\s*C(?![A-Za-z0-9])"
     r"(?:\s*[/±]?\s*(\d{1,2})\s*%?\s*RH)?", re.IGNORECASE)
 _NAMED_CONDITIONS = {
     "long term": "long_term", "long-term": "long_term", "accelerated": "accelerated",

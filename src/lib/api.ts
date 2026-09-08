@@ -12,6 +12,8 @@
 import type {
   AnalyticsKpis, AnalyticsRange, Blueprint, BlueprintBody, BlueprintVersion,
   ClinicalDocGenerated, ClinicalDocSummary, CompileReport,
+  CmcBatchRow, CmcDataSummary, CmcDeliverable, CmcDeliverableType, CmcDocument,
+  CmcMaterial, CmcProject, CmcReadiness, CmcResultRow, CmcSection, CmcSite, CmcTestRow,
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
@@ -455,6 +457,111 @@ export const api = {
     version_label?: string;
     locale?: string;
   }) => request<ClinicalDocGenerated>("POST", "/clinical-documents:generate", { json: body }),
+  /* ---- Quality/CMC: dossier sections and verified quality data ----
+   * Two flows that never mix. Prose is drafted and cited like any section;
+   * the numbers in a specification, a batch analysis or a stability table are
+   * read from uploaded sources, verified by a person in the data grid, and
+   * rendered deterministically. Nothing here ever asks a model for a value. */
+  cmcListProjects: () =>
+    request<{ items: CmcProject[] }>("GET", "/cmc/projects"),
+  cmcCreateProject: (body: {
+    project_id: string;
+    product_name: string;
+    inn_or_ds_name?: string;
+    dosage_form?: string;
+    strengths?: string[];
+    route_of_administration?: string;
+    submission_type?: string;
+    target_regions?: string[];
+    development_phase?: string;
+  }) => request<CmcProject>("POST", "/cmc/projects", { json: body }),
+  cmcGetProject: (id: string) =>
+    request<CmcProject>("GET", `/cmc/projects/${id}`),
+  cmcUpdateProject: (id: string, body: Record<string, unknown>) =>
+    request<CmcProject>("PATCH", `/cmc/projects/${id}`, { json: body }),
+  cmcDeleteProject: (id: string) =>
+    request<{ deleted: boolean; purged: Record<string, number> }>("DELETE", `/cmc/projects/${id}`),
+
+  cmcListSites: (id: string) =>
+    request<{ items: CmcSite[] }>("GET", `/cmc/projects/${id}/sites`),
+  cmcCreateSite: (id: string, body: Partial<CmcSite> & { name: string }) =>
+    request<CmcSite>("POST", `/cmc/projects/${id}/sites`, { json: body }),
+  cmcUpdateSite: (siteId: string, body: Partial<CmcSite>) =>
+    request<CmcSite>("PATCH", `/cmc/sites/${siteId}`, { json: body }),
+  cmcDeleteSite: (siteId: string) =>
+    request<{ deleted: boolean }>("DELETE", `/cmc/sites/${siteId}`),
+
+  cmcDeliverableTypes: () =>
+    request<{ items: CmcDeliverableType[] }>("GET", "/cmc/deliverable-types"),
+  cmcAddDeliverable: (id: string, doc_type_key: string) =>
+    request<CmcDeliverable & { sections: CmcSection[] }>(
+      "POST", `/cmc/projects/${id}/deliverables`, { json: { doc_type_key } }),
+  cmcDeliverableSections: (deliverableId: string) =>
+    request<{ deliverable: CmcDeliverable; items: CmcSection[] }>(
+      "GET", `/cmc/deliverables/${deliverableId}/sections`),
+  cmcRemoveDeliverable: (deliverableId: string) =>
+    request<{ deleted: boolean; purged_sections: number }>(
+      "DELETE", `/cmc/deliverables/${deliverableId}`),
+  cmcPatchSection: (sectionId: string, body: {
+    enabled?: boolean; applicability?: string; applicability_justification?: string;
+  }) => request<CmcSection>("PATCH", `/cmc/sections/${sectionId}`, { json: body }),
+
+  cmcListDocuments: (id: string) =>
+    request<{ items: CmcDocument[]; readiness: CmcReadiness }>(
+      "GET", `/cmc/projects/${id}/documents`),
+  /** Multipart: every file carries its own doc_type, and its material where
+   *  the uploader knows it -- a certificate filed against the wrong material
+   *  is a limit applied to the wrong molecule. */
+  cmcUploadDocuments: (id: string, files: { file: File; doc_type: string; material_id?: string }[]) => {
+    const form = new FormData();
+    const tagged = files.some((f) => f.material_id);
+    for (const entry of files) {
+      form.append("files", entry.file);
+      form.append("doc_types", entry.doc_type);
+      if (tagged) form.append("material_ids", entry.material_id ?? "");
+    }
+    return request<{ items: CmcDocument[] }>("POST", `/cmc/projects/${id}/documents`, { formData: form });
+  },
+  cmcRetagDocument: (documentId: string, body: { doc_type?: string; material_id?: string | null }) =>
+    request<CmcDocument>("PATCH", `/cmc/documents/${documentId}`, { json: body }),
+  cmcDeleteDocument: (documentId: string) =>
+    request<{ deleted: boolean; purged_chunks: number; purged_values: number; kept_verified_values: number }>(
+      "DELETE", `/cmc/documents/${documentId}`),
+  cmcProcess: (id: string) =>
+    request<{ queued: number }>("POST", `/cmc/projects/${id}/process`),
+  cmcRetryDocument: (documentId: string) =>
+    request<{ queued: number }>("POST", `/cmc/documents/${documentId}/retry`),
+  cmcProcessingStatus: (id: string) =>
+    request<{ items: CmcDocument[]; total: number; settled: number; in_flight: boolean; readiness: CmcReadiness }>(
+      "GET", `/cmc/projects/${id}/processing-status`),
+
+  cmcListMaterials: (id: string) =>
+    request<{ items: CmcMaterial[] }>("GET", `/cmc/projects/${id}/materials`),
+  cmcCreateMaterial: (id: string, body: { kind: string; name: string } & Partial<CmcMaterial>) =>
+    request<CmcMaterial>("POST", `/cmc/projects/${id}/materials`, { json: body }),
+
+  cmcBatches: (id: string, params: { material_id?: string; limit?: number; offset?: number } = {}) =>
+    request<{ items: CmcBatchRow[] }>("GET", `/cmc/projects/${id}/data/batches`, { query: params }),
+  cmcSpecifications: (id: string, params: { material_id?: string; limit?: number; offset?: number } = {}) =>
+    request<{ items: CmcTestRow[] }>("GET", `/cmc/projects/${id}/data/specifications`, { query: params }),
+  cmcResults: (id: string, params: { material_id?: string; limit?: number; offset?: number } = {}) =>
+    request<{ items: CmcResultRow[]; total: number; summary: CmcDataSummary }>(
+      "GET", `/cmc/projects/${id}/data/results`, { query: params }),
+  cmcConflicts: (id: string) =>
+    request<{ items: CmcResultRow[]; total: number; summary: CmcDataSummary }>(
+      "GET", `/cmc/projects/${id}/data/conflicts`),
+  /** Correcting a value verifies it in the same act: somebody just read the
+   *  source and typed what it says. The string is stored verbatim. */
+  cmcCorrectResult: (resultId: string, body: {
+    value_text?: string; storage_condition?: string; timepoint_months?: number; verify?: boolean;
+  }) => request<CmcResultRow>("PATCH", `/cmc/results/${resultId}`, { json: body }),
+  cmcVerifyResults: (id: string, body: { result_ids?: string[]; test_id?: string; all_unverified?: boolean }) =>
+    request<{ verified: number; skipped_conflicts: number }>(
+      "POST", `/cmc/projects/${id}/results:verify`, { json: body }),
+  cmcResolveConflict: (resultId: string, keep_result_id: string) =>
+    request<{ id: string; value_text: string; discarded: string }>(
+      "POST", `/cmc/results/${resultId}:resolve`, { json: { keep_result_id } }),
+
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>
     request<{ items: CsrProject[] }>("GET", "/csr/projects"),
