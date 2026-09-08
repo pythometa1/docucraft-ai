@@ -50,7 +50,8 @@ def org_a_resources(app_client, two_orgs):
     """
     from app.db import SessionLocal
     from app.models import (
-        ClinicalDocument, Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
+        ClinicalDocument, CmcDeliverable, CmcProject, CmcSection, CmcSite,
+        Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
         GenerationJob, Invoice, Mapping, Project, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
@@ -158,6 +159,22 @@ def org_a_resources(app_client, two_orgs):
         db.add(csr_document)
         db.flush()
 
+        cmc_project = CmcProject(org_id=org, project_id=project_a,
+                                 product_name="Drug X Tablets", created_by=user.id)
+        db.add(cmc_project)
+        db.flush()
+        cmc_site = CmcSite(org_id=org, cmc_project_id=cmc_project.id,
+                           name="Pune Plant")
+        cmc_deliverable = CmcDeliverable(org_id=org, cmc_project_id=cmc_project.id,
+                                         doc_type_key="ctd_32p")
+        db.add_all([cmc_site, cmc_deliverable])
+        db.flush()
+        cmc_section = CmcSection(org_id=org, cmc_deliverable_id=cmc_deliverable.id,
+                                 section_code="P.5.1", title="Specification",
+                                 sort_order=0)
+        db.add(cmc_section)
+        db.flush()
+
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
             "source_id": sf.id, "draft_id": draft.id, "document_id": gd.id,
@@ -171,6 +188,8 @@ def org_a_resources(app_client, two_orgs):
             "study_id": study.id, "clinical_document_id": clinical_doc.id,
             "csr_project_id": csr_project.id, "csr_section_id": csr_section.id,
             "csr_document_id": csr_document.id,
+            "cmc_project_id": cmc_project.id, "cmc_site_id": cmc_site.id,
+            "cmc_deliverable_id": cmc_deliverable.id, "cmc_section_id": cmc_section.id,
         }
         db.commit()
     finally:
@@ -353,6 +372,22 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/csr/sections/{csr_section_id}/draft"},
     {"method": "PUT", "path": "/csr/sections/{csr_section_id}/draft", "body": {"content": "x"}},
     {"method": "PATCH", "path": "/csr/sections/{csr_section_id}/status", "body": {"status": "draft"}},
+
+    # The Quality/CMC module. Its rows carry manufacturing sites, specification
+    # limits and batch results -- trade secrets and confidential business
+    # information, which is the strictest data the product holds.
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}"},
+    {"method": "PATCH", "path": "/cmc/projects/{cmc_project_id}", "body": {"dosage_form": "x"}},
+    {"method": "DELETE", "path": "/cmc/projects/{cmc_project_id}"},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/sites"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/sites", "body": {"name": "x"}},
+    {"method": "PATCH", "path": "/cmc/sites/{cmc_site_id}", "body": {"name": "x"}},
+    {"method": "DELETE", "path": "/cmc/sites/{cmc_site_id}"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/deliverables",
+     "body": {"doc_type_key": "ctd_32p"}},
+    {"method": "GET", "path": "/cmc/deliverables/{cmc_deliverable_id}/sections"},
+    {"method": "DELETE", "path": "/cmc/deliverables/{cmc_deliverable_id}"},
+    {"method": "PATCH", "path": "/cmc/sections/{cmc_section_id}", "body": {"enabled": False}},
 ]
 
 

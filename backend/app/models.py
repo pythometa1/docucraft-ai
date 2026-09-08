@@ -1336,6 +1336,11 @@ class NumberSequence(Base):
 # from here -- importing back into this module mid-initialisation is exactly
 # the partially-initialized-module crash that rule exists to prevent.
 from app.clinical.models import ClinicalDocument, Study  # noqa: E402,F401
+from app.cmc.models import (  # noqa: E402,F401
+    CmcBatch, CmcBatchFormula, CmcChange, CmcChunk, CmcCitation, CmcDeliverable,
+    CmcDocument, CmcExport, CmcMaterial, CmcProject, CmcResult, CmcSection,
+    CmcSectionDraft, CmcSite, CmcSpecification, CmcTest,
+)
 from app.csr.models import (  # noqa: E402,F401
     CsrChunk, CsrCitation, CsrDocument, CsrProject, CsrSection, CsrSectionDraft,
     CsrTemplate,

@@ -113,6 +113,12 @@ FLOORS = {
     "docgen/extraction.py": 85,
     "docgen/markers.py": 90,
     "docgen/ranking.py": 88,
+    # The CMC module's numeric discipline. `values` is the only thing standing
+    # between a certificate of analysis reporting 0.050 and a dossier printing
+    # 0.05, and `limits` decides whether a batch conformed -- a wrong verdict
+    # there is a conformance claim nobody made. Both fail by looking right.
+    "cmc/values.py": 95,
+    "cmc/limits.py": 92,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

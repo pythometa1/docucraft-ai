@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.rate_limit import rate_limit_by_org
 from app.clinical.router import router as clinical_router
+from app.cmc.router import router as cmc_router
 from app.csr.router import router as csr_router
 from app.finance.router import router as finance_router
 from app.routers import admin, auth, bindings, blueprints, chat, downloads, generation, manifests, metrics, projects, review, reviews, sources, templates
@@ -55,6 +56,7 @@ app.include_router(bindings.router, prefix="/api/v1", dependencies=_rate_limited
 app.include_router(finance_router, prefix="/api/v1", dependencies=_rate_limited)  # the invoice service: client book, numbering, registry
 app.include_router(clinical_router, prefix="/api/v1", dependencies=_rate_limited)  # the clinical service: study book, numbering, registry
 app.include_router(csr_router, prefix="/api/v1", dependencies=_rate_limited)  # the CSR module: ICH E3 drafting for medical writers
+app.include_router(cmc_router, prefix="/api/v1", dependencies=_rate_limited)  # the Quality/CMC module: dossier sections and verified quality data
 app.include_router(review.router, prefix="/api/v1", dependencies=_rate_limited)
 app.include_router(reviews.router, prefix="/api/v1", dependencies=_rate_limited)  # document reviews: a person objecting, as opposed to the engine asking
 app.include_router(metrics.router, prefix="/api/v1", dependencies=_rate_limited)  # §22 metrics and §18 SLOs, READ_AUDIT-gated
