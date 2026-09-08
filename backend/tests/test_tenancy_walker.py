@@ -50,7 +50,8 @@ def org_a_resources(app_client, two_orgs):
     """
     from app.db import SessionLocal
     from app.models import (
-        ClinicalDocument, CmcDeliverable, CmcProject, CmcSection, CmcSite,
+        ClinicalDocument, CmcDeliverable, CmcDocument, CmcProject, CmcResult,
+        CmcSection, CmcSite,
         Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
         GenerationJob, Invoice, Mapping, Project, ReviewComment, ReviewTask, SourceFile, Study,
@@ -174,6 +175,28 @@ def org_a_resources(app_client, two_orgs):
                                  sort_order=0)
         db.add(cmc_section)
         db.flush()
+        cmc_document = CmcDocument(org_id=org, cmc_project_id=cmc_project.id,
+                                   doc_type="coa", original_filename="coa.csv",
+                                   storage_path="cmc/none/none.csv", uploaded_by=user.id)
+        db.add(cmc_document)
+        db.flush()
+        from app.models import CmcBatch, CmcMaterial, CmcTest
+
+        cmc_material = CmcMaterial(org_id=org, cmc_project_id=cmc_project.id,
+                                   kind="drug_product", name="Drug product")
+        db.add(cmc_material)
+        db.flush()
+        cmc_batch = CmcBatch(org_id=org, cmc_project_id=cmc_project.id,
+                             material_id=cmc_material.id, batch_number="B-1")
+        cmc_test = CmcTest(org_id=org, cmc_project_id=cmc_project.id,
+                           material_id=cmc_material.id, test_name="Assay")
+        db.add_all([cmc_batch, cmc_test])
+        db.flush()
+        cmc_result = CmcResult(org_id=org, cmc_project_id=cmc_project.id,
+                               batch_id=cmc_batch.id, test_id=cmc_test.id,
+                               value_text="99.2 %")
+        db.add(cmc_result)
+        db.flush()
 
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
@@ -190,6 +213,8 @@ def org_a_resources(app_client, two_orgs):
             "csr_document_id": csr_document.id,
             "cmc_project_id": cmc_project.id, "cmc_site_id": cmc_site.id,
             "cmc_deliverable_id": cmc_deliverable.id, "cmc_section_id": cmc_section.id,
+            "cmc_document_id": cmc_document.id, "cmc_result_id": cmc_result.id,
+            "entity": "results",
         }
         db.commit()
     finally:
@@ -388,6 +413,26 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/cmc/deliverables/{cmc_deliverable_id}/sections"},
     {"method": "DELETE", "path": "/cmc/deliverables/{cmc_deliverable_id}"},
     {"method": "PATCH", "path": "/cmc/sections/{cmc_section_id}", "body": {"enabled": False}},
+    # The sources and the structured store. These carry specification limits,
+    # batch results and manufacturing detail -- confidential business
+    # information, and the reason the module's own copy says so on every screen.
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/documents"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/documents",
+     "files": [("files", ("x.csv", b"a,b", "text/csv")), ("doc_types", (None, "coa"))]},
+    {"method": "PATCH", "path": "/cmc/documents/{cmc_document_id}", "body": {"doc_type": "coa"}},
+    {"method": "DELETE", "path": "/cmc/documents/{cmc_document_id}"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/process"},
+    {"method": "POST", "path": "/cmc/documents/{cmc_document_id}/retry"},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/processing-status"},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/materials"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/materials",
+     "body": {"kind": "drug_product", "name": "x"}},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/data/{entity}"},
+    {"method": "PATCH", "path": "/cmc/results/{cmc_result_id}", "body": {"value_text": "1"}},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/results:verify",
+     "body": {"all_unverified": True}},
+    {"method": "POST", "path": "/cmc/results/{cmc_result_id}:resolve",
+     "body": {"keep_result_id": "x"}},
 ]
 
 
