@@ -50,7 +50,7 @@ def org_a_resources(app_client, two_orgs):
     """
     from app.db import SessionLocal
     from app.models import (
-        ClinicalDocument, Conversation, Customer, DocumentReview, DocumentVersion, DraftDocument,
+        ClinicalDocument, Conversation, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
         GenerationJob, Invoice, Mapping, Project, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
@@ -143,6 +143,16 @@ def org_a_resources(app_client, two_orgs):
         db.add(clinical_doc)
         db.flush()
 
+        csr_project = CsrProject(org_id=org, project_id=project_a, study_id=study.id,
+                                 created_by=user.id)
+        db.add(csr_project)
+        db.flush()
+        csr_section = CsrSection(org_id=org, csr_project_id=csr_project.id,
+                                 section_number="10.1", title="Disposition of Patients",
+                                 sort_order=0)
+        db.add(csr_section)
+        db.flush()
+
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
             "source_id": sf.id, "draft_id": draft.id, "document_id": gd.id,
@@ -154,6 +164,7 @@ def org_a_resources(app_client, two_orgs):
             "review_id": review.id, "comment_id": comment.id,
             "customer_id": customer.id, "invoice_id": invoice.id,
             "study_id": study.id, "clinical_document_id": clinical_doc.id,
+            "csr_project_id": csr_project.id, "csr_section_id": csr_section.id,
         }
         db.commit()
     finally:
@@ -309,6 +320,16 @@ ROUTES: list[dict] = [
     {"method": "DELETE", "path": "/studies/{study_id}"},
     {"method": "GET", "path": "/clinical-documents/{clinical_document_id}"},
     {"method": "POST", "path": "/clinical-documents/{clinical_document_id}:void"},
+
+    # The CSR module. Its rows name studies, compounds and (in later
+    # milestones) patient-bearing source documents -- the strictest data in
+    # the product, behind the same 404-never-403 rule as everything else.
+    {"method": "GET", "path": "/csr/projects/{csr_project_id}"},
+    {"method": "DELETE", "path": "/csr/projects/{csr_project_id}"},
+    {"method": "POST", "path": "/csr/projects/{csr_project_id}/template",
+     "body": {"source": "builtin_ich_e3"}},
+    {"method": "GET", "path": "/csr/projects/{csr_project_id}/sections"},
+    {"method": "PATCH", "path": "/csr/sections/{csr_section_id}", "body": {"enabled": False}},
 ]
 
 

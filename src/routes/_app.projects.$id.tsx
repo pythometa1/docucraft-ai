@@ -11,6 +11,7 @@ import { motion } from "framer-motion";
 import { EASE_OUT, FadeIn, Stagger, StaggerItem, SwapIn, useReducedMotionFlag } from "@/components/motion";
 import { ErrorBanner } from "@/components/error-banner";
 import { ClinicalStudio, hasClinicalService } from "@/components/clinical-studio";
+import { CsrWorkspace } from "@/components/csr-workspace";
 import { InvoiceStudio } from "@/components/invoice-studio";
 import { PolishedEmpty, SkeletonBar, StageSkeleton } from "@/components/skeletons";
 import { plainly } from "@/components/processing-banner";
@@ -166,9 +167,15 @@ function ProjectDetail() {
   // same header, different machine underneath. documentType wins for Invoice:
   // the taxonomy keeps the two disjoint, but the tiebreak is stated anyway.
   const isInvoiceProject = project.documentType === "Invoice";
+  // The CSR module claims the "Clinical Study Report" document type; the
+  // template studio keeps the other clinical types (amendments, consent
+  // forms, brochures), which really are one-template documents.
+  const isCsrProject =
+    project.function === "Clinical" && project.documentType === "Clinical Study Report";
   const isClinicalProject =
-    !isInvoiceProject && project.function === "Clinical" && hasClinicalService(project.documentType);
-  const hasVerticalStudio = isInvoiceProject || isClinicalProject;
+    !isInvoiceProject && !isCsrProject
+    && project.function === "Clinical" && hasClinicalService(project.documentType);
+  const hasVerticalStudio = isInvoiceProject || isCsrProject || isClinicalProject;
 
   const activeKey = active ?? firstIncomplete;
   const activeIdx = STAGES.findIndex((s) => s.key === activeKey);
@@ -250,6 +257,8 @@ function ProjectDetail() {
 
       {isInvoiceProject ? (
         <InvoiceStudio project={project} />
+      ) : isCsrProject ? (
+        <CsrWorkspace project={project} />
       ) : isClinicalProject ? (
         <ClinicalStudio project={project} />
       ) : (

@@ -12,6 +12,7 @@
 import type {
   AnalyticsKpis, AnalyticsRange, Blueprint, BlueprintBody, BlueprintVersion,
   ClinicalDocGenerated, ClinicalDocSummary, CompileReport,
+  CsrProject, CsrSection,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
 } from "@/lib/types";
@@ -454,6 +455,32 @@ export const api = {
     version_label?: string;
     locale?: string;
   }) => request<ClinicalDocGenerated>("POST", "/clinical-documents:generate", { json: body }),
+  /* ---- CSR module: ICH E3 drafting for medical writers ---- */
+  csrListProjects: () =>
+    request<{ items: CsrProject[] }>("GET", "/csr/projects"),
+  csrCreateProject: (body: {
+    project_id: string;
+    study_id?: string;
+    study?: {
+      protocol_number: string; title?: string; sponsor?: string; phase?: string;
+      indication?: string; principal_investigator?: string;
+    };
+    compound_name?: string;
+    therapeutic_area?: string;
+    blinding?: string;
+    study_design_summary?: string;
+  }) => request<CsrProject>("POST", "/csr/projects", { json: body }),
+  csrGetProject: (id: string) =>
+    request<CsrProject & { sections: CsrSection[] }>("GET", `/csr/projects/${id}`),
+  csrDeleteProject: (id: string) =>
+    request<{ deleted: boolean; purged_sections: number }>("DELETE", `/csr/projects/${id}`),
+  csrChooseTemplate: (id: string, source: string) =>
+    request<{ template: { source: string }; sections: CsrSection[] }>(
+      "POST", `/csr/projects/${id}/template`, { json: { source } }),
+  csrSections: (id: string) =>
+    request<{ items: CsrSection[] }>("GET", `/csr/projects/${id}/sections`),
+  csrToggleSection: (sectionId: string, enabled: boolean) =>
+    request<CsrSection>("PATCH", `/csr/sections/${sectionId}`, { json: { enabled } }),
   /** A whole template, authored by a model from a plain description. The server
    *  proves the result (emit round-trip) before persisting, and stands a kit in
    *  -- reason recorded in `generation` -- when no model is configured. */

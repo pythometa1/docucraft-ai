@@ -463,6 +463,37 @@ export type ClinicalDocGenerated = ClinicalDocSummary & {
   locale_source: string;
 };
 
+/* ---- The CSR module ---- */
+
+export type CsrSection = {
+  id: string;
+  section_number: string;
+  title: string;
+  sort_order: number;
+  enabled: boolean;
+  is_container: boolean;
+  status: string; // not_started | generating | draft | in_review | approved
+  guidance_text: string | null;
+};
+
+export type CsrProject = {
+  id: string;
+  project_id: string;
+  project_name: string | null;
+  study: {
+    id: string; protocol_number: string; title: string | null; sponsor: string | null;
+    phase: string | null; indication: string | null; principal_investigator: string | null;
+  } | null;
+  compound_name: string | null;
+  therapeutic_area: string | null;
+  blinding: string | null;
+  study_design_summary: string | null;
+  status: string; // setup | ready
+  template: { source: string; parsed_at: string | null } | null;
+  created_at: string;
+  updated_at: string;
+};
+
 /** One column of a §6 TABLE_ROW: the token in the prototype row, the key each
  *  line-item record supplies, and how the value renders. */
 export type TableRowColumn = {
