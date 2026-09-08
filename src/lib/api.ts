@@ -13,7 +13,8 @@ import type {
   AnalyticsKpis, AnalyticsRange, Blueprint, BlueprintBody, BlueprintVersion,
   ClinicalDocGenerated, ClinicalDocSummary, CompileReport,
   CmcBatchRow, CmcDataSummary, CmcDeliverable, CmcDeliverableType, CmcDocument,
-  CmcMaterial, CmcProject, CmcReadiness, CmcResultRow, CmcSection, CmcSite, CmcTestRow,
+  CmcDraft, CmcExportRecord, CmcFinding, CmcMaterial, CmcProject, CmcReadiness,
+  CmcRenderedTable, CmcResultRow, CmcSection, CmcSite, CmcSource, CmcTestRow,
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
@@ -561,6 +562,43 @@ export const api = {
   cmcResolveConflict: (resultId: string, keep_result_id: string) =>
     request<{ id: string; value_text: string; discarded: string }>(
       "POST", `/cmc/results/${resultId}:resolve`, { json: { keep_result_id } }),
+
+  cmcPreviewTable: (id: string, tableKey: string, params: { material_id?: string; include_unverified?: boolean } = {}) =>
+    request<CmcRenderedTable>("GET", `/cmc/projects/${id}/tables/${tableKey}`, {
+      query: {
+        material_id: params.material_id,
+        // The query helper serialises strings and numbers; a boolean has to be
+        // spelled the way FastAPI parses it rather than stringified by accident.
+        include_unverified: params.include_unverified === undefined
+          ? undefined : String(params.include_unverified),
+      },
+    }),
+  cmcGenerateSection: (sectionId: string, instruction?: string) =>
+    request<CmcDraft & { section: CmcSection; data_needed: string[]; table_markers: string[] }>(
+      "POST", `/cmc/sections/${sectionId}/generate`, { json: { instruction } }),
+  cmcGetDraft: (sectionId: string, version?: number) =>
+    request<{ section: CmcSection; draft: CmcDraft | null; versions: number[]; sources: CmcSource[]; table_markers: string[] }>(
+      "GET", `/cmc/sections/${sectionId}/draft`, { query: { version } }),
+  cmcSaveDraft: (sectionId: string, content: string) =>
+    request<CmcDraft>("PUT", `/cmc/sections/${sectionId}/draft`, { json: { content } }),
+  cmcSetSectionStatus: (sectionId: string, status: string) =>
+    request<CmcSection>("PATCH", `/cmc/sections/${sectionId}/status`, { json: { status } }),
+  cmcQc: (id: string) =>
+    request<{ findings: CmcFinding[]; blockers: CmcFinding[]; warnings: CmcFinding[]; info: CmcFinding[]; exportable: boolean }>(
+      "GET", `/cmc/projects/${id}/qc`),
+  cmcExport: (id: string, body: {
+    deliverable_id?: string; granularity?: string; citations?: string;
+    draft_watermark?: boolean; override_approval?: boolean;
+  }) => request<CmcExportRecord & { plans: unknown[] }>("POST", `/cmc/projects/${id}/export`, { json: body }),
+  cmcListExports: (id: string) =>
+    request<{ items: CmcExportRecord[] }>("GET", `/cmc/projects/${id}/exports`),
+  cmcDownloadExport: async (exportId: string) => {
+    const res = await fetch(`${API_URL}/cmc/exports/${exportId}/download`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!res.ok) throw new ApiError(res.status, "DOWNLOAD_FAILED", "The export could not be downloaded.");
+    return URL.createObjectURL(await res.blob());
+  },
 
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>

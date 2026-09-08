@@ -626,6 +626,67 @@ export type CmcReadiness = {
   ready_to_generate: boolean;
 };
 
+export type CmcDraft = {
+  id: string;
+  version: number;
+  content: string;
+  created_by: string;
+  model: string | null;
+  generation_params: Record<string, unknown>;
+  created_at: string;
+};
+
+export type CmcSource = {
+  marker: string;
+  chunk_id: string;
+  document_id: string;
+  filename: string | null;
+  doc_type: string;
+  page: number | null;
+  table_id: string | null;
+  is_table: boolean;
+  content: string;
+};
+
+export type CmcRenderedTable = {
+  key: string;
+  title: string;
+  /** The flattened union, for filtering and counting. */
+  columns: string[];
+  rows: string[][];
+  /** The document's own arrangement -- one entry per grid the export writes.
+   *  A stability summary is one grid per batch and condition here and one wide
+   *  union in `rows`, so a screen drawn from `rows` would preview a document
+   *  nobody produces. Render these. */
+  groups: { title: string; columns: string[]; rows: string[][] }[];
+  notes: string[];
+  unverified: number;
+  missing: string[];
+};
+
+export type CmcFinding = {
+  code: string;
+  severity: string; // blocker | warning | info
+  message: string;
+  section_code: string | null;
+  detail: Record<string, unknown>;
+};
+
+export type CmcExportFile = {
+  kind: string;
+  deliverable_id: string;
+  filename: string;
+  storage_path: string;
+};
+
+export type CmcExportRecord = {
+  id: string;
+  granularity: string;
+  files: CmcExportFile[];
+  overridden: boolean;
+  created_at: string;
+};
+
 /* ---- The CSR module ---- */
 
 export type CsrSection = {

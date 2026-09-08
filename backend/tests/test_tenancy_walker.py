@@ -50,8 +50,8 @@ def org_a_resources(app_client, two_orgs):
     """
     from app.db import SessionLocal
     from app.models import (
-        ClinicalDocument, CmcDeliverable, CmcDocument, CmcProject, CmcResult,
-        CmcSection, CmcSite,
+        ClinicalDocument, CmcDeliverable, CmcDocument, CmcExport, CmcProject,
+        CmcResult, CmcSection, CmcSite,
         Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
         GenerationJob, Invoice, Mapping, Project, ReviewComment, ReviewTask, SourceFile, Study,
@@ -197,6 +197,10 @@ def org_a_resources(app_client, two_orgs):
                                value_text="99.2 %")
         db.add(cmc_result)
         db.flush()
+        cmc_export = CmcExport(org_id=org, cmc_project_id=cmc_project.id,
+                               granularity="combined", created_by=user.id)
+        db.add(cmc_export)
+        db.flush()
 
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
@@ -214,7 +218,8 @@ def org_a_resources(app_client, two_orgs):
             "cmc_project_id": cmc_project.id, "cmc_site_id": cmc_site.id,
             "cmc_deliverable_id": cmc_deliverable.id, "cmc_section_id": cmc_section.id,
             "cmc_document_id": cmc_document.id, "cmc_result_id": cmc_result.id,
-            "entity": "results",
+            "entity": "results", "table_key": "spec_table",
+            "cmc_export_id": cmc_export.id,
         }
         db.commit()
     finally:
@@ -433,6 +438,20 @@ ROUTES: list[dict] = [
      "body": {"all_unverified": True}},
     {"method": "POST", "path": "/cmc/results/{cmc_result_id}:resolve",
      "body": {"keep_result_id": "x"}},
+    # Rendering, drafting and export. These reach the deepest into the store --
+    # a table renders every verified value a project holds, and an export
+    # writes them into a file somebody sends to a regulator.
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/tables/{table_key}"},
+    {"method": "POST", "path": "/cmc/sections/{cmc_section_id}/generate", "body": {}},
+    {"method": "GET", "path": "/cmc/sections/{cmc_section_id}/draft"},
+    {"method": "PUT", "path": "/cmc/sections/{cmc_section_id}/draft", "body": {"content": "x"}},
+    {"method": "PATCH", "path": "/cmc/sections/{cmc_section_id}/status",
+     "body": {"status": "draft"}},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/qc"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/export",
+     "body": {"granularity": "combined"}},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/exports"},
+    {"method": "GET", "path": "/cmc/exports/{cmc_export_id}/download"},
 ]
 
 

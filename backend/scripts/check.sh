@@ -119,6 +119,16 @@ FLOORS = {
     # there is a conformance claim nobody made. Both fail by looking right.
     "cmc/values.py": 95,
     "cmc/limits.py": 92,
+    # Flow B end to end. `tables` is the only thing that writes a laboratory
+    # value into a document, and it does so by copying a stored string -- an
+    # untested branch there is a number nobody typed. `qc` decides whether a
+    # dossier may leave the building, and `export` resolves every [TABLE:]
+    # marker at the moment of writing, which is what makes a correction in the
+    # grid reach a document nobody regenerated.
+    "cmc/tables.py": 90,
+    "cmc/qc.py": 88,
+    "cmc/export.py": 85,
+    "cmc/drafting.py": 88,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

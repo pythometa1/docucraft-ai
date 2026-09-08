@@ -19,6 +19,7 @@ retrieves widely rather than retrieving nothing.
 """
 
 from app.cmc import ctd
+from app.cmc import deliverable_trees as extra
 
 #: Every source document type the module accepts. `prior_dossier` is
 #: retrievable for style and for baseline diffing and citable as fact for
@@ -105,25 +106,54 @@ DELIVERABLES = {
         "source_map": {"A.1": ["site_gmp"], "A.2": ["supplier_doc"],
                        "A.3": ["dev_report"], "R.1": ["site_gmp", "method_val_report"]},
     },
-    # Declared so the picker can show what is coming and the registry stays the
-    # single list, but refused at selection time rather than seeded empty: a
-    # deliverable with no sections is a deliverable that looks built and is not.
+    # The Quality Overall Summary is genuinely different: it is DERIVED from
+    # approved 3.2.S/3.2.P sections rather than drafted from sources, so it
+    # stays declared-but-refused until that derivation exists. A deliverable
+    # with no sections is a deliverable that looks built and is not.
     "qos_23": {"name": "Quality Overall Summary (Module 2.3)",
                "structure_basis": "ICH M4Q", "tree": (), "required": (),
-               "recommended": (), "source_map": {}, "unbuilt": "M8"},
+               "recommended": (), "source_map": {},
+               "unbuilt": "the QOS derives from approved 3.2.S and 3.2.P sections"},
     "apqr": {"name": "Annual Product Quality Review",
-             "structure_basis": "EU GMP Chapter 1 and 21 CFR 211.180(e)", "tree": (),
-             "required": (), "recommended": (), "source_map": {}, "unbuilt": "M8"},
+             "structure_basis": "EU GMP Chapter 1 and 21 CFR 211.180(e)",
+             "tree": extra.TREES["apqr"],
+             "required": ("coa", "deviation_capa"),
+             "recommended": ("stability_data", "spec_dp", "pv_report", "supplier_doc"),
+             "source_map": extra.SOURCE_MAPS["apqr"]},
     "method_val": {"name": "Analytical Method Validation Report",
-                   "structure_basis": "ICH Q2", "tree": (), "required": (),
-                   "recommended": (), "source_map": {}, "unbuilt": "M8"},
+                   "structure_basis": "ICH Q2",
+                   "tree": extra.TREES["method_val"],
+                   "required": ("method_sop", "method_val_report"),
+                   "recommended": ("ref_std", "spec_dp", "spec_ds"),
+                   "source_map": extra.SOURCE_MAPS["method_val"]},
     "process_val": {"name": "Process Validation Report",
-                    "structure_basis": "EU GMP Annex 15", "tree": (), "required": (),
-                    "recommended": (), "source_map": {}, "unbuilt": "M8"},
+                    "structure_basis": "EU GMP Annex 15 and the FDA process validation stages",
+                    "tree": extra.TREES["process_val"],
+                    "required": ("pv_report", "bmr"),
+                    "recommended": ("process_flow", "spec_dp", "coa", "deviation_capa"),
+                    "source_map": extra.SOURCE_MAPS["process_val"]},
     "stability_report": {"name": "Stability Study Report",
-                         "structure_basis": "ICH Q1A and Q1E", "tree": (), "required": (),
-                         "recommended": (), "source_map": {}, "unbuilt": "M8"},
+                         "structure_basis": "ICH Q1A and Q1E",
+                         "tree": extra.TREES["stability_report"],
+                         "required": ("stability_data", "stability_protocol"),
+                         "recommended": ("spec_dp", "spec_ds", "method_sop", "ccs"),
+                         "source_map": extra.SOURCE_MAPS["stability_report"]},
 }
+
+#: Which sections of which deliverable render a table rather than prose. The
+#: CTD trees carry their own map in `ctd.DATA_SECTIONS`; the others declare
+#: theirs beside their structure.
+TABLE_SECTIONS = {
+    "ctd_32s": ctd.DATA_SECTIONS,
+    "ctd_32p": ctd.DATA_SECTIONS,
+    "ctd_32ar": {},
+    **extra.TABLE_SECTIONS,
+}
+
+
+def table_key_for(deliverable_key: str, section_code: str) -> str | None:
+    """The table builder a section renders, if it renders one."""
+    return (TABLE_SECTIONS.get(deliverable_key) or {}).get(section_code)
 
 #: Display order in the picker.
 DELIVERABLE_ORDER = ("ctd_32s", "ctd_32p", "ctd_32ar", "qos_23", "apqr",

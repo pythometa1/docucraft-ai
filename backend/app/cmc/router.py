@@ -12,11 +12,12 @@ the structured data store and its review grid (M3), the table renderer (M4)
 and prose generation (M5) build on these rows.
 """
 
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.audit.service import log_audit
@@ -438,8 +439,16 @@ def add_deliverable(cmc_project_id: str, body: DeliverableIn,
                                  template_source="builtin")
     db.add(deliverable)
     db.flush()
-    sections = [CmcSection(org_id=user.org_id, cmc_deliverable_id=deliverable.id, **row)
-                for row in seed_sections(entry["tree"])]
+    # `seed_sections` fills table_key from the CTD map; a non-CTD deliverable
+    # declares its own beside its tree, so the registry decides rather than
+    # the CTD module -- otherwise an APQR's results section would render no
+    # table and nobody would see why.
+    sections = []
+    for row in seed_sections(entry["tree"]):
+        row = {**row,
+               "table_key": registry.table_key_for(body.doc_type_key, row["section_code"])}
+        sections.append(CmcSection(org_id=user.org_id,
+                                   cmc_deliverable_id=deliverable.id, **row))
     db.add_all(sections)
     cp.status = "ready"
     cp.updated_at = now()
@@ -1132,3 +1141,650 @@ def resolve_conflict(cmc_result_id: str, body: ResolveRequest,
     db.refresh(keep)
     return {"id": keep.id, "value_text": keep.value_text,
             "verified_by": keep.verified_by, "discarded": discarded_text}
+
+
+# ------------------------------------------------------------ tables (M4)
+
+def _owned_section_project(db: Session, section: CmcSection, user: User) -> CmcProject:
+    """The dossier a section belongs to, checked as its own object.
+
+    Two hops rather than a join, because the section's org check has already
+    happened and this one is about the project the caller is allowed to touch.
+    """
+    deliverable = _owned_deliverable(db, section.cmc_deliverable_id, user)
+    return _owned_cmc_project(db, deliverable.cmc_project_id, user)
+
+
+@router.get("/cmc/projects/{cmc_project_id}/tables/{table_key}")
+def preview_table(cmc_project_id: str, table_key: str,
+                  material_id: str | None = None,
+                  include_unverified: bool = True,
+                  db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    """What a rendered table would contain, as rows of strings.
+
+    The same builder the export runs, so what the screen shows and what the
+    document prints cannot drift: a preview computed a second way is a preview
+    that reassures about a document nobody has produced.
+    """
+    from app.cmc.tables import BUILDERS, TableUnavailable, render_table
+
+    cp = _owned_cmc_project(db, cmc_project_id, user)
+    if table_key not in BUILDERS:
+        raise error("CMC_UNKNOWN_TABLE",
+                    f"{table_key!r} is not a table this module renders; one of "
+                    f"{', '.join(sorted(BUILDERS))}.", 422)
+    try:
+        rendered = render_table(db, cmc_project_id=cp.id, org_id=user.org_id,
+                                table_key=table_key, material_id=material_id,
+                                include_unverified=include_unverified)
+    except TableUnavailable as exc:
+        raise error("CMC_TABLE_NO_DATA", str(exc), 409)
+    # `groups` is the document's own arrangement -- one grid per table the
+    # export will write. The screen renders that rather than `rows`, which is
+    # a flattened union for QC: a preview drawn from the union would show a
+    # stability summary as one wide grid where the document holds one per
+    # batch and condition, which is a preview of a document nobody produced.
+    return {"key": rendered.key, "title": rendered.title,
+            "columns": rendered.columns, "rows": rendered.rows,
+            "groups": rendered.groups,
+            "notes": rendered.notes, "unverified": rendered.unverified,
+            "missing": rendered.missing}
+
+
+# ------------------------------------------------------- drafting (M5)
+
+def _project_metadata(db: Session, cp: CmcProject) -> dict:
+    """What every section's prompt is told about the product.
+
+    Read at generation time rather than copied at project creation: a dosage
+    form corrected in the setup screen must be corrected in the next draft.
+    """
+    sites = db.scalars(select(CmcSite).where(
+        CmcSite.cmc_project_id == cp.id, CmcSite.deleted_at.is_(None))).all()
+    return {
+        "product_name": cp.product_name,
+        "inn_or_ds_name": cp.inn_or_ds_name,
+        "dosage_form": cp.dosage_form,
+        "strengths": ", ".join(cp.strengths or []),
+        "route_of_administration": cp.route_of_administration,
+        "submission_type": cp.submission_type,
+        "development_phase": cp.development_phase,
+        "target_regions": ", ".join(cp.target_regions or []),
+        "sites": [{"name": s.name, "address": s.address, "identifier": s.identifier,
+                   "activities": s.activities or []} for s in sites],
+    }
+
+
+def _verified_data_summary(db: Session, cp: CmcProject, section: CmcSection) -> dict:
+    """The verified figures this section is allowed to mention in prose.
+
+    Only verified ones, and only as strings. Rule 3 of the prompt lets the
+    model restate a value it can see here, exactly; handing it unverified
+    numbers would make that permission a way for an unchecked figure to reach
+    the narrative without ever passing the grid.
+    """
+    from app.models import CmcResult, CmcTest
+
+    if not section.table_key:
+        return {}
+    rows = db.scalars(select(CmcResult).where(
+        CmcResult.cmc_project_id == cp.id,
+        CmcResult.verified_by.is_not(None)).limit(400)).all()
+    if not rows:
+        return {}
+    tests = {t.id: t for t in db.scalars(select(CmcTest).where(
+        CmcTest.cmc_project_id == cp.id)).all()}
+    summary: dict = {}
+    for row in rows:
+        test = tests.get(row.test_id)
+        if test is None:
+            continue
+        summary.setdefault(test.test_name, []).append({
+            "value": row.value_text,
+            "condition": row.storage_condition,
+            "timepoint_months": row.timepoint_months,
+            "acceptance_criterion": test.acceptance_criterion_text,
+        })
+    return summary
+
+
+class CmcGenerateRequest(BaseModel):
+    instruction: str | None = None
+
+
+@router.post("/cmc/sections/{cmc_section_id}/generate", status_code=201)
+def generate_section(cmc_section_id: str, body: CmcGenerateRequest,
+                     db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """Draft one section's PROSE from the indexed sources.
+
+    Never its tables. A section that carries data is told to emit
+    `[TABLE: key]` and write no numbers of its own, and the marker is resolved
+    at export from the verified store -- which is why a value corrected in the
+    grid reaches every deliverable without a single section being regenerated.
+    """
+    from app.cmc.drafting import draft_section
+    from app.docgen.ranking import build_query, format_extracts, score_chunks
+    from app.models import CmcChunk, CmcSectionDraft, CmcCitation
+    from app.tenancy import llm_policy_for
+
+    section = _owned_section(db, cmc_section_id, user)
+    if section.is_container:
+        raise error("CMC_SECTION_IS_CONTAINER",
+                    "A container heading has no prose of its own; generate its subsections.", 422)
+    if not section.enabled:
+        raise error("CMC_SECTION_DISABLED",
+                    "This section is excluded from the dossier. Include it first.", 409)
+    if section.applicability != "applicable":
+        raise error(
+            "CMC_SECTION_NOT_APPLICABLE",
+            "This section is marked "
+            f"{section.applicability.replace('_', ' ')}; its justification is its content.", 409)
+
+    deliverable = _owned_deliverable(db, section.cmc_deliverable_id, user)
+    cp = _owned_cmc_project(db, deliverable.cmc_project_id, user)
+    entry = registry.DELIVERABLES.get(deliverable.doc_type_key) or {}
+
+    doc_types = registry.source_types_for(deliverable.doc_type_key, section.section_code)
+    statement = select(CmcChunk).where(
+        CmcChunk.org_id == user.org_id, CmcChunk.cmc_project_id == cp.id)
+    if doc_types:
+        statement = statement.where(
+            CmcChunk.doc_type.in_([*doc_types, registry.STYLE_REFERENCE_TYPE]))
+    candidates = list(db.scalars(statement.order_by(CmcChunk.id)))
+    metadata = _project_metadata(db, cp)
+    query = build_query(section_number=section.section_code,
+                        section_title=section.title,
+                        guidance_text=section.guidance_text,
+                        study_metadata={k: v for k, v in metadata.items()
+                                        if isinstance(v, (str, int, float))})
+    scores = score_chunks(query, candidates)
+    ranked = sorted(candidates, key=lambda c: (-scores.get(c.id, 0.0), c.id))
+    chunks = [c for c in ranked if scores.get(c.id, 0.0) > 0][:16]
+    extracts, source_map = format_extracts(
+        chunks, style_reference_type=registry.STYLE_REFERENCE_TYPE)
+
+    section.status = "generating"
+    db.commit()
+    try:
+        result = draft_section(
+            section_code=section.section_code, section_title=section.title,
+            deliverable_name=entry.get("name") or deliverable.doc_type_key,
+            structure_basis=entry.get("structure_basis") or "ICH M4Q",
+            guidance=_guidance_with_table(section),
+            project_metadata=metadata,
+            verified_data=_verified_data_summary(db, cp, section),
+            chunks=chunks, source_map=source_map, extracts=extracts,
+            wanted_doc_types=doc_types, instruction=body.instruction,
+            llm_policy=llm_policy_for(db, user.org_id, project_id=cp.project_id,
+                                      user_id=user.id, subject_type="cmc_section",
+                                      subject_id=section.id))
+    except Exception:
+        section.status = "draft" if _latest_cmc_draft(db, section.id) else "not_started"
+        db.commit()
+        raise
+
+    previous = _latest_cmc_draft(db, section.id)
+    draft = CmcSectionDraft(
+        org_id=user.org_id, cmc_section_id=section.id,
+        version=(previous.version + 1) if previous else 1,
+        content=result.content, created_by="ai", model=result.model,
+        generation_params={"prompt_version": result.prompt_version,
+                           "instruction": body.instruction,
+                           "chunk_ids": [c.id for c in chunks],
+                           "source_map": source_map})
+    db.add(draft)
+    db.flush()
+    for citation in result.citations:
+        db.add(CmcCitation(org_id=user.org_id, draft_id=draft.id, **citation))
+    section.status = "draft"
+    section.updated_at = now()
+    log_audit(db, user, "Generated a CMC section", "cmc_section", section.id,
+              cp.project_id, "info",
+              f"{section.section_code} v{draft.version} ({len(chunks)} sources)")
+    db.commit()
+    db.refresh(draft)
+    return {**_draft_out(draft), "section": _section_out(section),
+            "data_needed": result.data_needed,
+            "table_markers": _table_markers(result.content)}
+
+
+def _guidance_with_table(section) -> str:
+    """The section's guidance, with its table named exactly.
+
+    Rule 2 tells the model to emit `[TABLE: <table_key>]` and never write the
+    numbers itself, but nothing told it WHICH key -- so it invented a
+    plausible one from the document type it had been reading ("spec_dp"), the
+    marker resolved to no builder, and the dossier would have carried the
+    marker text where its specification table belongs. The valid key is known
+    here from the section itself, so it is stated rather than guessed at.
+    """
+    guidance = section.guidance_text or ""
+    if section.table_key:
+        return (f"{guidance}\n\nThis section carries a data table. Emit the single line "
+                f"[TABLE: {section.table_key}] where it belongs and write none of its "
+                f"numbers yourself. {section.table_key} is the ONLY table key that exists "
+                f"for this section; any other key renders as literal text in the dossier.")
+    return (f"{guidance}\n\nThis section carries no data table, so emit no [TABLE: ...] "
+            "marker.") if guidance else guidance
+
+
+def _table_markers(content: str) -> list:
+    from app.cmc.drafting import table_markers
+
+    return table_markers(content)
+
+
+def _latest_cmc_draft(db: Session, section_id: str):
+    from app.models import CmcSectionDraft
+
+    return db.scalar(select(CmcSectionDraft).where(
+        CmcSectionDraft.cmc_section_id == section_id
+    ).order_by(CmcSectionDraft.version.desc()))
+
+
+def _draft_out(draft) -> dict:
+    return {"id": draft.id, "version": draft.version, "content": draft.content,
+            "created_by": draft.created_by, "model": draft.model,
+            "generation_params": draft.generation_params,
+            "created_at": draft.created_at}
+
+
+@router.get("/cmc/sections/{cmc_section_id}/draft")
+def get_cmc_draft(cmc_section_id: str, version: int | None = None,
+                  db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    from app.models import CmcChunk, CmcCitation, CmcDocument, CmcSectionDraft
+
+    section = _owned_section(db, cmc_section_id, user)
+    if version is not None:
+        draft = db.scalar(select(CmcSectionDraft).where(
+            CmcSectionDraft.cmc_section_id == section.id,
+            CmcSectionDraft.version == version))
+    else:
+        draft = _latest_cmc_draft(db, section.id)
+    versions = list(db.scalars(select(CmcSectionDraft.version).where(
+        CmcSectionDraft.cmc_section_id == section.id
+    ).order_by(CmcSectionDraft.version)).all())
+    if draft is None:
+        return {"section": _section_out(section), "draft": None,
+                "versions": versions, "sources": [], "table_markers": []}
+
+    citations = db.scalars(select(CmcCitation).where(
+        CmcCitation.draft_id == draft.id)).all()
+    source_map = (draft.generation_params or {}).get("source_map", [])
+    chunk_ids = [entry.get("chunk_id") for entry in source_map if entry.get("chunk_id")]
+    sources = []
+    if chunk_ids:
+        chunks = {c.id: c for c in db.scalars(select(CmcChunk).where(
+            CmcChunk.id.in_(set(chunk_ids)))).all()}
+        documents = {d.id: d.original_filename for d in db.scalars(select(CmcDocument).where(
+            CmcDocument.cmc_project_id == _owned_section_project(db, section, user).id)).all()}
+        for entry in source_map:
+            chunk = chunks.get(entry.get("chunk_id"))
+            if chunk is None:
+                continue
+            sources.append({
+                "marker": entry.get("marker"), "chunk_id": chunk.id,
+                "document_id": chunk.document_id,
+                "filename": documents.get(chunk.document_id),
+                "doc_type": chunk.doc_type, "page": chunk.page,
+                "table_id": chunk.table_id, "is_table": chunk.is_table,
+                "content": chunk.content,
+            })
+    return {"section": _section_out(section), "draft": _draft_out(draft),
+            "versions": versions, "sources": sources,
+            "citations": [{"id": c.id, "marker": c.marker, "chunk_id": c.chunk_id,
+                           "page": c.page, "table_ref": c.table_ref,
+                           "cited_value": c.cited_value} for c in citations],
+            "table_markers": _table_markers(draft.content)}
+
+
+class CmcDraftEdit(BaseModel):
+    content: str
+
+
+@router.put("/cmc/sections/{cmc_section_id}/draft", status_code=201)
+def edit_cmc_draft(cmc_section_id: str, body: CmcDraftEdit,
+                   db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """A human edit, saved as a new version under that person's name."""
+    from app.docgen.markers import parse_citations
+    from app.models import CmcCitation, CmcSectionDraft
+
+    section = _owned_section(db, cmc_section_id, user)
+    previous = _latest_cmc_draft(db, section.id)
+    source_map = (previous.generation_params or {}).get("source_map", []) if previous else []
+    draft = CmcSectionDraft(
+        org_id=user.org_id, cmc_section_id=section.id,
+        version=(previous.version + 1) if previous else 1,
+        content=body.content, created_by=user.id, model=None,
+        generation_params={"edited_from_version": previous.version if previous else None,
+                           "source_map": source_map})
+    db.add(draft)
+    db.flush()
+    for citation in parse_citations(body.content, source_map):
+        db.add(CmcCitation(org_id=user.org_id, draft_id=draft.id, **citation))
+    if section.status in ("not_started", "generating"):
+        section.status = "draft"
+    section.updated_at = now()
+    log_audit(db, user, "Edited a CMC section", "cmc_section", section.id, None,
+              "info", f"{section.section_code} v{draft.version}")
+    db.commit()
+    db.refresh(draft)
+    return _draft_out(draft)
+
+
+CMC_SECTION_STATUSES = ("draft", "in_review", "approved")
+
+
+class CmcStatusPatch(BaseModel):
+    status: str
+
+
+@router.patch("/cmc/sections/{cmc_section_id}/status")
+def set_cmc_section_status(cmc_section_id: str, body: CmcStatusPatch,
+                           db: Session = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    """Move a section along Draft -> In Review -> Approved.
+
+    Approving a section whose tables draw on unverified values is refused: the
+    approval is what the export gate trusts, and trusting it means it cannot
+    have been given over numbers nobody checked.
+    """
+    from app.models import CmcResult
+
+    section = _owned_section(db, cmc_section_id, user)
+    if body.status not in CMC_SECTION_STATUSES:
+        raise error("CMC_BAD_STATUS",
+                    f"status must be one of {', '.join(CMC_SECTION_STATUSES)}.", 422)
+    if _latest_cmc_draft(db, section.id) is None and section.applicability == "applicable":
+        raise error("CMC_NOTHING_TO_REVIEW", "This section has no draft yet.", 409)
+
+    if body.status == "approved" and section.table_key:
+        cp = _owned_section_project(db, section, user)
+        unverified = db.scalar(select(func.count()).select_from(CmcResult).where(
+            CmcResult.cmc_project_id == cp.id, CmcResult.verified_by.is_(None)))
+        if unverified:
+            raise error(
+                "CMC_UNVERIFIED_DATA",
+                f"{unverified} value{'s' if unverified != 1 else ''} feeding this section's "
+                "tables have not been verified. Check them in Data review first.", 409)
+
+    section.status = body.status
+    section.updated_at = now()
+    log_audit(db, user, "Set a CMC section status", "cmc_section", section.id, None,
+              "success" if body.status == "approved" else "info",
+              f"{section.section_code} -> {body.status}")
+    db.commit()
+    return _section_out(section)
+
+
+# ------------------------------------------------------------ QC (M6)
+
+@router.get("/cmc/projects/{cmc_project_id}/qc")
+def run_project_qc(cmc_project_id: str, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """Every check, grouped by severity.
+
+    Run on demand rather than continuously: these queries read the whole
+    structured store, and a dashboard that recomputed them on every keystroke
+    would make the grid unusable on the fifty-batch programmes this module
+    exists for.
+    """
+    from app.cmc.qc import run_qc
+
+    cp = _owned_cmc_project(db, cmc_project_id, user)
+    findings = run_qc(db, cmc_project_id=cp.id, org_id=user.org_id)
+    grouped: dict = {"blocker": [], "warning": [], "info": []}
+    for finding in findings:
+        grouped.setdefault(finding.severity, []).append(finding.as_dict())
+    return {"findings": [f.as_dict() for f in findings],
+            "blockers": grouped["blocker"], "warnings": grouped["warning"],
+            "info": grouped["info"],
+            "exportable": not grouped["blocker"]}
+
+
+# ------------------------------------------------------------ export (M7)
+
+class ExportRequest(BaseModel):
+    #: Which deliverable to write. Omitted means every one in the dossier.
+    deliverable_id: str | None = None
+    #: ectd_leaves | combined | both
+    granularity: str = "combined"
+    #: inline | stripped | appendix -- what happens to [S#] citation markers.
+    citations: str = "inline"
+    draft_watermark: bool = False
+    #: Export unapproved sections anyway. Audited, never silent.
+    override_approval: bool = False
+
+
+GRANULARITIES = ("ectd_leaves", "combined", "both")
+CITATION_MODES = ("inline", "stripped", "appendix")
+
+
+@router.post("/cmc/projects/{cmc_project_id}/export", status_code=201)
+def export_dossier(cmc_project_id: str, body: ExportRequest,
+                   db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """Write the approved sections, resolving every table from verified data.
+
+    The tables are rendered HERE, not when the section was drafted, which is
+    the property the whole Flow A / Flow B split buys: a value corrected in
+    the grid appears in every deliverable that quotes it without one section
+    being regenerated.
+
+    An eCTD backbone is deliberately not produced. Leaf files and a manifest
+    are, with conventional names; assembling and validating a submission
+    belongs to a publishing tool, and a half-built backbone would look
+    submittable without being so.
+    """
+    import os
+    import re as _re
+    import zipfile
+
+    from app.cmc import export as export_mod
+    from app.cmc.tables import TableError, render_table
+    from app.models import CmcExport, CmcSectionDraft
+    from app.storage import abs_path, save_bytes
+
+    cp = _owned_cmc_project(db, cmc_project_id, user)
+    if body.granularity not in GRANULARITIES:
+        raise error("CMC_BAD_GRANULARITY",
+                    f"granularity must be one of {', '.join(GRANULARITIES)}.", 422)
+    if body.citations not in CITATION_MODES:
+        raise error("CMC_BAD_CITATION_MODE",
+                    f"citations must be one of {', '.join(CITATION_MODES)}.", 422)
+
+    deliverables = db.scalars(select(CmcDeliverable).where(
+        CmcDeliverable.cmc_project_id == cp.id)).all()
+    if body.deliverable_id:
+        deliverables = [d for d in deliverables if d.id == body.deliverable_id]
+    if not deliverables:
+        raise error("CMC_NOTHING_TO_EXPORT",
+                    "This dossier has no deliverable to write.", 409)
+
+    written: list = []
+    plans: list = []
+    all_blockers: list = []
+    base = f"cmc-export/{cp.id}"
+
+    for deliverable in deliverables:
+        sections = db.scalars(select(CmcSection).where(
+            CmcSection.cmc_deliverable_id == deliverable.id,
+            CmcSection.enabled.is_(True),
+            CmcSection.is_container.is_(False)
+        ).order_by(CmcSection.sort_order)).all()
+
+        rows = []
+        for section in sections:
+            draft = _latest_cmc_draft(db, section.id)
+            content = draft.content if draft else ""
+            if section.applicability != "applicable" and not content.strip():
+                content = section.applicability_justification or ""
+            rows.append((section.section_code, section.title, section.status,
+                         section.applicability, content,
+                         [section.table_key] if section.table_key else []))
+
+        plan = export_mod.plan_export(rows, require_approved=not body.override_approval)
+        plans.append({"deliverable_id": deliverable.id,
+                      "doc_type_key": deliverable.doc_type_key,
+                      "blockers": plan.blockers, "warnings": plan.warnings,
+                      "leaves": plan.leaves})
+        all_blockers.extend(plan.blockers)
+        if plan.blockers:
+            continue
+
+        # Resolve every [TABLE: key] against the store, once per deliverable.
+        tables_by_section: dict = {}
+        unresolved: list = []
+        for section_render in plan.sections:
+            keys = export_mod.TABLE_MARKER_RE.findall(section_render.content or "")
+            resolved: dict = {}
+            for key in keys:
+                try:
+                    rendered = render_table(db, cmc_project_id=cp.id, org_id=user.org_id,
+                                            table_key=key,
+                                            deliverable_id=deliverable.id,
+                                            include_unverified=False)
+                    resolved[key] = rendered.blocks
+                except TableError as exc:
+                    # Every way a builder can decline -- no data, an unknown
+                    # key a model invented, a grid that came out ragged --
+                    # blocks the export rather than raising. A 500 here would
+                    # tell somebody the server broke when what actually
+                    # happened is that the dossier is not ready.
+                    unresolved.append({"section_code": section_render.section_code,
+                                       "table_key": key, "reason": str(exc)})
+                except Exception as exc:  # noqa: BLE001 - a builder bug is not a 500 either
+                    unresolved.append({"section_code": section_render.section_code,
+                                       "table_key": key,
+                                       "reason": f"the table could not be built: {exc}"})
+            tables_by_section[section_render.section_code] = resolved
+        if unresolved and not body.override_approval:
+            all_blockers.extend([
+                {"code": "TABLE_UNRESOLVED", "section_code": u["section_code"],
+                 "message": f"[TABLE: {u['table_key']}] could not be rendered: {u['reason']}"}
+                for u in unresolved])
+            continue
+
+        entry = registry.DELIVERABLES.get(deliverable.doc_type_key) or {}
+        title = f"{cp.product_name} -- {entry.get('name') or deliverable.doc_type_key}"
+        subtitle = "CONFIDENTIAL" + (" -- DRAFT" if body.draft_watermark else "")
+
+        def _apply_citation_mode(section_render):
+            if body.citations == "inline":
+                return section_render
+            stripped = _re.sub(r"\s*\[S\d+(?:,[^\]]*)?\]", "", section_render.content or "")
+            section_render.content = stripped
+            return section_render
+
+        rendered_sections = [_apply_citation_mode(s) for s in plan.sections]
+
+        if body.granularity in ("combined", "both"):
+            document = export_mod.build_document(
+                rendered_sections, tables_by_section, title=title, subtitle=subtitle)
+            relative = save_bytes(b"", base, ".docx")
+            export_mod.write_docx(document, str(abs_path(relative)))
+            written.append({"kind": "combined",
+                            "deliverable_id": deliverable.id,
+                            "filename": f"{deliverable.doc_type_key}-combined.docx",
+                            "storage_path": relative})
+
+        if body.granularity in ("ectd_leaves", "both"):
+            by_leaf: dict = {}
+            for section_render in rendered_sections:
+                by_leaf.setdefault(export_mod.leaf_for(section_render.section_code),
+                                   []).append(section_render)
+            leaf_files = []
+            for leaf, leaf_sections in sorted(by_leaf.items()):
+                document = export_mod.build_document(
+                    leaf_sections, tables_by_section,
+                    title=f"{title} -- {leaf}", subtitle=subtitle)
+                relative = save_bytes(b"", base, ".docx")
+                export_mod.write_docx(document, str(abs_path(relative)))
+                leaf_files.append((export_mod.ectd_path("", leaf), relative))
+            # One zip, so the folder tree survives a download.
+            bundle = save_bytes(b"", base, ".zip")
+            with zipfile.ZipFile(str(abs_path(bundle)), "w", zipfile.ZIP_DEFLATED) as archive:
+                for arcname, relative in leaf_files:
+                    archive.write(str(abs_path(relative)), arcname)
+                archive.writestr("manifest.txt", export_mod.manifest_lines(plan.leaves))
+                archive.writestr(
+                    "README.txt",
+                    "Leaf files and a manifest, named by convention. This is NOT an eCTD "
+                    "backbone: assembling and validating a submission is a publishing tool's "
+                    "job, and a partial backbone would look submittable without being so.\n")
+            for _arc, relative in leaf_files:
+                try:
+                    abs_path(relative).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            written.append({"kind": "ectd_leaves",
+                            "deliverable_id": deliverable.id,
+                            "filename": f"{deliverable.doc_type_key}-ectd.zip",
+                            "storage_path": bundle})
+
+    if all_blockers and not body.override_approval:
+        raise error(
+            "CMC_EXPORT_BLOCKED",
+            f"{len(all_blockers)} thing(s) stand in the way of an export. Approve the "
+            "sections and resolve the findings, or export with an explicit override.",
+            409, {"blockers": all_blockers[:50], "plans": plans})
+
+    record = CmcExport(
+        org_id=user.org_id, cmc_project_id=cp.id,
+        granularity=body.granularity,
+        options={"citations": body.citations, "draft_watermark": body.draft_watermark,
+                 "override_approval": body.override_approval,
+                 "files": written, "blockers": all_blockers},
+        storage_path=written[0]["storage_path"] if written else None,
+        created_by=user.id)
+    db.add(record)
+    db.flush()
+    log_audit(db, user, "Exported the dossier", "cmc_export", record.id, cp.project_id,
+              "warning" if body.override_approval else "success",
+              f"{body.granularity}, {len(written)} file(s)"
+              + (" (approval overridden)" if body.override_approval else ""))
+    db.commit()
+    db.refresh(record)
+    return {"id": record.id, "granularity": record.granularity,
+            "files": written, "plans": plans,
+            "overridden": body.override_approval, "created_at": record.created_at}
+
+
+@router.get("/cmc/projects/{cmc_project_id}/exports")
+def list_exports(cmc_project_id: str, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    from app.models import CmcExport
+
+    cp = _owned_cmc_project(db, cmc_project_id, user)
+    rows = db.scalars(select(CmcExport).where(
+        CmcExport.cmc_project_id == cp.id).order_by(CmcExport.created_at.desc())).all()
+    return {"items": [{"id": e.id, "granularity": e.granularity,
+                       "files": (e.options or {}).get("files", []),
+                       "overridden": (e.options or {}).get("override_approval", False),
+                       "created_at": e.created_at} for e in rows]}
+
+
+@router.get("/cmc/exports/{cmc_export_id}/download")
+def download_export(cmc_export_id: str, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    from fastapi.responses import FileResponse
+
+    from app.models import CmcExport
+    from app.storage import abs_path
+
+    record = db.get(CmcExport, cmc_export_id)
+    if not record or record.org_id != user.org_id:
+        raise error("CMC_EXPORT_NOT_FOUND", "Export not found", 404)
+    if not record.storage_path:
+        raise error("CMC_EXPORT_EMPTY", "This export produced no file.", 409)
+    path = abs_path(record.storage_path)
+    if not path.exists():
+        raise error("CMC_EXPORT_MISSING",
+                    "The exported file is no longer in storage.", 410)
+    files = (record.options or {}).get("files", [])
+    name = files[0]["filename"] if files else os.path.basename(str(path))
+    return FileResponse(str(path), filename=name)

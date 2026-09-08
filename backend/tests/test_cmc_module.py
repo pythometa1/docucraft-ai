@@ -205,11 +205,38 @@ def test_adding_a_deliverable_seeds_the_ctd_tree(app_client, cmc_portal_project)
     assert duplicate.json()["detail"]["error"]["code"] == "CMC_DELIVERABLE_EXISTS"
 
 
-def test_unbuilt_deliverables_say_so(app_client, cmc_portal_project):
+def test_the_non_ctd_deliverables_seed_their_own_structures(app_client, cmc_portal_project):
+    """An annual review, a method validation report and a stability report are
+    not CTD-numbered, and their table sections are declared beside their own
+    trees rather than borrowed from the CTD map."""
+    token, project_id = cmc_portal_project
+    cmc = _make(app_client, token, project_id).json()
+    for key in ("apqr", "method_val", "process_val", "stability_report"):
+        res = app_client.post(f"/api/v1/cmc/projects/{cmc['id']}/deliverables",
+                              headers=_auth(token), json={"doc_type_key": key})
+        assert res.status_code == 201, res.text
+        sections = res.json()["sections"]
+        assert len(sections) >= 8, key
+        assert len({s["section_code"] for s in sections}) == len(sections), key
+    # The APQR's own table sections were seeded, not the CTD's.
+    apqr = next(d for d in app_client.get(f"/api/v1/cmc/projects/{cmc['id']}",
+                                          headers=_auth(token)).json()["deliverables"]
+                if d["doc_type_key"] == "apqr")
+    apqr_sections = app_client.get(f"/api/v1/cmc/deliverables/{apqr['id']}/sections",
+                                   headers=_auth(token)).json()["items"]
+    assert any(s["table_key"] for s in apqr_sections)
+    assert not any(s["section_code"].startswith("P.") for s in apqr_sections)
+
+
+def test_a_deliverable_that_derives_from_others_is_refused_for_now(
+        app_client, cmc_portal_project):
+    """The QOS is not drafted from sources; it condenses approved 3.2.S/3.2.P
+    sections. Until that derivation exists it says so rather than seeding an
+    empty tree that looks finished."""
     token, project_id = cmc_portal_project
     cmc = _make(app_client, token, project_id).json()
     res = app_client.post(f"/api/v1/cmc/projects/{cmc['id']}/deliverables",
-                          headers=_auth(token), json={"doc_type_key": "apqr"})
+                          headers=_auth(token), json={"doc_type_key": "qos_23"})
     assert res.status_code == 422
     assert res.json()["detail"]["error"]["code"] == "CMC_DELIVERABLE_UNBUILT"
 
@@ -226,9 +253,11 @@ def test_the_deliverable_catalogue_lists_what_is_coming(app_client, org_a):
     by_key = {i["key"]: i for i in items}
     assert by_key["ctd_32p"]["section_count"] == len(DRUG_PRODUCT)
     assert by_key["ctd_32p"]["unbuilt"] is None
-    # Listed rather than hidden, with the milestone that will build it.
-    assert by_key["apqr"]["unbuilt"] == "M8"
-    assert by_key["apqr"]["section_count"] == 0
+    assert by_key["apqr"]["unbuilt"] is None
+    assert by_key["apqr"]["section_count"] >= 8
+    # Listed rather than hidden, with the reason it cannot be chosen yet.
+    assert by_key["qos_23"]["unbuilt"]
+    assert by_key["qos_23"]["section_count"] == 0
 
 
 # ---------------------------------------------------------------- sections

@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 import {
   AlertTriangle, Check, ChevronRight, FlaskConical, Layers, ListTree,
-  Plus, ShieldQuestion, Trash2, Upload,
+  Plus, ShieldCheck, ShieldQuestion, Trash2, Upload, Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -29,6 +29,8 @@ import { ErrorBanner } from "@/components/error-banner";
 import { StageSkeleton } from "@/components/skeletons";
 import { SwapIn } from "@/components/motion";
 import { CmcDataGrid } from "@/components/cmc-data-grid";
+import { CmcEditor } from "@/components/cmc-editor";
+import { CmcQuality } from "@/components/cmc-quality";
 import { CmcSources } from "@/components/cmc-sources";
 import { cn } from "@/lib/utils";
 
@@ -193,7 +195,7 @@ function CmcSetup({ projectId, onCreated }: { projectId: string; onCreated: () =
 
 /* --------------------------------------------------------- overview shell */
 
-type Tab = "deliverables" | "sources" | "data" | "sites";
+type Tab = "deliverables" | "sources" | "data" | "write" | "quality" | "sites";
 
 function CmcOverview({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => void }) {
   const [tab, setTab] = useState<Tab>(cmc.deliverables.length ? "sources" : "deliverables");
@@ -221,6 +223,8 @@ function CmcOverview({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => voi
     ["deliverables", "Deliverables", Layers],
     ["sources", "Source documents", Upload],
     ["data", "Data review", ShieldQuestion],
+    ["write", "Write", Wand2],
+    ["quality", "QC & export", ShieldCheck],
     ["sites", "Sites", FlaskConical],
   ];
 
@@ -270,6 +274,16 @@ function CmcOverview({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => voi
           />
         )}
         {tab === "data" && <CmcDataGrid cmcProjectId={cmc.id} documents={documents} />}
+        {tab === "write" && (
+          cmc.deliverables.length === 0 ? (
+            <p className="rounded-lg border border-border bg-muted/30 px-4 py-6 text-center text-sm text-muted-foreground">
+              Add a deliverable first — its section tree is what there is to write.
+            </p>
+          ) : (
+            <WriteTab cmc={cmc} />
+          )
+        )}
+        {tab === "quality" && <CmcQuality cmcProjectId={cmc.id} />}
         {tab === "sites" && <Sites cmc={cmc} onChanged={onChanged} />}
       </SwapIn>
 
@@ -571,6 +585,49 @@ function Sites({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => void }) {
             </tbody>
           </table>
         </div>
+      )}
+    </div>
+  );
+}
+
+
+/* ------------------------------------------------------------ write tab */
+
+function WriteTab({ cmc }: { cmc: CmcProject }) {
+  const [deliverableId, setDeliverableId] = useState(cmc.deliverables[0]?.id ?? "");
+  const [sections, setSections] = useState<CmcSection[] | null>(null);
+
+  useEffect(() => {
+    if (!deliverableId) return;
+    let live = true;
+    setSections(null);
+    api.cmcDeliverableSections(deliverableId)
+      .then((res) => { if (live) setSections(res.items); })
+      .catch(() => { if (live) setSections([]); });
+    return () => { live = false; };
+  }, [deliverableId]);
+
+  return (
+    <div className="space-y-3">
+      {cmc.deliverables.length > 1 && (
+        <div className="flex gap-1 border-b border-border">
+          {cmc.deliverables.map((d) => (
+            <button
+              key={d.id}
+              onClick={() => setDeliverableId(d.id)}
+              className={cn(
+                "border-b-2 px-3 py-1.5 text-xs font-medium transition-colors",
+                deliverableId === d.id ? "border-brand text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {d.doc_type_key.replace("ctd_", "").toUpperCase()}
+            </button>
+          ))}
+        </div>
+      )}
+      {sections === null ? <StageSkeleton lines={5} /> : (
+        <CmcEditor cmcProjectId={cmc.id} sections={sections} onSectionsChanged={setSections} />
       )}
     </div>
   );
