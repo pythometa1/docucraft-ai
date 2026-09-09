@@ -17,7 +17,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.audit.service import log_audit
@@ -41,6 +41,11 @@ SUBMISSION_TYPES = ("IND", "IMPD", "NDA", "ANDA", "MAA", "variation", "other")
 REGIONS = ("FDA", "EMA", "CDSCO", "PMDA", "HC", "other")
 SITE_ACTIVITIES = ("ds_manufacture", "dp_manufacture", "packaging", "testing", "release")
 APPLICABILITY = ("applicable", "not_applicable", "referenced_dmf")
+
+#: Tables whose rows are `cmc_batch_formula`, not `cmc_results`. Named once
+#: here so the approval gate and the QC pass cannot come to disagree about
+#: which store a section's table is verified against.
+FORMULA_BACKED_TABLES = ("batch_formula", "composition_table")
 
 
 # ------------------------------------------------------------------ helpers
@@ -262,8 +267,33 @@ def delete_cmc_project(cmc_project_id: str, db: Session = Depends(get_db),
 
     documents = db.scalars(select(CmcDocument).where(
         CmcDocument.cmc_project_id == cp.id)).all()
-    blobs = [abs_path(d.storage_path) for d in documents]
+    blobs = [abs_path(d.storage_path) for d in documents if d.storage_path]
     counts["documents"] = len(documents)
+
+    # The exports too. Their rows were deleted with everything else and their
+    # FILES were left on disk -- and an exported dossier is not a lesser copy
+    # of this data, it is every specification limit, batch result and
+    # stability figure in one document. A customer told the project was purged
+    # would have been told something untrue about the most complete artefact
+    # in it.
+    #
+    # Read from `options["files"]` and not only from `storage_path`: an export
+    # writes one file per granularity and the column records just the first of
+    # them, so a combined-and-eCTD export leaves its .zip behind if only the
+    # column is followed.
+    seen = {str(b) for b in blobs}
+    for export in db.scalars(select(CmcExport).where(
+            CmcExport.cmc_project_id == cp.id)).all():
+        paths = [export.storage_path] + [
+            entry.get("storage_path")
+            for entry in (export.options or {}).get("files", [])]
+        for path in paths:
+            if not path:
+                continue
+            absolute = abs_path(path)
+            if str(absolute) not in seen:
+                seen.add(str(absolute))
+                blobs.append(absolute)
     # Children before parents: results reference batches and tests, tests
     # reference specifications, all of them reference materials.
     # Sites come after batches: a batch names the site that made it, and a
@@ -853,6 +883,16 @@ def list_materials(cmc_project_id: str, db: Session = Depends(get_db),
     return {"items": [_material_out(m) for m in rows]}
 
 
+def _total_of(db, statement, column) -> int:
+    """How many rows the filter matches, counted in the database.
+
+    Not `len(rows_loaded)`: the grid pages, and a total taken from the page is
+    the page size. Not `len(all_rows)` either -- materialising a fifty-batch
+    programme to count it is the paging undoing itself.
+    """
+    return db.scalar(statement.with_only_columns(func.count(column)).order_by(None)) or 0
+
+
 def _verification_summary(results) -> dict:
     total = len(results)
     verified = sum(1 for r in results if r.verified_by)
@@ -865,6 +905,8 @@ def _verification_summary(results) -> dict:
 @router.get("/cmc/projects/{cmc_project_id}/data/{entity}")
 def read_data(cmc_project_id: str, entity: str,
               material_id: str | None = None,
+              scope: str | None = None,
+              q: str | None = None,
               limit: int = Query(500, ge=1, le=5000),
               offset: int = Query(0, ge=0),
               db: Session = Depends(get_db),
@@ -878,6 +920,13 @@ def read_data(cmc_project_id: str, entity: str,
     Every result carries its conformance verdict, computed here rather than in
     the browser, so the grid and the QC report can never disagree about
     whether a batch met its specification.
+
+    `scope` splits results into "release" and "stability" the way the table
+    builders do, so each tab of the grid pages through its own rows instead of
+    sharing one page and filtering it in the browser. `q` filters on the
+    server for the same reason: a filter that searched only the rows already
+    fetched would quietly answer "no matches" for a value that is in the
+    dossier.
     """
     from app.cmc.limits import evaluate_row
     from app.models import (
@@ -894,6 +943,9 @@ def read_data(cmc_project_id: str, entity: str,
         statement = select(CmcBatch).where(CmcBatch.cmc_project_id == cp.id)
         if material_id:
             statement = statement.where(CmcBatch.material_id == material_id)
+        if (q or "").strip():
+            statement = statement.where(CmcBatch.batch_number.ilike(f"%{q.strip()}%"))
+        total = _total_of(db, statement, CmcBatch.id)
         rows = db.scalars(statement.order_by(CmcBatch.batch_number)
                           .limit(limit).offset(offset)).all()
         sites = {s.id: s.name for s in db.scalars(select(CmcSite).where(
@@ -904,12 +956,18 @@ def read_data(cmc_project_id: str, entity: str,
             "manufacture_date": b.manufacture_date, "purpose": b.purpose,
             "scale": b.scale, "site_id": b.site_id,
             "site_name": sites.get(b.site_id), "source_document_id": b.source_document_id,
-        } for b in rows]}
+        } for b in rows], "total": total}
 
     if entity == "specifications":
         statement = select(CmcTest).where(CmcTest.cmc_project_id == cp.id)
         if material_id:
             statement = statement.where(CmcTest.material_id == material_id)
+        if (q or "").strip():
+            like = f"%{q.strip()}%"
+            statement = statement.where(or_(CmcTest.test_name.ilike(like),
+                                            CmcTest.method_id.ilike(like),
+                                            CmcTest.acceptance_criterion_text.ilike(like)))
+        total = _total_of(db, statement, CmcTest.id)
         rows = db.scalars(statement.order_by(CmcTest.material_id, CmcTest.sort_order)
                           .limit(limit).offset(offset)).all()
         return {"items": [{
@@ -920,7 +978,7 @@ def read_data(cmc_project_id: str, entity: str,
             "limit_operator": t.limit_operator, "stage": t.stage,
             "spec_version_id": t.spec_version_id,
             "source_document_id": t.source_document_id,
-        } for t in rows]}
+        } for t in rows], "total": total}
 
     if entity == "batch-formula":
         rows = db.scalars(select(CmcBatchFormula).where(
@@ -939,9 +997,30 @@ def read_data(cmc_project_id: str, entity: str,
     if entity == "conflicts":
         statement = statement.where(CmcResult.conflict_with_id.is_not(None))
     if material_id:
-        statement = statement.join(CmcTest, CmcResult.test_id == CmcTest.id).where(
-            CmcTest.material_id == material_id)
-    all_rows = db.scalars(statement).all()
+        statement = statement.where(CmcResult.test_id.in_(
+            select(CmcTest.id).where(CmcTest.cmc_project_id == cp.id,
+                                     CmcTest.material_id == material_id)))
+    # The same split the table builders make: a release result has neither a
+    # storage condition nor a timepoint, and everything else is on stability.
+    # Stated in SQL here so the grid's two tabs page independently.
+    if scope == "release":
+        statement = statement.where(CmcResult.storage_condition.is_(None),
+                                    CmcResult.timepoint_months.is_(None))
+    elif scope == "stability":
+        statement = statement.where(or_(CmcResult.storage_condition.is_not(None),
+                                        CmcResult.timepoint_months.is_not(None)))
+    elif scope:
+        raise error("CMC_UNKNOWN_SCOPE",
+                    f"{scope!r} is not a result scope; one of release, stability.", 422)
+    if (q or "").strip():
+        like = f"%{q.strip()}%"
+        statement = statement.where(or_(
+            CmcResult.value_text.ilike(like),
+            CmcResult.test_id.in_(select(CmcTest.id).where(
+                CmcTest.cmc_project_id == cp.id, CmcTest.test_name.ilike(like))),
+            CmcResult.batch_id.in_(select(CmcBatch.id).where(
+                CmcBatch.cmc_project_id == cp.id, CmcBatch.batch_number.ilike(like)))))
+
     rows = db.scalars(statement.order_by(CmcResult.created_at)
                       .limit(limit).offset(offset)).all()
 
@@ -958,7 +1037,8 @@ def read_data(cmc_project_id: str, entity: str,
         batch = batches.get(r.batch_id)
         verdict = evaluate_row(
             value_text=r.value_text,
-            acceptance_criterion_text=test.acceptance_criterion_text if test else None)
+            acceptance_criterion_text=test.acceptance_criterion_text if test else None,
+            unit=r.unit)
         items.append({
             "id": r.id, "batch_id": r.batch_id,
             "batch_number": batch.batch_number if batch else None,
@@ -978,8 +1058,22 @@ def read_data(cmc_project_id: str, entity: str,
             "page": r.page, "table_ref": r.table_ref,
             "conformance": verdict.outcome, "conformance_reason": verdict.reason,
         })
-    return {"items": items, "total": len(all_rows),
-            "summary": _verification_summary(all_rows)}
+    # Counted in SQL rather than by loading every matching row into memory.
+    # `len(all_rows)` meant one full materialisation of the result store on
+    # every keystroke of the grid's filter -- on the fifty-batch programmes
+    # this endpoint's own docstring describes, that is the paging defeating
+    # itself. `count(column)` counts non-nulls, which is exactly what
+    # "verified" and "in conflict" mean here.
+    counted = statement.with_only_columns(
+        func.count(CmcResult.id),
+        func.count(CmcResult.verified_by),
+        func.count(CmcResult.conflict_with_id),
+    ).order_by(None)
+    total, verified, conflicts = db.execute(counted).one()
+    return {"items": items, "total": total,
+            "summary": {"total": total, "verified": verified,
+                        "unverified": total - verified, "conflicts": conflicts,
+                        "all_verified": total > 0 and verified == total}}
 
 
 class ResultPatch(BaseModel):
@@ -1033,19 +1127,40 @@ def correct_result(cmc_result_id: str, body: ResultPatch,
         result.verified_at = now()
     result.updated_at = now()
 
+    # Every field that moved, not just the value. `before` captured the
+    # stability coordinates from the first version of this endpoint and the
+    # audit line ignored them, so a correction that moved a result from
+    # 25C/60RH at 6 months to 40C/75RH at 3 months -- a different cell of a
+    # different table -- was recorded as "verified '0.12 %'", which reads as
+    # nothing having happened at all.
+    moved = [f"{field} {before[field]!r} -> {getattr(result, field)!r}"
+             for field in ("value_text", "storage_condition", "timepoint_months")
+             if before[field] != getattr(result, field)]
     log_audit(db, user, "Corrected a quality value", "cmc_result", result.id, None,
               "warning",
-              f"{before['value_text']!r} -> {result.value_text!r}"
-              if before["value_text"] != result.value_text
-              else f"verified {result.value_text!r}")
+              "; ".join(moved) if moved else f"verified {result.value_text!r}")
     db.commit()
     db.refresh(result)
+
+    # The conformance verdict is recomputed and returned. The grid merges this
+    # response over the row it just edited, so a response without it left the
+    # OLD value's verdict on screen beside the NEW value -- a batch shown as
+    # conforming on the strength of a number no longer in the cell.
+    from app.cmc.limits import evaluate_row
+    from app.models import CmcTest
+
+    test = db.get(CmcTest, result.test_id) if result.test_id else None
+    verdict = evaluate_row(
+        value_text=result.value_text,
+        acceptance_criterion_text=test.acceptance_criterion_text if test else None,
+        unit=result.unit)
     return {"id": result.id, "value_text": result.value_text,
             "operator": result.operator, "unit": result.unit,
             "storage_condition": result.storage_condition,
             "timepoint_months": result.timepoint_months,
             "verified_by": result.verified_by, "verified_at": result.verified_at,
-            "extraction_confidence": result.extraction_confidence}
+            "extraction_confidence": result.extraction_confidence,
+            "conformance": verdict.outcome, "conformance_reason": verdict.reason}
 
 
 class VerifyRequest(BaseModel):
@@ -1466,11 +1581,18 @@ def edit_cmc_draft(cmc_section_id: str, body: CmcDraftEdit,
     db.flush()
     for citation in parse_citations(body.content, source_map):
         db.add(CmcCitation(org_id=user.org_id, draft_id=draft.id, **citation))
-    if section.status in ("not_started", "generating"):
-        section.status = "draft"
+    # Any new version demotes the section. The rule used to be "demote only
+    # from not_started or generating", which left an APPROVED section approved
+    # while export assembled the newest draft -- so the text that shipped was
+    # not the text anybody approved, and the status said otherwise.
+    was = section.status
+    section.status = "draft"
     section.updated_at = now()
     log_audit(db, user, "Edited a CMC section", "cmc_section", section.id, None,
-              "info", f"{section.section_code} v{draft.version}")
+              "warning" if was == "approved" else "info",
+              f"{section.section_code} v{draft.version}"
+              + (f" (was {was.replace('_', ' ')}; approval withdrawn)"
+                 if was in ("in_review", "approved") else ""))
     db.commit()
     db.refresh(draft)
     return _draft_out(draft)
@@ -1504,13 +1626,29 @@ def set_cmc_section_status(cmc_section_id: str, body: CmcStatusPatch,
 
     if body.status == "approved" and section.table_key:
         cp = _owned_section_project(db, section, user)
-        unverified = db.scalar(select(func.count()).select_from(CmcResult).where(
-            CmcResult.cmc_project_id == cp.id, CmcResult.verified_by.is_(None)))
+        # Which rows the section's table is actually built from. The gate
+        # counted `cmc_results` for every table key, so a section whose table
+        # is the batch formula or the composition table -- both built entirely
+        # from `cmc_batch_formula` -- could be approved with every quantity in
+        # it unverified, because the rows it prints were never the rows being
+        # counted.
+        if section.table_key in FORMULA_BACKED_TABLES:
+            from app.models import CmcBatchFormula
+
+            unverified = db.scalar(select(func.count()).select_from(CmcBatchFormula).where(
+                CmcBatchFormula.cmc_project_id == cp.id,
+                CmcBatchFormula.verified_by.is_(None)))
+            noun = "formula line"
+        else:
+            unverified = db.scalar(select(func.count()).select_from(CmcResult).where(
+                CmcResult.cmc_project_id == cp.id, CmcResult.verified_by.is_(None)))
+            noun = "value"
         if unverified:
             raise error(
                 "CMC_UNVERIFIED_DATA",
-                f"{unverified} value{'s' if unverified != 1 else ''} feeding this section's "
-                "tables have not been verified. Check them in Data review first.", 409)
+                f"{unverified} {noun}{'s' if unverified != 1 else ''} feeding this "
+                "section's tables have not been verified. Check them in Data review "
+                "first.", 409)
 
     section.status = body.status
     section.updated_at = now()
@@ -1610,6 +1748,42 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
     all_blockers: list = []
     base = f"cmc-export/{cp.id}"
 
+    # QC is the gate, and it was not wired to the gate. `run_qc` was reachable
+    # only from its own endpoint, so everything it blocks on -- a batch out of
+    # specification, unverified data feeding an enabled section, an unanswered
+    # [DATA NEEDED], a batch formula that does not reconcile -- was invisible
+    # here. The screen's Export button was gated on QC and this endpoint was
+    # gated on section approval: two gates, each guarding what the other one
+    # checked, and a dossier could pass both while failing either.
+    #
+    # Run once for the project rather than per deliverable: the findings are
+    # about the shared data store, and the queries read all of it.
+    from app.cmc.qc import BLOCKER as _QC_BLOCKER
+    from app.cmc.qc import run_qc as _run_qc
+
+    qc_blockers = [{"code": f.code, "section_code": f.section_code,
+                    "message": f.message}
+                   for f in _run_qc(db, cmc_project_id=cp.id, org_id=user.org_id)
+                   if f.severity == _QC_BLOCKER]
+    all_blockers.extend(qc_blockers)
+
+    def _apply_citation_mode(section_render):
+        """Citation markers out, and NOT the newline in front of them.
+
+        The pattern led with `\\s*`, which consumes line breaks. A citation
+        sitting at the start of its own line therefore pulled the following
+        text up onto the preceding one -- and where that preceding line was a
+        `[TABLE: key]` marker, the marker stopped being alone on its line,
+        stopped matching `TABLE_MARKER_RE`, and was printed into the dossier
+        as literal text.
+        """
+        if body.citations == "inline":
+            return section_render
+        stripped = _re.sub(r"[ \t]*\[S\d+(?:,[^\]]*)?\]", "",
+                           section_render.content or "")
+        section_render.content = stripped
+        return section_render
+
     for deliverable in deliverables:
         sections = db.scalars(select(CmcSection).where(
             CmcSection.cmc_deliverable_id == deliverable.id,
@@ -1621,25 +1795,38 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
         for section in sections:
             draft = _latest_cmc_draft(db, section.id)
             content = draft.content if draft else ""
+            justification_only = False
             if section.applicability != "applicable" and not content.strip():
                 content = section.applicability_justification or ""
+                justification_only = True
             rows.append((section.section_code, section.title, section.status,
                          section.applicability, content,
-                         [section.table_key] if section.table_key else []))
+                         [section.table_key] if section.table_key else [],
+                         justification_only))
 
-        plan = export_mod.plan_export(rows, require_approved=not body.override_approval)
-        plans.append({"deliverable_id": deliverable.id,
-                      "doc_type_key": deliverable.doc_type_key,
-                      "blockers": plan.blockers, "warnings": plan.warnings,
-                      "leaves": plan.leaves})
-        all_blockers.extend(plan.blockers)
-        if plan.blockers:
-            continue
+        # Always planned as though approval were required, whatever the
+        # override says. An override that recorded no blockers left a
+        # CmcExport row asserting there had been nothing to override -- the
+        # audit trail agreeing with the person who bypassed it.
+        plan = export_mod.plan_export(rows, require_approved=True)
+        # Deliberately NOT short-circuited on `plan.blockers`. Stopping at the
+        # first kind of blocker means a reviewer fixes the approvals, exports
+        # again, and only then learns that a table cannot be rendered -- one
+        # round trip per class of problem. The tables are resolved either way
+        # and the whole list is reported at once.
+        blockers = list(plan.blockers)
+
+        # Citation mode is applied BEFORE the markers are resolved, because
+        # stripping citations rewrites the very text the markers are found in.
+        # Resolving first and building second meant the document was assembled
+        # from a string nobody had looked for tables in.
+        rendered_sections = [_apply_citation_mode(s) for s in plan.sections]
 
         # Resolve every [TABLE: key] against the store, once per deliverable.
         tables_by_section: dict = {}
         unresolved: list = []
-        for section_render in plan.sections:
+        withheld: list = []
+        for section_render in rendered_sections:
             keys = export_mod.TABLE_MARKER_RE.findall(section_render.content or "")
             resolved: dict = {}
             for key in keys:
@@ -1649,6 +1836,24 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
                                             deliverable_id=deliverable.id,
                                             include_unverified=False)
                     resolved[key] = rendered.blocks
+                    # `include_unverified=False` turns an unverified value
+                    # into a hole and records why. Throwing that report away is
+                    # how unverified numbers became "-" cells in a shipped
+                    # dossier with nothing anywhere saying one was withheld.
+                    #
+                    # The two kinds of gap are not the same thing. A value the
+                    # store simply does not have is a hole a reader can see and
+                    # QC already names; a value withheld because nobody
+                    # verified it is a governance gate, and it blocks.
+                    for gap in rendered.missing:
+                        where = {"section_code": section_render.section_code,
+                                 "table_key": key}
+                        if "has not been verified" in gap:
+                            withheld.append(dict(where, reason=gap))
+                        else:
+                            plan.warnings.append(dict(
+                                where, code="TABLE_INCOMPLETE",
+                                message=f"[TABLE: {key}]: {gap}"))
                 except TableError as exc:
                     # Every way a builder can decline -- no data, an unknown
                     # key a model invented, a grid that came out ragged --
@@ -1662,25 +1867,29 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
                                        "table_key": key,
                                        "reason": f"the table could not be built: {exc}"})
             tables_by_section[section_render.section_code] = resolved
-        if unresolved and not body.override_approval:
-            all_blockers.extend([
-                {"code": "TABLE_UNRESOLVED", "section_code": u["section_code"],
-                 "message": f"[TABLE: {u['table_key']}] could not be rendered: {u['reason']}"}
-                for u in unresolved])
+        blockers.extend([
+            {"code": "TABLE_UNRESOLVED", "section_code": u["section_code"],
+             "message": f"[TABLE: {u['table_key']}] could not be rendered: {u['reason']}"}
+            for u in unresolved])
+        blockers.extend([
+            {"code": "TABLE_UNVERIFIED_VALUE", "section_code": w["section_code"],
+             "message": (f"[TABLE: {w['table_key']}] would print a gap where an "
+                         f"unverified value belongs: {w['reason']}")}
+            for w in withheld])
+
+        plans.append({"deliverable_id": deliverable.id,
+                      "doc_type_key": deliverable.doc_type_key,
+                      "blockers": blockers, "warnings": plan.warnings,
+                      "leaves": plan.leaves})
+        all_blockers.extend(blockers)
+        # A QC blocker stops every deliverable, so nothing is written to disk
+        # for an export that is about to be refused.
+        if (blockers or qc_blockers) and not body.override_approval:
             continue
 
         entry = registry.DELIVERABLES.get(deliverable.doc_type_key) or {}
         title = f"{cp.product_name} -- {entry.get('name') or deliverable.doc_type_key}"
         subtitle = "CONFIDENTIAL" + (" -- DRAFT" if body.draft_watermark else "")
-
-        def _apply_citation_mode(section_render):
-            if body.citations == "inline":
-                return section_render
-            stripped = _re.sub(r"\s*\[S\d+(?:,[^\]]*)?\]", "", section_render.content or "")
-            section_render.content = stripped
-            return section_render
-
-        rendered_sections = [_apply_citation_mode(s) for s in plan.sections]
 
         if body.granularity in ("combined", "both"):
             document = export_mod.build_document(
@@ -1769,8 +1978,16 @@ def list_exports(cmc_project_id: str, db: Session = Depends(get_db),
 
 
 @router.get("/cmc/exports/{cmc_export_id}/download")
-def download_export(cmc_export_id: str, db: Session = Depends(get_db),
+def download_export(cmc_export_id: str, index: int = Query(0, ge=0),
+                    db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
+    """One file out of an export, by its position in `options["files"]`.
+
+    An export of granularity "both" writes a combined .docx AND an eCTD .zip,
+    and `CmcExport.storage_path` records only the first of them. The screen
+    listed every file and offered one download, so the second was named in the
+    UI and reachable by nothing -- a dossier a reviewer could see and not open.
+    """
     from fastapi.responses import FileResponse
 
     from app.models import CmcExport
@@ -1779,12 +1996,22 @@ def download_export(cmc_export_id: str, db: Session = Depends(get_db),
     record = db.get(CmcExport, cmc_export_id)
     if not record or record.org_id != user.org_id:
         raise error("CMC_EXPORT_NOT_FOUND", "Export not found", 404)
-    if not record.storage_path:
+
+    files = (record.options or {}).get("files", [])
+    if index and index >= len(files):
+        raise error("CMC_EXPORT_NO_SUCH_FILE",
+                    f"This export produced {len(files)} file(s); there is no file "
+                    f"{index + 1}.", 404)
+    entry = files[index] if index < len(files) else None
+    # `storage_path` remains the fallback for the first file, so exports
+    # written before `options["files"]` existed still download.
+    relative = (entry or {}).get("storage_path") or (
+        record.storage_path if index == 0 else None)
+    if not relative:
         raise error("CMC_EXPORT_EMPTY", "This export produced no file.", 409)
-    path = abs_path(record.storage_path)
+    path = abs_path(relative)
     if not path.exists():
         raise error("CMC_EXPORT_MISSING",
                     "The exported file is no longer in storage.", 410)
-    files = (record.options or {}).get("files", [])
-    name = files[0]["filename"] if files else os.path.basename(str(path))
+    name = (entry or {}).get("filename") or os.path.basename(str(path))
     return FileResponse(str(path), filename=name)

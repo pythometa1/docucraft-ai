@@ -29,6 +29,16 @@ SPEC = (
     "Water content,NMT 3.0 %,KF-001\n"
 )
 
+#: The analytical procedures the specification names. Without this, every
+#: in-house method id in the dossier is untraceable -- which `run_qc` blocks
+#: on, and which the export endpoint is now wired to hear.
+METHOD_SOP = (
+    "Analytical Procedures - Drug X Tablets\n"
+    "HPLC-010 Assay of Drug X by reverse-phase HPLC.\n"
+    "HPLC-011 Related substances by reverse-phase HPLC.\n"
+    "KF-001 Water content by Karl Fischer titration.\n"
+)
+
 COA = (
     "Certificate of Analysis - Batch {batch}\n"
     "Test,Acceptance Criteria,Method,Result\n"
@@ -76,6 +86,7 @@ def loaded(app_client, dossier):
         ("spec.csv", SPEC.encode(), "spec_dp"),
         ("coa1.csv", COA.format(batch="B-001", assay="99.2 %",
                                 impurity="0.050 %").encode(), "coa"),
+        ("methods.csv", METHOD_SOP.encode(), "method_sop"),
     ])
     return token, cmc_id, deliverable_id, sections
 
@@ -401,3 +412,227 @@ def test_the_prompt_names_the_one_table_key_that_exists(app_client, loaded, stub
         table_key = "batch_analyses"
 
     assert "[TABLE: batch_analyses]" in _guidance_with_table(_WithTable())
+
+
+def test_a_qc_blocker_stops_the_export(app_client, loaded, stub_model):
+    """The gate the export endpoint did not consult.
+
+    `run_qc` was reachable only from its own endpoint. The screen's Export
+    button was disabled on `qc.exportable`, and the endpoint behind it gated on
+    section approval instead -- so a dossier with an out-of-specification batch
+    exported successfully the moment its sections were approved, and the only
+    thing standing in the way was a button the API never enforced.
+    """
+    token, cmc_id, deliverable_id, sections = loaded
+    # A batch that genuinely fails its specification: 0.31 % against NMT 0.20 %.
+    _upload_and_process(app_client, token, cmc_id, [
+        ("coa_bad.csv", COA.format(batch="B-009", assay="94.1 %",
+                                   impurity="0.31 %").encode(), "coa"),
+    ])
+    app_client.post(f"/api/v1/cmc/projects/{cmc_id}/results:verify",
+                    headers=_auth(token), json={"all_unverified": True})
+
+    spec_section = next(s for s in sections if s["section_code"] == "P.5.1")
+    stub_model("P.5.1 Specification(s)\n\nThe specification follows.\n\n[TABLE: spec_table]")
+    app_client.post(f"/api/v1/cmc/sections/{spec_section['id']}/generate",
+                    headers=_auth(token), json={})
+    app_client.patch(f"/api/v1/cmc/sections/{spec_section['id']}/status",
+                     headers=_auth(token), json={"status": "approved"})
+    for section in sections:
+        if section["is_container"] or section["id"] == spec_section["id"]:
+            continue
+        app_client.patch(f"/api/v1/cmc/sections/{section['id']}",
+                         headers=_auth(token), json={"enabled": False})
+
+    qc = app_client.get(f"/api/v1/cmc/projects/{cmc_id}/qc",
+                        headers=_auth(token)).json()
+    assert qc["exportable"] is False
+
+    blocked = app_client.post(f"/api/v1/cmc/projects/{cmc_id}/export",
+                              headers=_auth(token),
+                              json={"deliverable_id": deliverable_id,
+                                    "granularity": "combined"})
+    assert blocked.status_code == 409, blocked.text
+    detail = blocked.json()["detail"]["error"]
+    assert detail["code"] == "CMC_EXPORT_BLOCKED"
+    assert "OUT_OF_SPECIFICATION" in {b["code"] for b in detail["details"]["blockers"]}
+
+    # And nothing was written for a refused export.
+    exports = app_client.get(f"/api/v1/cmc/projects/{cmc_id}/exports",
+                             headers=_auth(token)).json()
+    assert exports["items"] == []
+
+
+def test_an_override_records_what_it_overrode(app_client, loaded, stub_model):
+    """An override that recorded an empty blocker list was the audit trail
+    agreeing with the person who bypassed it."""
+    token, cmc_id, deliverable_id, sections = loaded
+    spec_section = next(s for s in sections if s["section_code"] == "P.5.1")
+    stub_model("P.5.1 Specification(s)\n\nThe specification follows.\n\n[TABLE: spec_table]")
+    app_client.post(f"/api/v1/cmc/sections/{spec_section['id']}/generate",
+                    headers=_auth(token), json={})
+    for section in sections:
+        if section["is_container"] or section["id"] == spec_section["id"]:
+            continue
+        app_client.patch(f"/api/v1/cmc/sections/{section['id']}",
+                         headers=_auth(token), json={"enabled": False})
+
+    forced = app_client.post(f"/api/v1/cmc/projects/{cmc_id}/export",
+                             headers=_auth(token),
+                             json={"deliverable_id": deliverable_id,
+                                   "granularity": "combined",
+                                   "override_approval": True})
+    assert forced.status_code == 201, forced.text
+    recorded = forced.json()["plans"][0]["blockers"]
+    codes = {b["code"] for b in recorded}
+    # The section was never approved, and its values were never verified.
+    assert "SECTION_NOT_APPROVED" in codes, recorded
+
+
+def test_stripping_citations_does_not_swallow_the_table_marker(
+        app_client, loaded, stub_model):
+    """Citations came off the text AFTER the markers had been found, and the
+    pattern led with `\\s*` -- which eats newlines.
+
+    So a citation sitting at the start of its own line pulled the following
+    line up onto it. Where that following line was `[TABLE: spec_table]`, the
+    marker stopped being alone on its line, stopped matching
+    `TABLE_MARKER_RE`, and was printed into the dossier as the literal text
+    "[TABLE: spec_table]" -- in a document that had already been approved.
+    """
+    token, cmc_id, deliverable_id, sections = loaded
+    app_client.post(f"/api/v1/cmc/projects/{cmc_id}/results:verify",
+                    headers=_auth(token), json={"all_unverified": True})
+
+    spec_section = next(s for s in sections if s["section_code"] == "P.5.1")
+    # A citation opening the line immediately AFTER the marker. `\\s*` reaches
+    # backwards, so stripping it takes the newline that keeps the marker alone
+    # on its own line with it.
+    stub_model("P.5.1 Specification(s)\n\n"
+               "The specification is given below.\n\n"
+               "[TABLE: spec_table]\n"
+               "[S1] The limits are as stated in the specification.\n")
+    app_client.post(f"/api/v1/cmc/sections/{spec_section['id']}/generate",
+                    headers=_auth(token), json={})
+    app_client.patch(f"/api/v1/cmc/sections/{spec_section['id']}/status",
+                     headers=_auth(token), json={"status": "approved"})
+    for section in sections:
+        if section["is_container"] or section["id"] == spec_section["id"]:
+            continue
+        app_client.patch(f"/api/v1/cmc/sections/{section['id']}",
+                         headers=_auth(token), json={"enabled": False})
+
+    exported = app_client.post(f"/api/v1/cmc/projects/{cmc_id}/export",
+                               headers=_auth(token),
+                               json={"deliverable_id": deliverable_id,
+                                     "granularity": "combined",
+                                     "citations": "stripped"})
+    assert exported.status_code == 201, exported.text
+
+    import docx
+
+    from app.storage import abs_path
+    from app.db import SessionLocal
+    from app.models import CmcExport
+
+    db = SessionLocal()
+    try:
+        record = db.get(CmcExport, exported.json()["id"])
+        document = docx.Document(str(abs_path(record.storage_path)))
+    finally:
+        db.close()
+
+    text = "\n".join(p.text for p in document.paragraphs)
+    assert "[TABLE:" not in text, "the marker leaked into the document as literal text"
+    assert "[S1]" not in text, "citations were asked for stripped"
+    # And the table it stood for is really there, with a stored value in it.
+    cells = [c.text for t in document.tables for r in t.rows for c in r.cells]
+    assert any("95.0 - 105.0 % of label claim" in c for c in cells), cells
+
+
+def test_deleting_a_dossier_removes_the_documents_it_exported(
+        app_client, loaded, stub_model):
+    """Purging a project has to take the exported files with it.
+
+    The purge collected blobs from `cmc_documents` only. `cmc_exports` rows
+    were deleted from the database and their files left on disk -- and an
+    exported dossier is not a lesser copy of the data, it is every
+    specification limit, every batch result and every stability figure in one
+    file. A customer told their project had been purged would have been told
+    something untrue about the most complete artefact in it.
+    """
+    token, cmc_id, deliverable_id, sections = loaded
+    app_client.post(f"/api/v1/cmc/projects/{cmc_id}/results:verify",
+                    headers=_auth(token), json={"all_unverified": True})
+
+    spec_section = next(s for s in sections if s["section_code"] == "P.5.1")
+    stub_model("P.5.1 Specification(s)\n\nBelow.\n\n[TABLE: spec_table]")
+    app_client.post(f"/api/v1/cmc/sections/{spec_section['id']}/generate",
+                    headers=_auth(token), json={})
+    app_client.patch(f"/api/v1/cmc/sections/{spec_section['id']}/status",
+                     headers=_auth(token), json={"status": "approved"})
+    for section in sections:
+        if section["is_container"] or section["id"] == spec_section["id"]:
+            continue
+        app_client.patch(f"/api/v1/cmc/sections/{section['id']}",
+                         headers=_auth(token), json={"enabled": False})
+
+    exported = app_client.post(f"/api/v1/cmc/projects/{cmc_id}/export",
+                               headers=_auth(token),
+                               json={"deliverable_id": deliverable_id,
+                                     "granularity": "both"})
+    assert exported.status_code == 201, exported.text
+
+    from app.storage import abs_path
+
+    paths = [abs_path(f["storage_path"]) for f in exported.json()["files"]]
+    assert paths and all(p.exists() for p in paths), paths
+
+    deleted = app_client.delete(f"/api/v1/cmc/projects/{cmc_id}", headers=_auth(token))
+    assert deleted.status_code == 200, deleted.text
+    survivors = [str(p) for p in paths if p.exists()]
+    assert not survivors, f"exported files survived the purge: {survivors}"
+
+
+def test_every_file_an_export_produced_can_be_downloaded(
+        app_client, loaded, stub_model):
+    """An export of granularity "both" writes two files and the record's
+    `storage_path` names only the first. The screen listed both and could
+    fetch neither but the first."""
+    token, cmc_id, deliverable_id, sections = loaded
+    app_client.post(f"/api/v1/cmc/projects/{cmc_id}/results:verify",
+                    headers=_auth(token), json={"all_unverified": True})
+    spec_section = next(s for s in sections if s["section_code"] == "P.5.1")
+    stub_model("P.5.1 Specification(s)\n\nBelow.\n\n[TABLE: spec_table]")
+    app_client.post(f"/api/v1/cmc/sections/{spec_section['id']}/generate",
+                    headers=_auth(token), json={})
+    app_client.patch(f"/api/v1/cmc/sections/{spec_section['id']}/status",
+                     headers=_auth(token), json={"status": "approved"})
+    for section in sections:
+        if section["is_container"] or section["id"] == spec_section["id"]:
+            continue
+        app_client.patch(f"/api/v1/cmc/sections/{section['id']}",
+                         headers=_auth(token), json={"enabled": False})
+
+    exported = app_client.post(f"/api/v1/cmc/projects/{cmc_id}/export",
+                               headers=_auth(token),
+                               json={"deliverable_id": deliverable_id,
+                                     "granularity": "both"})
+    assert exported.status_code == 201, exported.text
+    record = exported.json()
+    assert len(record["files"]) == 2, record["files"]
+
+    seen = []
+    for index, entry in enumerate(record["files"]):
+        got = app_client.get(f"/api/v1/cmc/exports/{record['id']}/download",
+                             headers=_auth(token), params={"index": index})
+        assert got.status_code == 200, (index, got.text)
+        assert got.content, entry["filename"]
+        seen.append(len(got.content))
+    # Two genuinely different files, not the same one served twice.
+    assert seen[0] != seen[1]
+
+    missing = app_client.get(f"/api/v1/cmc/exports/{record['id']}/download",
+                             headers=_auth(token), params={"index": 5})
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["error"]["code"] == "CMC_EXPORT_NO_SUCH_FILE"

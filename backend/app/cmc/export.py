@@ -206,33 +206,64 @@ def plan_export(sections, *, require_approved: bool = True) -> ExportPlan:
     """What would be written, and what stands in the way.
 
     `sections` are (section_code, title, status, applicability, content,
-    table_keys) tuples from the router. The gate is here rather than in the
-    writer so the UI can show exactly what it would refuse before anybody
-    presses anything.
+    table_keys, justification_only) tuples from the router; the last element is
+    optional and defaults to False. The gate is here rather than in the writer
+    so the UI can show exactly what it would refuse before anybody presses
+    anything.
+
+    `justification_only` is load-bearing rather than bookkeeping. A section
+    marked not applicable normally exports the sentence saying so, and there is
+    nothing in that to approve. But the router hands such a section its DRAFT
+    whenever one exists and is non-empty -- and a draft is model-written prose.
+    Skipping the approval check on applicability alone therefore exported
+    unreviewed AI text under a heading nobody expected to contain any.
     """
     plan = ExportPlan()
-    for code, title, status, applicability, content, table_keys in sections:
-        if applicability in ("not_applicable", "referenced_dmf"):
+    for row in sections:
+        code, title, status, applicability, content, table_keys = row[:6]
+        justification_only = bool(row[6]) if len(row) > 6 else False
+        content = content or ""
+
+        if applicability in ("not_applicable", "referenced_dmf") and justification_only:
             # Still a section of the dossier, with its justification as its
             # body: a numbered heading that simply vanished would read as an
-            # omission rather than an answer.
+            # omission rather than an answer. Nobody drafted it, so there is
+            # nothing here to have approved.
             plan.sections.append(SectionRender(
                 section_code=code, title=title, level=heading_level(code),
-                content=content or "", table_keys=[]))
+                content=content, table_keys=[]))
             continue
         if require_approved and status != "approved":
             plan.blockers.append({
                 "code": "SECTION_NOT_APPROVED", "section_code": code,
                 "message": f"{code} {title} is {status.replace('_', ' ')}, not approved.",
             })
-        if not (content or "").strip():
+        if not content.strip():
             plan.warnings.append({
                 "code": "SECTION_EMPTY", "section_code": code,
                 "message": f"{code} {title} has no content.",
             })
+
+        # The section's declared table has to be IN the section. `table_keys`
+        # was recorded here from the first version of this module and then read
+        # by nothing, so a data section whose [TABLE: ...] line had been edited
+        # away -- by a regeneration, or by somebody tidying the draft -- simply
+        # exported without its table. No blocker, no warning, no gap in the
+        # prose to notice: a specification section with no specification in it,
+        # which is the failure this whole module is arranged to prevent.
+        present = set(TABLE_MARKER_RE.findall(content))
+        for key in table_keys or []:
+            if key not in present:
+                plan.blockers.append({
+                    "code": "TABLE_MISSING", "section_code": code,
+                    "message": (f"{code} {title} is a data section whose table is "
+                                f"[TABLE: {key}], but its text does not contain that "
+                                "marker, so the table would be missing from the export."),
+                })
+
         plan.sections.append(SectionRender(
             section_code=code, title=title, level=heading_level(code),
-            content=content or "", table_keys=list(table_keys or [])))
+            content=content, table_keys=list(table_keys or [])))
 
     for section in plan.sections:
         leaf = leaf_for(section.section_code)
