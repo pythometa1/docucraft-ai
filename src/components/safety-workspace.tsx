@@ -1,6 +1,6 @@
 /**
- * The Safety / Pharmacovigilance module, M1: a product safety profile and the
- * reporting intervals set up against it.
+ * The Safety / Pharmacovigilance module: a product safety profile, the
+ * reporting intervals set up against it, and the sources those are read from.
  *
  * What this screen is really for is the three dates. A periodic safety report
  * is not a document about a product, it is a document about an INTERVAL, and
@@ -13,13 +13,15 @@
  * the same code the report itself will be built from, so the number on this
  * screen and the number in the document cannot be two different numbers.
  *
- * Ingestion, de-identification, coding, tabulations, drafting, QC and export
- * arrive in later milestones. This is deliberately the part they depend on.
+ * Sources are parsed into the case store and then STOP: de-identification runs
+ * before anything is indexed, embedded or sent to a model, and that stage is
+ * M3. The Sources tab says so rather than showing a green tick over half a
+ * pipeline. Coding, tabulations, drafting, QC and export follow it.
  */
 import { useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle, CalendarDays, CheckCircle2, ClipboardList, FileText, Globe,
-  Info, ListTree, Plus, ShieldCheck, Trash2, Users,
+  AlertTriangle, CalendarDays, CheckCircle2, ClipboardList, Database, FileText,
+  Globe, Info, ListTree, Plus, ShieldCheck, Trash2, Upload, Users,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -33,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, StageSkeleton } from "@/components/skeletons";
 import { SwapIn } from "@/components/motion";
+import { SafetyCases, SafetySources } from "@/components/safety-sources";
 import { cn } from "@/lib/utils";
 
 const SELECT_CLASS =
@@ -230,11 +233,13 @@ function Field({ label, hint, required, children }: {
 
 /* --------------------------------------------------------------- the tab shell */
 
-type Tab = "profile" | "reports" | "calendar" | "roles";
+type Tab = "profile" | "reports" | "sources" | "cases" | "calendar" | "roles";
 
 const TABS: [Tab, string, typeof ListTree][] = [
   ["profile", "Product profile", ClipboardList],
   ["reports", "Reporting intervals", FileText],
+  ["sources", "Sources", Upload],
+  ["cases", "Case store", Database],
   ["calendar", "Calendar", CalendarDays],
   ["roles", "Roles", Users],
 ];
@@ -287,6 +292,8 @@ function SafetyOverview({ product, onChanged }: {
       <SwapIn k={tab}>
         {tab === "profile" && <ProfileTab product={product} onChanged={onChanged} />}
         {tab === "reports" && <ReportsTab product={product} onChanged={onChanged} />}
+        {tab === "sources" && <SafetySources productId={product.id} />}
+        {tab === "cases" && <CasesTab product={product} />}
         {tab === "calendar" && <CalendarTab product={product} />}
         {tab === "roles" && <RolesTab product={product} onChanged={onChanged} />}
       </SwapIn>
@@ -901,6 +908,38 @@ function Count({ label, value, note, tone }: {
         {value === null ? "—" : value}
       </div>
       <div className="text-[10px] text-muted-foreground">{note}</div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- the cases */
+
+function CasesTab({ product }: { product: PvProduct }) {
+  // Which interval to badge against. A case's scope is only meaningful
+  // relative to a report's three dates, so the reader chooses one -- and the
+  // badge then comes from the same layer the figures will.
+  const [reportId, setReportId] = useState<string>(
+    product.reports.length ? product.reports[0].id : "");
+
+  return (
+    <div className="space-y-3">
+      {product.reports.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-xs text-muted-foreground">
+            Show each case's position in
+          </label>
+          <select className={cn(SELECT_CLASS, "h-8 w-auto text-xs")}
+                  value={reportId} onChange={(e) => setReportId(e.target.value)}>
+            <option value="">no particular interval</option>
+            {product.reports.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.doc_type_name} · {r.period_start} → {r.period_end}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      <SafetyCases productId={product.id} reportInstanceId={reportId || undefined} />
     </div>
   );
 }

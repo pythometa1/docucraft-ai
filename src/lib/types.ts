@@ -831,6 +831,74 @@ export type PvApprovalStatus = {
   source_document_id: string | null;
 };
 
+export type PvSource = {
+  id: string;
+  doc_type: string;
+  /** e2b_r3_xml | line_listing | cioms_form | case_narrative_doc | document.
+   *  Which pipeline reads the file, as opposed to which sections may cite it. */
+  input_type: string;
+  report_instance_id: string | null;
+  filename: string;
+  mime_type: string | null;
+  size_bytes: number;
+  page_count: number | null;
+  /** queued | parsing | awaiting_deid | done | failed */
+  processing_status: string;
+  error_message: string | null;
+  chunk_count: number;
+  case_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PvReadiness = {
+  required: { doc_type: string; label: string; present: boolean }[];
+  recommended: { doc_type: string; label: string; present: boolean }[];
+  missing_required: string[];
+};
+
+/** Where M2 stops. Nothing downstream may use a source until masking has run,
+ *  and masking is M3 — so `cleared` is false by construction for now. */
+export type PvDeidGate = {
+  documents_waiting: number;
+  cases_pending: number;
+  cleared: boolean;
+  note: string;
+};
+
+export type PvMappingProfile = {
+  id: string;
+  name: string;
+  source_system: string | null;
+  column_map: Record<string, string>;
+  shared: boolean;
+  created_at?: string;
+};
+
+export type PvCaseRow = {
+  id: string;
+  worldwide_case_id: string | null;
+  local_case_ids: string[];
+  case_version: number | null;
+  report_source: string | null;
+  country_of_occurrence: string | null;
+  initial_receipt_date: string | null;
+  latest_receipt_date: string | null;
+  is_serious: boolean;
+  seriousness_criteria: string[];
+  patient_age: number | null;
+  patient_sex: string | null;
+  deidentification_status: string;
+  confirmed_by: string | null;
+  source_document_id: string | null;
+  imported_from: string | null;
+  event_count: number;
+  coding_required: number;
+  /** interval | cumulative | after_lock | undated | outside, against a chosen
+   *  report. From the same scope layer the figures come from. */
+  scope: string | null;
+};
+
 /* ---- The CSR module ---- */
 
 export type CsrSection = {

@@ -18,7 +18,8 @@ import type {
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
-  PvRsiVersion, PvScopePreview, PvSection,
+  PvCaseRow, PvDeidGate, PvMappingProfile, PvReadiness,
+  PvRsiVersion, PvScopePreview, PvSection, PvSource,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
 } from "@/lib/types";
 
@@ -706,6 +707,63 @@ export const api = {
     country: string; approval_date?: string | null; indication?: string | null;
     formulation?: string | null; status?: string;
   }) => request<PvApprovalStatus>("POST", `/pv/products/${id}/approval-statuses`, { json: body }),
+
+  /* ---- Safety M2: sources, column mapping and the case store ---- */
+  pvSources: (id: string) =>
+    request<{ items: PvSource[]; readiness: PvReadiness;
+              doc_types: Record<string, string>;
+              input_types: Record<string, string> }>(
+      "GET", `/pv/products/${id}/documents`),
+  /** Two tags per file: the document type decides which sections may cite it,
+   *  the input type decides which pipeline reads it. */
+  pvUploadSources: (id: string, files: {
+    file: File; doc_type: string; input_type: string;
+  }[], reportInstanceId?: string) => {
+    const form = new FormData();
+    for (const entry of files) {
+      form.append("files", entry.file);
+      form.append("doc_types", entry.doc_type);
+      form.append("input_types", entry.input_type);
+    }
+    if (reportInstanceId) form.append("report_instance_id", reportInstanceId);
+    return request<{ items: PvSource[] }>(
+      "POST", `/pv/products/${id}/documents`, { formData: form });
+  },
+  pvRetagSource: (documentId: string, body: {
+    doc_type?: string; input_type?: string; report_instance_id?: string | null;
+  }) => request<PvSource>("PATCH", `/pv/documents/${documentId}`, { json: body }),
+  pvDeleteSource: (documentId: string) =>
+    request<{ deleted: boolean; purged: Record<string, number> }>(
+      "DELETE", `/pv/documents/${documentId}`),
+  /** `mappings` is document id -> column map. A line listing without one is
+   *  refused here rather than failing in the worker. */
+  pvProcessSources: (id: string, mappings: Record<string, Record<string, string>> = {}) =>
+    request<{ queued: number; documents: string[] }>(
+      "POST", `/pv/products/${id}/process`, { json: { mappings } }),
+  pvRetrySource: (documentId: string, mapping?: Record<string, string>) =>
+    request<{ queued: number }>("POST", `/pv/documents/${documentId}/retry`,
+      { json: { mappings: mapping ? { [documentId]: mapping } : {} } }),
+  pvProcessingStatus: (id: string) =>
+    request<{ items: PvSource[]; in_flight: boolean; cases: number;
+              deid_gate: PvDeidGate }>(
+      "GET", `/pv/products/${id}/processing-status`),
+  pvSourceColumns: (documentId: string) =>
+    request<{ headers: string[]; sample_rows: string[][]; row_count: number;
+              suggestions: { column: string; field: string | null; confidence: number }[];
+              fields: Record<string, string>; date_order_key: string }>(
+      "GET", `/pv/documents/${documentId}/columns`),
+  pvMappingProfiles: (id: string) =>
+    request<{ items: PvMappingProfile[] }>(
+      "GET", `/pv/products/${id}/mapping-profiles`),
+  pvSaveMappingProfile: (id: string, body: {
+    name: string; source_system?: string; column_map: Record<string, string>;
+    scoped_to_product?: boolean;
+  }) => request<PvMappingProfile>(
+    "POST", `/pv/products/${id}/mapping-profiles`, { json: body }),
+  pvCases: (id: string, params: {
+    report_instance_id?: string; q?: string; limit?: number; offset?: number;
+  } = {}) => request<{ items: PvCaseRow[]; total: number }>(
+    "GET", `/pv/products/${id}/cases`, { query: params }),
 
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>

@@ -56,8 +56,8 @@ def org_a_resources(app_client, two_orgs):
         CmcResult, CmcSection, CmcSite,
         Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
-        GenerationJob, Invoice, Mapping, Project, PvProduct, PvReportInstance,
-        PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
+        GenerationJob, Invoice, Mapping, Project, PvDocument, PvProduct,
+        PvReportInstance, PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
         TemplateBlueprint,
         TemplateBlueprintVersion, TemplateFile, TemplateLibrary, TemplateLibraryVersion,
@@ -223,6 +223,12 @@ def org_a_resources(app_client, two_orgs):
             data_lock_point=_d(2025, 12, 31), created_by=user.id)
         db.add(pv_report)
         db.flush()
+        pv_document = PvDocument(
+            org_id=org, pv_product_id=pv_product.id, doc_type="other",
+            input_type="line_listing", original_filename="listing.csv",
+            blob_path="pv/none/none.csv", uploaded_by=user.id)
+        db.add(pv_document)
+        db.flush()
 
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
@@ -244,6 +250,7 @@ def org_a_resources(app_client, two_orgs):
             "cmc_export_id": cmc_export.id,
             "pv_product_id": pv_product.id, "rsi_version_id": pv_rsi.id,
             "report_instance_id": pv_report.id,
+            "pv_document_id": pv_document.id,
         }
         db.commit()
     finally:
@@ -511,6 +518,26 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/pv/reports/{report_instance_id}/preview-scope"},
     {"method": "POST", "path": "/pv/reports/{report_instance_id}/due-dates",
      "body": {"region": "EU"}},
+
+    # Safety M2: sources and the case store.
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/documents"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/documents",
+     "files": [("files", ("listing.csv", b"a,b\n1,2\n", "text/csv")),
+               ("doc_types", (None, "other")),
+               ("input_types", (None, "document"))]},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/process",
+     "body": {"mappings": {}}},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/processing-status"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/cases"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/mapping-profiles"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/mapping-profiles",
+     "body": {"name": "p", "column_map": {"Case ID": "worldwide_case_id"}}},
+    {"method": "PATCH", "path": "/pv/documents/{pv_document_id}",
+     "body": {"doc_type": "other"}},
+    {"method": "DELETE", "path": "/pv/documents/{pv_document_id}"},
+    {"method": "POST", "path": "/pv/documents/{pv_document_id}/retry",
+     "body": {"mappings": {}}},
+    {"method": "GET", "path": "/pv/documents/{pv_document_id}/columns"},
 ]
 
 

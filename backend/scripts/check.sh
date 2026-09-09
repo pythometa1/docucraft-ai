@@ -145,6 +145,16 @@ FLOORS = {
     "safety/roles.py": 97,
     "safety/trees.py": 100,
     "safety/registry.py": 100,
+    # Reading an ICSR and a line listing. Both fail by looking right: a date
+    # read the wrong way round moves a case between two reporting intervals,
+    # and a line listing read row-per-case multiplies every count in the
+    # document by however many reactions people happened to have.
+    "safety/e2b.py": 95,
+    "safety/line_listing.py": 97,
+    # The pipeline, and the gate it stops at. An untested branch here is a
+    # source recorded as read that was not, or -- much worse -- one that
+    # travelled past de-identification before de-identification exists.
+    "safety/ingest.py": 90,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

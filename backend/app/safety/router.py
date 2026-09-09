@@ -23,10 +23,11 @@ means for every event in the report that follows.
 """
 
 from datetime import date
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.audit.service import log_audit
@@ -36,8 +37,10 @@ from app.models import (
     PvRsiListedTerm, PvRsiVersion, PvSection, PvSectionDraft, User, now,
 )
 from app.ownership import owned_project
+from app.safety import ingest as ingest_mod
 from app.safety import registry, roles, scope as scope_mod, trees
 from app.security import error, get_current_user
+from app.storage import abs_path, save_bytes
 
 router = APIRouter(tags=["safety"])
 
@@ -1048,3 +1051,525 @@ def add_approval_status(pv_product_id: str, body: ApprovalStatusIn,
     return {"id": row.id, "country": row.country, "status": row.status,
             "approval_date": row.approval_date, "indication": row.indication,
             "formulation": row.formulation}
+
+
+# ================================================================= M2: sources
+
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+ALLOWED_SUFFIXES = (".xml", ".csv", ".xlsx", ".pdf", ".docx", ".rtf", ".txt", ".md")
+
+#: Which suffixes each input type can actually be. An E2B export is XML; a
+#: line listing is a spreadsheet. Refusing the mismatch at upload is cheaper
+#: than a parser failure twenty files later, and the message can say what was
+#: expected rather than what went wrong.
+INPUT_SUFFIXES = {
+    "e2b_r3_xml": (".xml",),
+    "line_listing": (".csv", ".xlsx"),
+    "cioms_form": (".pdf", ".docx", ".txt", ".md"),
+    "case_narrative_doc": (".pdf", ".docx", ".rtf", ".txt", ".md"),
+    "document": ALLOWED_SUFFIXES,
+}
+
+
+def _document_out(d) -> dict:
+    return {"id": d.id, "doc_type": d.doc_type, "input_type": d.input_type,
+            "report_instance_id": d.report_instance_id,
+            "filename": d.original_filename, "mime_type": d.mime_type,
+            "size_bytes": d.size_bytes, "page_count": d.page_count,
+            "processing_status": d.processing_status,
+            "error_message": d.error_message, "chunk_count": d.chunk_count,
+            "case_count": d.case_count,
+            "created_at": d.created_at, "updated_at": d.updated_at}
+
+
+def _owned_document(db: Session, document_id: str, user: User):
+    from app.models import PvDocument
+
+    document = db.get(PvDocument, document_id)
+    if not document or document.org_id != user.org_id:
+        raise error("PV_DOCUMENT_NOT_FOUND", "Source not found", 404)
+    return document
+
+
+def _report_type_keys(db: Session, pv_product_id: str) -> list:
+    return [r.doc_type_key for r in db.scalars(select(PvReportInstance).where(
+        PvReportInstance.pv_product_id == pv_product_id)).all()]
+
+
+@router.post("/pv/products/{pv_product_id}/documents", status_code=201)
+async def upload_sources(pv_product_id: str,
+                         files: list[UploadFile] = File(...),
+                         doc_types: list[str] = Form(...),
+                         input_types: list[str] | None = Form(None),
+                         report_instance_id: str | None = Form(None),
+                         db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    """Upload tagged sources.
+
+    Two tags per file. The document type decides which sections may cite it;
+    the input type decides whether it is parsed into cases or read as a
+    document, and those are different pipelines -- an E2B export read as a
+    document would become prose nobody can count, and a study report read as an
+    ICSR would fail on every field.
+    """
+    from app.models import PvDocument
+    from app.safety.ingest import file_hash
+
+    product = _owned_product(db, pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Uploading safety sources")
+    if len(doc_types) != len(files):
+        raise error("PV_TAGS_MISMATCH",
+                    f"{len(files)} file(s) arrived with {len(doc_types)} document "
+                    "type(s); every file needs exactly one.", 422)
+    inputs = list(input_types or [])
+    if inputs and len(inputs) != len(files):
+        raise error("PV_TAGS_MISMATCH",
+                    "input_types, when given, needs one entry per file.", 422)
+    if report_instance_id:
+        report = _owned_report(db, report_instance_id, user)
+        if report.pv_product_id != product.id:
+            raise error("PV_REPORT_WRONG_PRODUCT",
+                        "That report instance belongs to a different product.", 422)
+
+    saved = []
+    for index, (upload, doc_type) in enumerate(zip(files, doc_types)):
+        tag = (doc_type or "").strip().lower()
+        if tag not in registry.DOC_TYPES:
+            raise error("PV_BAD_DOC_TYPE",
+                        f"Unknown document type {doc_type!r}; one of "
+                        f"{', '.join(sorted(registry.DOC_TYPES))}.", 422)
+        input_type = ((inputs[index] if inputs else "") or "document").strip().lower()
+        if input_type not in registry.INPUT_TYPES:
+            raise error("PV_BAD_INPUT_TYPE",
+                        f"Unknown input type {input_type!r}; one of "
+                        f"{', '.join(sorted(registry.INPUT_TYPES))}.", 422)
+
+        name = upload.filename or "source"
+        suffix = Path(name).suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES:
+            raise error("PV_UNSUPPORTED_FILE",
+                        f"{name}: {suffix or 'files with no extension'} cannot be "
+                        f"read. Supported: {', '.join(ALLOWED_SUFFIXES)}.", 422)
+        expected = INPUT_SUFFIXES.get(input_type, ALLOWED_SUFFIXES)
+        if suffix not in expected:
+            raise error("PV_INPUT_TYPE_MISMATCH",
+                        f"{name} is a {suffix} file, and a "
+                        f"{registry.INPUT_TYPES[input_type]} is expected to be "
+                        f"{' or '.join(expected)}.", 422)
+
+        data = await upload.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise error("PV_FILE_TOO_LARGE",
+                        f"{name} is {len(data) // (1024 * 1024)} MB; the limit is "
+                        f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB per file.", 413)
+        if not data:
+            raise error("PV_EMPTY_FILE", f"{name} is empty.", 422)
+
+        document = PvDocument(
+            org_id=user.org_id, pv_product_id=product.id,
+            report_instance_id=report_instance_id or None,
+            doc_type=tag, input_type=input_type, original_filename=name,
+            blob_path=save_bytes(data, f"pv/{product.id}", suffix),
+            mime_type=upload.content_type, size_bytes=len(data),
+            file_hash=file_hash(data), uploaded_by=user.id)
+        db.add(document)
+        saved.append(document)
+    db.flush()
+    log_audit(db, user, "Uploaded safety sources", "pv_product", product.id,
+              product.project_id, "info", f"{len(saved)} file(s)")
+    db.commit()
+    for document in saved:
+        db.refresh(document)
+    return {"items": [_document_out(d) for d in saved]}
+
+
+@router.get("/pv/products/{pv_product_id}/documents")
+def list_sources(pv_product_id: str, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    from app.models import PvDocument
+    from app.safety.ingest import readiness
+
+    product = _owned_product(db, pv_product_id, user)
+    rows = db.scalars(select(PvDocument).where(
+        PvDocument.pv_product_id == product.id).order_by(PvDocument.created_at)).all()
+    return {"items": [_document_out(d) for d in rows],
+            "readiness": readiness(rows, _report_type_keys(db, product.id)),
+            "doc_types": registry.DOC_TYPES,
+            "input_types": registry.INPUT_TYPES}
+
+
+class SourcePatch(BaseModel):
+    doc_type: str | None = None
+    input_type: str | None = None
+    report_instance_id: str | None = None
+
+
+@router.patch("/pv/documents/{pv_document_id}")
+def retag_source(pv_document_id: str, body: SourcePatch,
+                 db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    document = _owned_document(db, pv_document_id, user)
+    roles.require_pv_role(db, document.pv_product_id, user, roles.WRITER,
+                          action="Retagging a source")
+    changes = body.model_dump(exclude_unset=True)
+    if changes.get("doc_type") and changes["doc_type"] not in registry.DOC_TYPES:
+        raise error("PV_BAD_DOC_TYPE",
+                    f"Unknown document type {changes['doc_type']!r}.", 422)
+    if changes.get("input_type") and changes["input_type"] not in registry.INPUT_TYPES:
+        raise error("PV_BAD_INPUT_TYPE",
+                    f"Unknown input type {changes['input_type']!r}.", 422)
+    for key, value in changes.items():
+        setattr(document, key, value)
+    # Retagging changes which pipeline the file goes through, so whatever the
+    # last one produced is no longer what this file says. It goes back to the
+    # queue rather than keeping a result from a reading nobody wants now.
+    document.processing_status = ingest_mod.QUEUED
+    document.error_message = None
+    document.updated_at = now()
+    log_audit(db, user, "Retagged a safety source", "pv_product",
+              document.pv_product_id, None, "info",
+              f"{document.original_filename}: " + ", ".join(sorted(changes)))
+    db.commit()
+    db.refresh(document)
+    return _document_out(document)
+
+
+@router.delete("/pv/documents/{pv_document_id}")
+def delete_source(pv_document_id: str, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    """Remove a source and everything read out of it.
+
+    Cases first, because a case whose source is gone is a case nobody can trace
+    to a document -- and an untraceable case in a safety report is worse than
+    no case, since it will be counted.
+    """
+    from app.models import (
+        PvCase, PvCaseDrug, PvCaseEvent, PvCaseNarrative, PvCaseOriginal, PvChunk,
+    )
+
+    document = _owned_document(db, pv_document_id, user)
+    roles.require_pv_role(db, document.pv_product_id, user, roles.WRITER,
+                          action="Deleting a source")
+    cases = db.scalars(select(PvCase).where(
+        PvCase.source_document_id == document.id)).all()
+    case_ids = [c.id for c in cases]
+    counts = {"cases": len(cases)}
+    if case_ids:
+        for model in (PvCaseEvent, PvCaseDrug, PvCaseNarrative, PvCaseOriginal):
+            rows = db.scalars(select(model).where(model.case_id.in_(case_ids))).all()
+            counts[model.__tablename__] = len(rows)
+            for row in rows:
+                db.delete(row)
+        db.flush()
+        for case in cases:
+            db.delete(case)
+    for original in db.scalars(select(PvCaseOriginal).where(
+            PvCaseOriginal.source_document_id == document.id)).all():
+        db.delete(original)
+    for chunk in db.scalars(select(PvChunk).where(
+            PvChunk.document_id == document.id)).all():
+        db.delete(chunk)
+    blob = abs_path(document.blob_path) if document.blob_path else None
+    db.delete(document)
+    log_audit(db, user, "Deleted a safety source", "pv_product",
+              document.pv_product_id, None, "warning",
+              f"{document.original_filename}: {counts['cases']} case(s) removed with it")
+    db.commit()
+    if blob is not None:
+        try:
+            blob.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return {"deleted": True, "purged": counts}
+
+
+class ProcessRequest(BaseModel):
+    """Column mappings for the line listings in this batch, by document id."""
+    mappings: dict = {}
+
+
+@router.post("/pv/products/{pv_product_id}/process", status_code=202)
+def process_sources(pv_product_id: str, body: ProcessRequest,
+                    db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    """Read every queued source.
+
+    A line listing without a mapping is refused here rather than failing in the
+    worker, so the answer arrives while somebody is still looking at the screen
+    that would fix it.
+    """
+    from app.models import PvDocument
+
+    product = _owned_product(db, pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Processing safety sources")
+    pending = db.scalars(select(PvDocument).where(
+        PvDocument.pv_product_id == product.id,
+        PvDocument.processing_status.in_(
+            (ingest_mod.QUEUED, ingest_mod.FAILED)))).all()
+    if not pending:
+        return {"queued": 0, "documents": []}
+
+    unmapped = [d.original_filename for d in pending
+                if d.input_type == "line_listing" and not body.mappings.get(d.id)]
+    if unmapped:
+        raise error("PV_MAPPING_REQUIRED",
+                    f"{', '.join(unmapped)} need a column mapping before they can be "
+                    "read. Map the columns, or save a profile and reuse it.", 422)
+
+    jobs = []
+    for document in pending:
+        document.processing_status = ingest_mod.QUEUED
+        document.error_message = None
+        jobs.append({"document_id": document.id,
+                     "mapping": body.mappings.get(document.id)})
+    log_audit(db, user, "Processed safety sources", "pv_product", product.id,
+              product.project_id, "info", f"{len(jobs)} file(s)")
+    db.commit()
+    ingest_mod.ingest_in_background(jobs)
+    return {"queued": len(jobs), "documents": [j["document_id"] for j in jobs]}
+
+
+@router.post("/pv/documents/{pv_document_id}/retry", status_code=202)
+def retry_source(pv_document_id: str, body: ProcessRequest,
+                 db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    document = _owned_document(db, pv_document_id, user)
+    roles.require_pv_role(db, document.pv_product_id, user, roles.WRITER,
+                          action="Retrying a source")
+    mapping = body.mappings.get(document.id) or body.mappings.get("mapping")
+    if document.input_type == "line_listing" and not mapping:
+        raise error("PV_MAPPING_REQUIRED",
+                    f"{document.original_filename} needs a column mapping.", 422)
+    document.processing_status = ingest_mod.QUEUED
+    document.error_message = None
+    db.commit()
+    ingest_mod.ingest_in_background(
+        [{"document_id": document.id, "mapping": mapping}])
+    return {"queued": 1}
+
+
+@router.get("/pv/products/{pv_product_id}/processing-status")
+def processing_status(pv_product_id: str, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """Per-file state, and whether anything is still moving.
+
+    `deid_gate` is the part worth reading. A source that parsed successfully
+    stops at `awaiting_deid`, and nothing downstream may use it until the
+    de-identification pass has run -- which is M3. Reporting that as "done"
+    would tell somebody their sources were ready when what is ready is half a
+    pipeline.
+    """
+    from app.models import PvCase, PvDocument
+
+    product = _owned_product(db, pv_product_id, user)
+    rows = db.scalars(select(PvDocument).where(
+        PvDocument.pv_product_id == product.id).order_by(PvDocument.created_at)).all()
+    in_flight = [d for d in rows if d.processing_status in
+                 (ingest_mod.QUEUED, ingest_mod.PARSING)]
+    waiting = [d for d in rows if d.processing_status == ingest_mod.AWAITING_DEID]
+    cases = db.scalar(select(func.count(PvCase.id)).where(
+        PvCase.pv_product_id == product.id)) or 0
+    unmasked = db.scalar(select(func.count(PvCase.id)).where(
+        PvCase.pv_product_id == product.id,
+        PvCase.deidentification_status == "pending")) or 0
+    return {
+        "items": [_document_out(d) for d in rows],
+        "in_flight": bool(in_flight),
+        "cases": cases,
+        "deid_gate": {
+            "documents_waiting": len(waiting),
+            "cases_pending": unmasked,
+            "cleared": len(waiting) == 0 and unmasked == 0,
+            "note": (
+                "Sources are parsed and their free text is held in the "
+                "access-controlled store. De-identification, and everything "
+                "downstream of it, is not built yet: nothing has been indexed, "
+                "embedded, or sent to a model."),
+        },
+    }
+
+
+# ------------------------------------------------------------ column mapping
+
+@router.get("/pv/documents/{pv_document_id}/columns")
+def read_columns(pv_document_id: str, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """The headers of a line listing, and a first guess at what each one is.
+
+    A guess, and returned as one: `confidence` is on every suggestion and the
+    screen asks for confirmation. A column mapped wrongly puts one field's
+    values under another field's name, and everything downstream is then right
+    about the wrong thing.
+    """
+    from app.docgen.extraction import extract
+    from app.safety.line_listing import DATE_ORDER_KEY, FIELDS, suggest
+
+    document = _owned_document(db, pv_document_id, user)
+    if document.input_type != "line_listing":
+        raise error("PV_NOT_A_LINE_LISTING",
+                    "Column mapping applies to a line listing; this source is a "
+                    f"{registry.INPUT_TYPES.get(document.input_type, document.input_type)}.",
+                    422)
+    try:
+        extraction = extract(str(abs_path(document.blob_path)),
+                            mime_type=document.mime_type,
+                            source_name=document.original_filename)
+    except Exception as exc:  # noqa: BLE001 - an unreadable file is not a 500
+        raise error("PV_SOURCE_UNREADABLE",
+                    f"{document.original_filename} could not be read: {exc}", 422)
+    tables = [t for t in extraction.tables if len(t.rows) >= 2]
+    if not tables:
+        raise error("PV_NO_TABLE",
+                    f"{document.original_filename} holds no table with a header row "
+                    "and at least one data row.", 422)
+    table = max(tables, key=lambda t: len(t.rows))
+    headers = table.rows[0]
+    sample = table.rows[1:6]
+    return {
+        "headers": headers,
+        "sample_rows": sample,
+        "row_count": len(table.rows) - 1,
+        "suggestions": [{"column": s.column, "field": s.field,
+                         "confidence": s.confidence} for s in suggest(headers)],
+        "fields": FIELDS,
+        "date_order_key": DATE_ORDER_KEY,
+    }
+
+
+class MappingProfileIn(BaseModel):
+    name: str
+    source_system: str | None = None
+    column_map: dict = {}
+    #: Bind the profile to this product, or leave it available org-wide.
+    scoped_to_product: bool = True
+
+
+@router.get("/pv/products/{pv_product_id}/mapping-profiles")
+def list_mapping_profiles(pv_product_id: str, db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    """This product's saved mappings, and the organisation's shared ones."""
+    from app.models import PvMappingProfile
+
+    product = _owned_product(db, pv_product_id, user)
+    rows = db.scalars(select(PvMappingProfile).where(
+        PvMappingProfile.org_id == user.org_id,
+        or_(PvMappingProfile.pv_product_id == product.id,
+            PvMappingProfile.pv_product_id.is_(None))
+    ).order_by(PvMappingProfile.name)).all()
+    return {"items": [{
+        "id": p.id, "name": p.name, "source_system": p.source_system,
+        "column_map": p.column_map or {},
+        "shared": p.pv_product_id is None,
+        "created_at": p.created_at,
+    } for p in rows]}
+
+
+@router.post("/pv/products/{pv_product_id}/mapping-profiles", status_code=201)
+def create_mapping_profile(pv_product_id: str, body: MappingProfileIn,
+                           db: Session = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    """Save a mapping so the next cycle is one click.
+
+    Validated before it is stored, not when it is next used: a profile saved
+    broken is a profile that fails a quarter later, on somebody else's shift.
+    """
+    from app.models import PvMappingProfile
+    from app.safety.line_listing import validate_mapping
+
+    product = _owned_product(db, pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Saving a column mapping")
+    if not body.name.strip():
+        raise error("PV_PROFILE_NEEDS_NAME", "A mapping profile needs a name.", 422)
+    problems = validate_mapping(body.column_map)
+    if problems:
+        raise error("PV_BAD_MAPPING", "; ".join(problems), 422,
+                    {"problems": problems})
+    profile = PvMappingProfile(
+        org_id=user.org_id,
+        pv_product_id=product.id if body.scoped_to_product else None,
+        name=body.name.strip(), source_system=body.source_system,
+        column_map=body.column_map, created_by=user.id)
+    db.add(profile)
+    db.flush()
+    log_audit(db, user, "Saved a column mapping profile", "pv_product", product.id,
+              product.project_id, "info", profile.name)
+    db.commit()
+    db.refresh(profile)
+    return {"id": profile.id, "name": profile.name,
+            "source_system": profile.source_system,
+            "column_map": profile.column_map, "shared": profile.pv_product_id is None}
+
+
+# ------------------------------------------------------------------- cases
+
+@router.get("/pv/products/{pv_product_id}/cases")
+def list_cases(pv_product_id: str,
+               report_instance_id: str | None = None,
+               q: str | None = None,
+               limit: int = Query(100, ge=1, le=1000),
+               offset: int = Query(0, ge=0),
+               db: Session = Depends(get_db),
+               user: User = Depends(get_current_user)):
+    """The case store, paged, with each case's position in time.
+
+    `scope` is the badge, and it comes from `app.safety.scope.scope_of_case` --
+    the same three questions the SQL asks, in the same order, so a row shown as
+    counted and a row actually counted cannot come apart.
+    """
+    from app.models import PvCase, PvCaseEvent
+
+    product = _owned_product(db, pv_product_id, user)
+    statement = select(PvCase).where(PvCase.pv_product_id == product.id)
+    if (q or "").strip():
+        like = f"%{q.strip()}%"
+        statement = statement.where(or_(
+            PvCase.worldwide_case_id.ilike(like),
+            PvCase.country_of_occurrence.ilike(like),
+            PvCase.id.in_(select(PvCaseEvent.case_id).where(
+                PvCaseEvent.pv_product_id == product.id,
+                or_(PvCaseEvent.verbatim_term.ilike(like),
+                    PvCaseEvent.meddra_pt.ilike(like))))))
+    total = db.scalar(statement.with_only_columns(
+        func.count(PvCase.id)).order_by(None)) or 0
+    rows = db.scalars(statement.order_by(PvCase.created_at.desc())
+                      .limit(limit).offset(offset)).all()
+
+    scope = None
+    if report_instance_id:
+        report = _owned_report(db, report_instance_id, user)
+        if report.pv_product_id != product.id:
+            raise error("PV_REPORT_WRONG_PRODUCT",
+                        "That report instance belongs to a different product.", 422)
+        scope = scope_mod.scope_for(product, report)
+
+    events = {}
+    for row in db.scalars(select(PvCaseEvent).where(
+            PvCaseEvent.case_id.in_([c.id for c in rows] or [""]))).all():
+        events.setdefault(row.case_id, []).append(row)
+
+    return {
+        "items": [{
+            "id": case.id, "worldwide_case_id": case.worldwide_case_id,
+            "local_case_ids": case.local_case_ids or [],
+            "case_version": case.case_version,
+            "report_source": case.report_source,
+            "country_of_occurrence": case.country_of_occurrence,
+            "initial_receipt_date": case.initial_receipt_date,
+            "latest_receipt_date": case.latest_receipt_date,
+            "is_serious": case.is_serious,
+            "seriousness_criteria": case.seriousness_criteria or [],
+            "patient_age": case.patient_age, "patient_sex": case.patient_sex,
+            "deidentification_status": case.deidentification_status,
+            "confirmed_by": case.confirmed_by,
+            "source_document_id": case.source_document_id,
+            "imported_from": case.imported_from,
+            "event_count": len(events.get(case.id, [])),
+            "coding_required": sum(1 for e in events.get(case.id, [])
+                                   if e.coding_required),
+            "scope": scope_mod.scope_of_case(scope, case) if scope else None,
+        } for case in rows],
+        "total": total,
+    }
