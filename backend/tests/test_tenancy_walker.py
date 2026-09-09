@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import date as _d
+
 API = "/api/v1"
 
 # Routes with no tenant to leak. Each needs a one-line reason -- an entry here
@@ -54,7 +56,8 @@ def org_a_resources(app_client, two_orgs):
         CmcResult, CmcSection, CmcSite,
         Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
-        GenerationJob, Invoice, Mapping, Project, ReviewComment, ReviewTask, SourceFile, Study,
+        GenerationJob, Invoice, Mapping, Project, PvProduct, PvReportInstance,
+        PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
         TemplateBlueprint,
         TemplateBlueprintVersion, TemplateFile, TemplateLibrary, TemplateLibraryVersion,
@@ -202,6 +205,25 @@ def org_a_resources(app_client, two_orgs):
         db.add(cmc_export)
         db.flush()
 
+        # The Safety/PV module. One row of everything a route addresses --
+        # including a report instance, because half the module's surface hangs
+        # off an interval rather than off the product.
+        pv_product = PvProduct(org_id=org, project_id=project_a,
+                               product_name="Tenantazole", created_by=user.id)
+        db.add(pv_product)
+        db.flush()
+        pv_rsi = PvRsiVersion(org_id=org, pv_product_id=pv_product.id,
+                              rsi_type="ccds", version_label="1.0",
+                              created_by=user.id)
+        db.add(pv_rsi)
+        db.flush()
+        pv_report = PvReportInstance(
+            org_id=org, pv_product_id=pv_product.id, doc_type_key="dsur",
+            period_start=_d(2025, 1, 1), period_end=_d(2025, 12, 31),
+            data_lock_point=_d(2025, 12, 31), created_by=user.id)
+        db.add(pv_report)
+        db.flush()
+
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
             "source_id": sf.id, "draft_id": draft.id, "document_id": gd.id,
@@ -220,6 +242,8 @@ def org_a_resources(app_client, two_orgs):
             "cmc_document_id": cmc_document.id, "cmc_result_id": cmc_result.id,
             "entity": "results", "table_key": "spec_table",
             "cmc_export_id": cmc_export.id,
+            "pv_product_id": pv_product.id, "rsi_version_id": pv_rsi.id,
+            "report_instance_id": pv_report.id,
         }
         db.commit()
     finally:
@@ -452,6 +476,41 @@ ROUTES: list[dict] = [
      "body": {"granularity": "combined"}},
     {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/exports"},
     {"method": "GET", "path": "/cmc/exports/{cmc_export_id}/download"},
+
+    # Safety / Pharmacovigilance.
+    {"method": "GET", "path": "/pv/products/{pv_product_id}"},
+    {"method": "PATCH", "path": "/pv/products/{pv_product_id}",
+     "body": {"inn": "x"}},
+    {"method": "DELETE", "path": "/pv/products/{pv_product_id}"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/members"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/members",
+     "body": {"user_id": "nobody", "pv_role": "writer"}},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/rsi-versions"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/rsi-versions",
+     "body": {"rsi_type": "ccds", "version_label": "9.9"}},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/reports"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/reports",
+     "body": {"doc_type_key": "dsur", "period_start": "2026-01-01",
+              "period_end": "2026-06-30", "data_lock_point": "2026-06-30"}},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/scope-preview",
+     "body": {"doc_type_key": "dsur", "period_start": "2026-01-01",
+              "period_end": "2026-06-30", "data_lock_point": "2026-06-30"}},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/calendar"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/approval-statuses"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/approval-statuses",
+     "body": {"country": "DE"}},
+    {"method": "GET", "path": "/pv/rsi-versions/{rsi_version_id}/listed-terms"},
+    {"method": "POST", "path": "/pv/rsi-versions/{rsi_version_id}/listed-terms",
+     "body": [{"meddra_pt": "Headache"}]},
+    {"method": "POST", "path": "/pv/rsi-versions/{rsi_version_id}/pin"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}"},
+    {"method": "PATCH", "path": "/pv/reports/{report_instance_id}",
+     "body": {"meddra_version": "27.0"}},
+    {"method": "DELETE", "path": "/pv/reports/{report_instance_id}"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/sections"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/preview-scope"},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/due-dates",
+     "body": {"region": "EU"}},
 ]
 
 

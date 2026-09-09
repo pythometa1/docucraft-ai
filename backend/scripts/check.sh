@@ -135,6 +135,16 @@ FLOORS = {
     "cmc/qc.py": 88,
     "cmc/export.py": 85,
     "cmc/drafting.py": 88,
+    # The Safety module's count layer. Every figure in a periodic safety report
+    # is a count, and the way counts go wrong is that two code paths compute
+    # them slightly differently -- so there is one path, and every branch of it
+    # decides whether a case is inside a regulatory reporting window. An
+    # untested branch here is a tabulation that is right about the wrong
+    # interval, which reads exactly like a tabulation.
+    "safety/scope.py": 97,
+    "safety/roles.py": 97,
+    "safety/trees.py": 100,
+    "safety/registry.py": 100,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

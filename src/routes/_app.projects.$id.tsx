@@ -13,6 +13,7 @@ import { ErrorBanner } from "@/components/error-banner";
 import { ClinicalStudio, hasClinicalService } from "@/components/clinical-studio";
 import { CmcWorkspace } from "@/components/cmc-workspace";
 import { CsrWorkspace } from "@/components/csr-workspace";
+import { SafetyWorkspace } from "@/components/safety-workspace";
 import { InvoiceStudio } from "@/components/invoice-studio";
 import { PolishedEmpty, SkeletonBar, StageSkeleton } from "@/components/skeletons";
 import { plainly } from "@/components/processing-banner";
@@ -180,8 +181,13 @@ function ProjectDetail() {
   // document type: 3.2.S, 3.2.P and an APQR are deliverables inside one
   // dossier rather than three different screens.
   const isCmcProject = project.function === "Quality-CMC";
+  // A Safety project is the pharmacovigilance module's home whatever its
+  // document type, for the same reason: a PBRER and a DSUR are reporting
+  // intervals inside one product's safety profile rather than two screens.
+  const isSafetyProject = project.function === "Safety";
   const hasVerticalStudio =
-    isInvoiceProject || isCsrProject || isClinicalProject || isCmcProject;
+    isInvoiceProject || isCsrProject || isClinicalProject || isCmcProject
+    || isSafetyProject;
 
   const activeKey = active ?? firstIncomplete;
   const activeIdx = STAGES.findIndex((s) => s.key === activeKey);
@@ -267,6 +273,8 @@ function ProjectDetail() {
         <CsrWorkspace project={project} />
       ) : isCmcProject ? (
         <CmcWorkspace project={project} />
+      ) : isSafetyProject ? (
+        <SafetyWorkspace project={project} />
       ) : isClinicalProject ? (
         <ClinicalStudio project={project} />
       ) : (

@@ -17,6 +17,8 @@ import type {
   CmcRenderedTable, CmcResultRow, CmcSection, CmcSite, CmcSource, CmcTestRow,
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
+  PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
+  PvRsiVersion, PvScopePreview, PvSection,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
 } from "@/lib/types";
 
@@ -611,6 +613,99 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, "DOWNLOAD_FAILED", "The export could not be downloaded.");
     return URL.createObjectURL(await res.blob());
   },
+
+  /* ---- Safety / Pharmacovigilance: reporting intervals and the case store ----
+   *
+   * The endpoint that shapes this screen is `pvScopePreview`. A report's three
+   * dates are the hardest thing to change once figures depend on them, so the
+   * setup screen asks the server what a proposed interval would actually
+   * contain before anybody commits to it -- and the server answers through the
+   * same scope layer the report itself will be built from.
+   */
+  pvReportTypes: () =>
+    request<{ items: PvReportType[]; doc_types: Record<string, string>;
+              input_types: Record<string, string>; regions: string[] }>(
+      "GET", "/pv/report-types"),
+  pvListProducts: () =>
+    request<{ items: PvProduct[] }>("GET", "/pv/products"),
+  pvGetProduct: (id: string) =>
+    request<PvProduct>("GET", `/pv/products/${id}`),
+  pvCreateProduct: (body: {
+    project_id: string; product_name: string; inn?: string; mah_name?: string;
+    atc_code?: string; ibd?: string | null; dibd?: string | null;
+    formulations?: string[]; routes?: string[]; approved_indications?: string[];
+    development_indications?: string[]; regions?: string[];
+  }) => request<PvProduct>("POST", "/pv/products", { json: body }),
+  pvUpdateProduct: (id: string, body: Record<string, unknown>) =>
+    request<PvProduct>("PATCH", `/pv/products/${id}`, { json: body }),
+  pvDeleteProduct: (id: string) =>
+    request<{ deleted: boolean; purged: Record<string, number> }>(
+      "DELETE", `/pv/products/${id}`),
+
+  pvMembers: (id: string) =>
+    request<{ items: PvMember[]; roles: { key: string; label: string }[];
+              my_role: string | null }>("GET", `/pv/products/${id}/members`),
+  pvGrantRole: (id: string, body: { user_id: string; pv_role: string }) =>
+    request<{ id: string; user_id: string; pv_role: string }>(
+      "POST", `/pv/products/${id}/members`, { json: body }),
+
+  pvRsiVersions: (id: string) =>
+    request<{ items: PvRsiVersion[]; rsi_types: string[] }>(
+      "GET", `/pv/products/${id}/rsi-versions`),
+  pvCreateRsiVersion: (id: string, body: {
+    rsi_type: string; version_label: string; effective_date?: string | null;
+  }) => request<PvRsiVersion>("POST", `/pv/products/${id}/rsi-versions`, { json: body }),
+  /** Pinning is a qualified-person act: the pinned version is what "expected"
+   *  means for every event in every report that follows it. */
+  pvPinRsiVersion: (rsiVersionId: string) =>
+    request<{ pinned: PvRsiVersion; superseded: string[];
+              open_reports_on_previous_version: number }>(
+      "POST", `/pv/rsi-versions/${rsiVersionId}/pin`),
+  pvListedTerms: (rsiVersionId: string, params: { q?: string; limit?: number; offset?: number } = {}) =>
+    request<{ items: { id: string; meddra_pt: string; meddra_soc: string | null;
+                       condition_text: string | null }[];
+              total: number; rsi_version: PvRsiVersion }>(
+      "GET", `/pv/rsi-versions/${rsiVersionId}/listed-terms`, { query: params }),
+
+  pvReports: (id: string) =>
+    request<{ items: PvReportInstance[] }>("GET", `/pv/products/${id}/reports`),
+  pvCreateReport: (id: string, body: {
+    doc_type_key: string; period_start: string; period_end: string;
+    data_lock_point: string; sequence_number?: number | null;
+    rsi_version_id?: string | null; meddra_version?: string | null;
+    baseline_report_id?: string | null; regions?: string[];
+  }) => request<PvReportInstance & { sections: PvSection[]; carried_forward: number }>(
+    "POST", `/pv/products/${id}/reports`, { json: body }),
+  pvGetReport: (reportId: string) =>
+    request<PvReportInstance & { my_role: string | null }>("GET", `/pv/reports/${reportId}`),
+  pvUpdateReport: (reportId: string, body: Record<string, unknown>) =>
+    request<PvReportInstance>("PATCH", `/pv/reports/${reportId}`, { json: body }),
+  pvDeleteReport: (reportId: string) =>
+    request<{ deleted: boolean; sections: number }>("DELETE", `/pv/reports/${reportId}`),
+  pvReportSections: (reportId: string) =>
+    request<{ items: PvSection[] }>("GET", `/pv/reports/${reportId}/sections`),
+  /** What a proposed interval would contain, before it exists. */
+  pvScopePreview: (id: string, body: {
+    doc_type_key: string; period_start: string; period_end: string;
+    data_lock_point: string; baseline_report_id?: string | null;
+  }) => request<PvScopePreview>("POST", `/pv/products/${id}/scope-preview`, { json: body }),
+  pvReportScope: (reportId: string) =>
+    request<PvScopePreview>("GET", `/pv/reports/${reportId}/preview-scope`),
+
+  pvCalendar: (id: string) =>
+    request<{ items: PvReportInstance[]; disclaimer: string }>(
+      "GET", `/pv/products/${id}/calendar`),
+  pvAddDueDate: (reportId: string, body: {
+    region: string; submission_due_date?: string | null; basis_note?: string | null;
+  }) => request<PvDueDate>("POST", `/pv/reports/${reportId}/due-dates`, { json: body }),
+
+  pvApprovalStatuses: (id: string) =>
+    request<{ items: PvApprovalStatus[]; statuses: string[] }>(
+      "GET", `/pv/products/${id}/approval-statuses`),
+  pvAddApprovalStatus: (id: string, body: {
+    country: string; approval_date?: string | null; indication?: string | null;
+    formulation?: string | null; status?: string;
+  }) => request<PvApprovalStatus>("POST", `/pv/products/${id}/approval-statuses`, { json: body }),
 
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>

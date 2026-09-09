@@ -1346,3 +1346,11 @@ from app.csr.models import (  # noqa: E402,F401
     CsrTemplate,
 )
 from app.finance.models import Customer, Invoice  # noqa: E402,F401
+from app.safety.models import (  # noqa: E402,F401
+    PvApprovalStatus, PvCase, PvCaseDrug, PvCaseEvent, PvCaseLab, PvCaseNarrative,
+    PvCaseOriginal, PvChunk, PvCitation, PvDeidItem, PvDocument,
+    PvDuplicateCandidate, PvDueDate, PvExport, PvExposure, PvLiteratureRef,
+    PvMappingProfile, PvMember, PvProduct, PvReportInstance, PvRsiListedTerm,
+    PvRsiVersion, PvSafetyAction, PvSafetyConcern, PvSection, PvSectionDraft,
+    PvSignal, PvStudy,
+)

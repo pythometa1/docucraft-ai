@@ -687,6 +687,150 @@ export type CmcExportRecord = {
   created_at: string;
 };
 
+/* ---- The Safety / Pharmacovigilance module ----
+ *
+ * The shape that matters here is the time model. A report instance carries
+ * three dates rather than one, and they are not interchangeable: the period
+ * bounds what counts as "this interval", and the data lock point bounds what
+ * may be counted at all. `PvScopePreview` is what the setup screen shows for a
+ * set of dates BEFORE anybody commits to them.
+ */
+
+export type PvRsiVersion = {
+  id: string;
+  rsi_type: string;
+  version_label: string;
+  effective_date: string | null;
+  source_document_id: string | null;
+  superseded_by: string | null;
+  is_current: boolean;
+  listed_term_count?: number;
+  created_at: string;
+};
+
+export type PvReportInstance = {
+  id: string;
+  pv_product_id: string;
+  doc_type_key: string;
+  doc_type_name: string;
+  structure_basis: string | null;
+  /** `ibd` or `dibd`: which birth date this report's cumulative figures count
+   *  from. A property of the report type, not of the product. */
+  cumulative_anchor: string | null;
+  sequence_number: number | null;
+  period_start: string;
+  period_end: string;
+  data_lock_point: string;
+  rsi_version_id: string | null;
+  meddra_version: string | null;
+  baseline_report_id: string | null;
+  regions: string[];
+  status: string;
+  qppv_signoff_by: string | null;
+  qppv_signoff_at: string | null;
+  section_count?: number;
+  due_dates?: PvDueDate[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type PvDueDate = {
+  id: string;
+  region: string;
+  submission_due_date: string | null;
+  basis_note: string | null;
+  /** Always true. This system is not the reporting clock. */
+  is_informational: boolean;
+};
+
+export type PvProduct = {
+  id: string;
+  project_id: string;
+  product_name: string;
+  inn: string | null;
+  mah_name: string | null;
+  atc_code: string | null;
+  /** International birth date: first approval anywhere. */
+  ibd: string | null;
+  /** Development international birth date: first trial authorisation. */
+  dibd: string | null;
+  formulations: string[];
+  routes: string[];
+  approved_indications: string[];
+  development_indications: string[];
+  regions: string[];
+  status: string;
+  reports: PvReportInstance[];
+  rsi_versions: PvRsiVersion[];
+  my_role?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PvScopePreview = {
+  interval_cases: number;
+  interval_events: number;
+  cumulative_cases: number | null;
+  cumulative_events: number | null;
+  cumulative_from: string | null;
+  cumulative_anchor: string;
+  cumulative_unavailable?: string;
+  new_since_baseline: number;
+  /** In the store, excluded by the data lock point. Shown, never counted. */
+  excluded_after_lock: number;
+  /** In the store with no date at all. Counted nowhere. */
+  undated: number;
+  baseline_report_id?: string;
+};
+
+export type PvReportType = {
+  key: string;
+  name: string;
+  structure_basis: string;
+  cumulative_anchor: string;
+  periodic: boolean;
+  section_count: number;
+  required_sources: string[];
+  recommended_sources: string[];
+};
+
+export type PvSection = {
+  id: string;
+  section_code: string;
+  title: string;
+  sort_order: number;
+  level: number;
+  is_container: boolean;
+  enabled: boolean;
+  guidance_text: string | null;
+  table_key: string | null;
+  source_types: string[];
+  status: string;
+  /** carried_forward | changed | new_data | needs_rewrite | fresh */
+  delta_status: string;
+  baseline_section_id: string | null;
+};
+
+export type PvMember = {
+  id: string;
+  user_id: string;
+  user_name: string | null;
+  user_email: string | null;
+  pv_role: string;
+  granted_by: string;
+  created_at: string;
+};
+
+export type PvApprovalStatus = {
+  id: string;
+  country: string;
+  approval_date: string | null;
+  indication: string | null;
+  formulation: string | null;
+  status: string;
+  source_document_id: string | null;
+};
+
 /* ---- The CSR module ---- */
 
 export type CsrSection = {

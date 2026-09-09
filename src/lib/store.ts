@@ -263,7 +263,10 @@ export const DOCUMENT_TYPES: Record<string, string[]> = {
   Clinical: ["Clinical Study Report", "Protocol Amendment", "Informed Consent", "Investigator Brochure"],
   "Quality-CMC": ["CMC Section", "Batch Record", "Deviation Report"],
   Quality: ["Quality Report", "SOP", "Audit Report"],
-  Safety: ["Adverse Event Report", "PSUR", "Safety Communication"],
+  // A Safety project holds a product's whole safety profile; the document type
+  // names what it is mostly for, and every report type is available inside it.
+  Safety: ["PSUR / PBRER", "DSUR", "PADER", "Risk Management Plan",
+           "Signal Evaluation", "Adverse Event Report", "Safety Communication"],
   "Medical Affairs": ["Medical Letter", "Publication Summary", "SRD"],
   Marketing: ["Product Brief", "Campaign Copy", "Localized Content"],
   Legal: ["Contract", "NDA", "Legal Memo"],
