@@ -97,13 +97,17 @@ export function CmcQuality({ cmcProjectId }: { cmcProjectId: string }) {
     }
   }
 
-  async function download(record: CmcExportRecord) {
-    setBusy(record.id);
+  /** One file, by its position in the export. An export of granularity "both"
+   *  writes a document and a zip; the record's own `storage_path` names only
+   *  the first, so a single control per row listed two files and could fetch
+   *  one of them. */
+  async function download(record: CmcExportRecord, index: number) {
+    setBusy(`${record.id}:${index}`);
     try {
-      const url = await api.cmcDownloadExport(record.id);
+      const url = await api.cmcDownloadExport(record.id, index);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = record.files[0]?.filename ?? "dossier.docx";
+      anchor.download = record.files[index]?.filename ?? "dossier.docx";
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch (e: any) {
@@ -207,8 +211,10 @@ export function CmcQuality({ cmcProjectId }: { cmcProjectId: string }) {
         <div className="flex flex-wrap justify-end gap-2">
           {!exportable && (
             <Button variant="outline" onClick={() => runExport(true)} disabled={busy !== null}
-                    className="text-destructive hover:bg-destructive/10">
-              Export anyway (recorded)
+                    className="text-destructive hover:bg-destructive/10"
+                    title="Writes the dossier over every blocker below, and records each one it
+                           overrode on the export.">
+              Export over {grouped.blocker.length} blocker{grouped.blocker.length === 1 ? "" : "s"}
             </Button>
           )}
           <Button onClick={() => runExport(false)} disabled={busy !== null || !exportable}>
@@ -246,13 +252,23 @@ export function CmcQuality({ cmcProjectId }: { cmcProjectId: string }) {
                     {record.files.map((f) => f.filename).join(", ") || "—"}
                   </td>
                   <td className="px-3 py-2 text-right">
-                    <button onClick={() => download(record)} disabled={busy !== null}
-                            className="rounded p-1.5 text-muted-foreground hover:bg-accent"
-                            title="Download">
-                      {record.granularity === "ectd_leaves"
-                        ? <FileArchive className="h-4 w-4" />
-                        : <Download className="h-4 w-4" />}
-                    </button>
+                    {record.files.length === 0 ? (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    ) : (
+                      <div className="flex justify-end gap-1">
+                        {record.files.map((file, index) => (
+                          <button key={file.filename ?? index}
+                                  onClick={() => download(record, index)}
+                                  disabled={busy !== null}
+                                  className="rounded p-1.5 text-muted-foreground hover:bg-accent"
+                                  title={`Download ${file.filename}`}>
+                            {file.filename?.endsWith(".zip")
+                              ? <FileArchive className="h-4 w-4" />
+                              : <Download className="h-4 w-4" />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

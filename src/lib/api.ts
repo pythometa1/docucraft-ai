@@ -541,11 +541,19 @@ export const api = {
   cmcCreateMaterial: (id: string, body: { kind: string; name: string } & Partial<CmcMaterial>) =>
     request<CmcMaterial>("POST", `/cmc/projects/${id}/materials`, { json: body }),
 
-  cmcBatches: (id: string, params: { material_id?: string; limit?: number; offset?: number } = {}) =>
-    request<{ items: CmcBatchRow[] }>("GET", `/cmc/projects/${id}/data/batches`, { query: params }),
-  cmcSpecifications: (id: string, params: { material_id?: string; limit?: number; offset?: number } = {}) =>
-    request<{ items: CmcTestRow[] }>("GET", `/cmc/projects/${id}/data/specifications`, { query: params }),
-  cmcResults: (id: string, params: { material_id?: string; limit?: number; offset?: number } = {}) =>
+  cmcBatches: (id: string, params: { material_id?: string; q?: string; limit?: number; offset?: number } = {}) =>
+    request<{ items: CmcBatchRow[]; total?: number }>("GET", `/cmc/projects/${id}/data/batches`, { query: params }),
+  cmcSpecifications: (id: string, params: { material_id?: string; q?: string; limit?: number; offset?: number } = {}) =>
+    request<{ items: CmcTestRow[]; total?: number }>("GET", `/cmc/projects/${id}/data/specifications`, { query: params }),
+  /** `scope` splits release from stability the way the table builders do, and
+   *  `q` filters on the server. Both matter for the same reason: the grid is
+   *  paged, and a split or a filter applied in the browser would only ever
+   *  see the page in hand -- answering "no matches" for a value that is in
+   *  the dossier. */
+  cmcResults: (id: string, params: {
+    material_id?: string; scope?: "release" | "stability"; q?: string;
+    limit?: number; offset?: number;
+  } = {}) =>
     request<{ items: CmcResultRow[]; total: number; summary: CmcDataSummary }>(
       "GET", `/cmc/projects/${id}/data/results`, { query: params }),
   cmcConflicts: (id: string) =>
@@ -592,8 +600,12 @@ export const api = {
   }) => request<CmcExportRecord & { plans: unknown[] }>("POST", `/cmc/projects/${id}/export`, { json: body }),
   cmcListExports: (id: string) =>
     request<{ items: CmcExportRecord[] }>("GET", `/cmc/projects/${id}/exports`),
-  cmcDownloadExport: async (exportId: string) => {
-    const res = await fetch(`${API_URL}/cmc/exports/${exportId}/download`, {
+  /** One file out of an export, by its position in `files`. An export of
+   *  granularity "both" writes a document AND a zip, and the record names only
+   *  the first -- so without the index the second is listed on screen and
+   *  reachable by nothing. */
+  cmcDownloadExport: async (exportId: string, index = 0) => {
+    const res = await fetch(`${API_URL}/cmc/exports/${exportId}/download?index=${index}`, {
       headers: { Authorization: `Bearer ${getToken()}` },
     });
     if (!res.ok) throw new ApiError(res.status, "DOWNLOAD_FAILED", "The export could not be downloaded.");

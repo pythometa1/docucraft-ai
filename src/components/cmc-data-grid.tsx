@@ -38,6 +38,19 @@ import { cn } from "@/lib/utils";
 
 type Tab = "results" | "stability" | "specifications" | "batches" | "conflicts";
 
+type Counts = Record<Tab, number>;
+
+const NO_COUNTS: Counts = {
+  results: 0, stability: 0, specifications: 0, batches: 0, conflicts: 0,
+};
+
+/** One page. The programmes this grid exists for are fifty batches by thirty
+ *  tests by eight timepoints by three conditions; the previous fetch asked for
+ *  500 rows, ignored the `total` the server returned beside them, and showed
+ *  whatever came back. Values that would be rendered into the dossier were
+ *  past the cut and could not be seen, let alone corrected. */
+const PAGE_SIZE = 100;
+
 const TABS: [Tab, string][] = [
   ["results", "Release results"],
   ["stability", "Stability"],
@@ -151,74 +164,113 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
   documents: CmcDocument[];
 }) {
   const [tab, setTab] = useState<Tab>("results");
+  const [offset, setOffset] = useState(0);
   const [results, setResults] = useState<CmcResultRow[] | null>(null);
+  const [pageTotal, setPageTotal] = useState(0);
   const [conflicts, setConflicts] = useState<CmcResultRow[] | null>(null);
   const [tests, setTests] = useState<CmcTestRow[] | null>(null);
   const [batches, setBatches] = useState<CmcBatchRow[] | null>(null);
+  const [counts, setCounts] = useState<Counts>(NO_COUNTS);
   const [summary, setSummary] = useState<CmcDataSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  //: What is typed, and what has been asked for. The filter runs on the
+  //: server -- a grid this size only ever holds one page, so a filter applied
+  //: in the browser would answer "no matches" for a value that is in the
+  //: dossier and simply not on screen.
   const [filter, setFilter] = useState("");
+  const [query, setQuery] = useState("");
 
   const sources = useMemo(
     () => Object.fromEntries(documents.map((d) => [d.id, d.filename])),
     [documents],
   );
 
-  async function load() {
-    setError(null);
-    try {
-      const [res, spec, bat, conf] = await Promise.all([
-        api.cmcResults(cmcProjectId, { limit: 500 }),
-        api.cmcSpecifications(cmcProjectId, { limit: 500 }),
-        api.cmcBatches(cmcProjectId, { limit: 500 }),
-        api.cmcConflicts(cmcProjectId),
-      ]);
-      setResults(res.items);
-      setSummary(res.summary);
-      setTests(spec.items);
-      setBatches(bat.items);
-      setConflicts(conf.items);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
-      setResults([]);
-    }
+  /** Reload everything: the tab counts, the project-wide verification summary
+   *  and the current page. Called after any mutation. */
+  function load() {
+    setReload((n) => n + 1);
   }
 
+  // Typing is debounced into `query`, and a new search starts at the first
+  // page -- staying on page 4 of a result set that now has one page shows an
+  // empty grid over a filter that matched.
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(filter.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [filter]);
+  useEffect(() => { setOffset(0); }, [tab, query]);
+
+  // The counts beside each tab, and the gate banner. Deliberately separate
+  // from the page fetch: the banner is about the whole project and must not
+  // change because somebody typed in the filter box or turned a page.
   useEffect(() => {
     let live = true;
     (async () => {
       try {
-        const [res, spec, bat, conf] = await Promise.all([
-          api.cmcResults(cmcProjectId, { limit: 500 }),
-          api.cmcSpecifications(cmcProjectId, { limit: 500 }),
-          api.cmcBatches(cmcProjectId, { limit: 500 }),
+        const [all, rel, stab, spec, bat, conf] = await Promise.all([
+          api.cmcResults(cmcProjectId, { limit: 1 }),
+          api.cmcResults(cmcProjectId, { scope: "release", limit: 1 }),
+          api.cmcResults(cmcProjectId, { scope: "stability", limit: 1 }),
+          api.cmcSpecifications(cmcProjectId, { limit: 1 }),
+          api.cmcBatches(cmcProjectId, { limit: 1 }),
           api.cmcConflicts(cmcProjectId),
         ]);
         if (!live) return;
-        setResults(res.items);
-        setSummary(res.summary);
-        setTests(spec.items);
-        setBatches(bat.items);
+        setSummary(all.summary);
+        setCounts({
+          results: rel.total, stability: stab.total,
+          specifications: spec.total ?? 0, batches: bat.total ?? 0,
+          conflicts: conf.total,
+        });
         setConflicts(conf.items);
       } catch (e: any) {
-        if (live) { setError(e?.message ?? String(e)); setResults([]); }
+        if (live) setError(e?.message ?? String(e));
       }
     })();
     return () => { live = false; };
-  }, [cmcProjectId]);
+  }, [cmcProjectId, reload]);
 
-  const release = useMemo(
-    () => (results ?? []).filter((r) => r.timepoint_months === null && !r.storage_condition),
-    [results],
-  );
-  const stability = useMemo(
-    () => (results ?? []).filter((r) => r.timepoint_months !== null || r.storage_condition),
-    [results],
-  );
-
-  const matches = (text: string | null | undefined) =>
-    !filter || (text ?? "").toLowerCase().includes(filter.toLowerCase());
+  // One page of the active tab.
+  useEffect(() => {
+    let live = true;
+    setError(null);
+    (async () => {
+      const page = { q: query || undefined, limit: PAGE_SIZE, offset };
+      try {
+        if (tab === "results" || tab === "stability") {
+          const res = await api.cmcResults(cmcProjectId, {
+            ...page, scope: tab === "results" ? "release" : "stability" });
+          if (!live) return;
+          setResults(res.items);
+          setPageTotal(res.total);
+        } else if (tab === "specifications") {
+          const spec = await api.cmcSpecifications(cmcProjectId, page);
+          if (!live) return;
+          setTests(spec.items);
+          setPageTotal(spec.total ?? spec.items.length);
+        } else if (tab === "batches") {
+          const bat = await api.cmcBatches(cmcProjectId, page);
+          if (!live) return;
+          setBatches(bat.items);
+          setPageTotal(bat.total ?? bat.items.length);
+        } else {
+          const conf = await api.cmcConflicts(cmcProjectId);
+          if (!live) return;
+          setConflicts(conf.items);
+          setPageTotal(conf.total);
+        }
+      } catch (e: any) {
+        if (live) {
+          setError(e?.message ?? String(e));
+          if (results === null) setResults([]);
+        }
+      }
+    })();
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cmcProjectId, tab, offset, query, reload]);
 
   async function verifyAll() {
     setBusy("verify");
@@ -252,17 +304,30 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
   }
 
   function replaceRow(next: CmcResultRow) {
+    const before = (results ?? []).find((r) => r.id === next.id);
     setResults((prev) => (prev ?? []).map((r) => (r.id === next.id ? { ...r, ...next } : r)));
-    setSummary((prev) => (prev && !next.verified_by ? prev : prev
-      ? { ...prev, verified: prev.verified + 1, unverified: Math.max(0, prev.unverified - 1),
-          all_verified: prev.unverified - 1 <= 0 }
-      : prev));
+    // Only a row that CHANGED verification state moves the counter. It used to
+    // increment on every save whose row came back verified, including a row
+    // that was already verified -- so re-saving one value enough times walked
+    // the banner to "all verified" while unverified values sat on the server.
+    // A gate that reports itself satisfied is worse than no gate.
+    const gained = !before?.verified_by && !!next.verified_by;
+    const lost = !!before?.verified_by && !next.verified_by;
+    if (!gained && !lost) return;
+    setSummary((prev) => {
+      if (!prev) return prev;
+      const verified = Math.max(0, Math.min(prev.total, prev.verified + (gained ? 1 : -1)));
+      const unverified = Math.max(0, prev.total - verified);
+      return { ...prev, verified, unverified,
+               all_verified: prev.total > 0 && unverified === 0 };
+    });
   }
 
   if (results === null) return <TableSkeleton rows={6} cols={6} />;
   if (error) return <ErrorBanner title="The data could not be loaded" message="Try again in a moment." detail={error} />;
 
-  if (!results.length && !(tests ?? []).length) {
+  if (!counts.results && !counts.stability && !counts.specifications
+      && !counts.batches && !query) {
     return (
       <PolishedEmpty
         icon={<ShieldQuestion className="h-8 w-8 text-muted-foreground" />}
@@ -309,11 +374,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex gap-1 border-b border-border">
           {TABS.map(([key, label]) => {
-            const count = key === "results" ? release.length
-              : key === "stability" ? stability.length
-              : key === "specifications" ? (tests ?? []).length
-              : key === "batches" ? (batches ?? []).length
-              : (conflicts ?? []).length;
+            const count = counts[key];
             return (
               <button
                 key={key}
@@ -334,7 +395,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
         </div>
         <Input
           value={filter} onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter by test, batch or value…" className="h-8 w-64 text-xs"
+          placeholder="Search every test, batch or value…" className="h-8 w-64 text-xs"
         />
       </div>
 
@@ -356,9 +417,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
                 </tr>
               </thead>
               <tbody>
-                {(tab === "results" ? release : stability)
-                  .filter((r) => matches(r.test_name) || matches(r.batch_number) || matches(r.value_text))
-                  .map((row) => (
+                {(results ?? []).map((row) => (
                     <tr key={row.id} className={cn(
                       "border-b border-border/60 last:border-0",
                       row.conflict_with_id && "bg-destructive/5",
@@ -413,7 +472,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
                 </tr>
               </thead>
               <tbody>
-                {(tests ?? []).filter((t) => matches(t.test_name)).map((t) => (
+                {(tests ?? []).map((t) => (
                   <tr key={t.id} className="border-b border-border/60 last:border-0">
                     <td className="px-3 py-1.5 font-medium text-foreground">{t.test_name}</td>
                     <td className="px-3 py-1.5 text-xs">{t.acceptance_criterion_text ?? "—"}</td>
@@ -447,7 +506,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
                 </tr>
               </thead>
               <tbody>
-                {(batches ?? []).filter((b) => matches(b.batch_number)).map((b) => (
+                {(batches ?? []).map((b) => (
                   <tr key={b.id} className="border-b border-border/60 last:border-0">
                     <td className="px-3 py-1.5 font-mono text-xs font-medium text-foreground">{b.batch_number}</td>
                     <td className="px-3 py-1.5">{[b.batch_size, b.batch_size_unit].filter(Boolean).join(" ") || "—"}</td>
@@ -497,6 +556,36 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
           )
         )}
       </SwapIn>
+
+      {/* Where in the set the reader is. `total` is what the server counted,
+          not what arrived -- the previous grid discarded it and truncated in
+          silence, which reads exactly like a complete list. */}
+      {tab !== "conflicts" && pageTotal > 0 && (
+        <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+          <span>
+            Showing {Math.min(offset + 1, pageTotal)}–{Math.min(offset + PAGE_SIZE, pageTotal)}
+            {" "}of {pageTotal}
+            {query && <span> matching “{query}”</span>}
+          </span>
+          {pageTotal > PAGE_SIZE && (
+            <div className="flex items-center gap-1">
+              <Button variant="outline" size="sm" className="h-7 px-2"
+                      disabled={offset === 0}
+                      onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>
+                Previous
+              </Button>
+              <span className="px-1">
+                Page {Math.floor(offset / PAGE_SIZE) + 1} of {Math.ceil(pageTotal / PAGE_SIZE)}
+              </span>
+              <Button variant="outline" size="sm" className="h-7 px-2"
+                      disabled={offset + PAGE_SIZE >= pageTotal}
+                      onClick={() => setOffset(offset + PAGE_SIZE)}>
+                Next
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -345,9 +345,27 @@ export function CmcEditor({ cmcProjectId, sections, onSectionsChanged }: {
                   <select className="h-8 rounded-md border border-input bg-transparent px-2 text-xs"
                           value={draft?.version ?? ""}
                           onChange={async (e) => {
-                            const res = await api.cmcGetDraft(active.id, Number(e.target.value));
-                            setDraft(res.draft);
-                            if (res.draft) await loadTables(res.draft.content);
+                            // Switching version while the textarea is open used
+                            // to replace `draft` and leave `editing` alone: the
+                            // header then named one version and the box held
+                            // another's text, and saving wrote it back as the
+                            // newest. Unsaved work is asked about, not
+                            // discarded silently.
+                            if (editing !== null && editing !== draft?.content
+                                && !window.confirm(
+                                  "Switch version and discard your unsaved edit?")) {
+                              return;
+                            }
+                            const version = Number(e.target.value);
+                            try {
+                              const res = await api.cmcGetDraft(active.id, version);
+                              setEditing(null);
+                              setDraft(res.draft);
+                              if (res.draft) await loadTables(res.draft.content);
+                            } catch (err: any) {
+                              toast.error(`Version ${version} could not be opened`,
+                                          { description: err?.message ?? String(err) });
+                            }
                           }}>
                     {versions.map((v) => <option key={v} value={v}>v{v}</option>)}
                   </select>
