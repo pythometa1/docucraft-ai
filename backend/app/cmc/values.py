@@ -84,6 +84,14 @@ _RANGE_RE = re.compile(
 #: What follows the number: "%", "mg", "mg/mL", "ppm", "cfu/g", "µg".
 _UNIT_RE = re.compile(r"[A-Za-z%µμ°][A-Za-z%/µμ°().·^\d-]*$")
 
+#: A percent sign and its basis, which the source writes with a space between
+#: them ("0.5 % w/w"). `_UNIT_RE` cannot cross that space, so without this the
+#: unit of "0.5 % w/w" reads as "w/w" -- and a mass fraction that has lost its
+#: percent sign is a quantity ten thousand times smaller than the one
+#: reported. The basis is kept because it is the whole difference between a
+#: value ppm can be compared with and one it cannot.
+_PERCENT_BASIS_RE = re.compile(r"^%\s*(w/w|w/v|v/v|m/m)\b", re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class Value:
@@ -145,6 +153,9 @@ def _split_unit(remainder: str) -> str | None:
     unit = (remainder or "").strip().lstrip("(").rstrip(")").strip()
     if not unit:
         return None
+    basis = _PERCENT_BASIS_RE.match(unit)
+    if basis:
+        return f"% {basis.group(1).lower()}"
     match = _UNIT_RE.search(unit)
     return match.group(0) if match else (unit or None)
 

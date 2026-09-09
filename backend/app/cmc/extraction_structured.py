@@ -267,15 +267,27 @@ def _batch_for(db, document, material, number: str) -> CmcBatch:
 
 
 def _record_result(db, document, *, batch, test, value_text, confidence,
-                   condition=None, timepoint=None, page=None, table_ref=None) -> int:
+                   condition=None, timepoint=None, page=None, table_ref=None,
+                   unit=None) -> int:
     """One value, stored as reported. Returns 1 if a row was written.
 
     A cell that already holds a value for this (batch, test, condition,
     timepoint) is a conflict rather than an update: two sources disagreeing
     about one result is a question for a person, and whichever the parser kept
     would be a number nobody chose.
+
+    `unit` is this row's own Unit cell, and it takes precedence over the
+    test's. The test's unit comes from whichever source defined the test --
+    usually the specification -- and stamping every later result with it is
+    how a certificate reporting 2500 ppm against a limit of NMT 0.3 % came to
+    be stored as "2500 %": the disagreement was overwritten at the moment it
+    could have been noticed, and `qc._unit_drift` then compared the
+    specification's unit against itself and stayed silent forever.
+
+    Precedence, most specific first: a unit written in the cell itself
+    ("2500 ppm"), then this row's Unit column, then the test's.
     """
-    value = parse_value(value_text, unit_hint=test.unit)
+    value = parse_value(value_text, unit_hint=unit or test.unit)
     if not value.text:
         return 0
     existing = db.scalar(select(CmcResult).where(
@@ -464,6 +476,6 @@ def _read_table(db, document, material, table, *, spec_version_id) -> int:
                 db, document, batch=batch, test=test, value_text=cell,
                 confidence=confidence,
                 condition=condition or caption_condition,
-                timepoint=timepoint, page=page, table_ref=table_ref)
+                timepoint=timepoint, page=page, table_ref=table_ref, unit=unit)
     db.flush()
     return stored

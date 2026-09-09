@@ -45,6 +45,7 @@ import docx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.cmc.units import convert, normalise
 from app.generation.reproducibility import normalise_docx
 from app.models import (
     CmcBatch, CmcBatchFormula, CmcMaterial, CmcResult, CmcSite, CmcTest,
@@ -306,6 +307,40 @@ def _batches(scope: _Scope) -> list:
     live = _live_material_ids(scope)
     rows = [b for b in scope.db.scalars(query).all() if b.material_id in live]
     return sorted(rows, key=lambda b: (b.batch_number or "", b.id))
+
+
+#: The three kinds of stored result. Names, so that a caller reads what it
+#: means rather than a boolean whose sense has to be looked up.
+RELEASE_RESULT = "release"
+STABILITY_RESULT = "stability"
+TIMELESS_RESULT = "timeless"
+
+#: The buckets whose values a stability table prints. A row carrying a
+#: condition but no timepoint is named by `_stability_matrix` as a gap, which
+#: still makes it the stability section's row rather than the release
+#: section's.
+ON_STABILITY = (STABILITY_RESULT, TIMELESS_RESULT)
+
+
+def classify_result(result) -> str:
+    """Which bucket one stored result belongs to. The single definition.
+
+    `_results` and `_timeless` ask the database the same question in SQL, and
+    `tests/test_cmc_tables.py` holds those queries to agreeing with this
+    function over every combination of the two nullable columns.
+
+    There is one definition because there were briefly two. `app.cmc.qc` had
+    its own, reading `storage_condition` alone, so a result with a timepoint
+    and no condition was filed under release: the stability table that prints
+    it raised no unverified-data finding, and the batch-analyses table that
+    does not print it raised a false one. Both halves of that are the kind of
+    wrong a reviewer cannot see.
+    """
+    if result.timepoint_months is not None:
+        return STABILITY_RESULT
+    if result.storage_condition:
+        return TIMELESS_RESULT
+    return RELEASE_RESULT
 
 
 def _results(scope: _Scope, *, release: bool, test_ids, batch_ids) -> list:
@@ -808,20 +843,54 @@ def _observed_range(results, test, batch_numbers, tally: _Tally,
                 "be stated")
         return HOLE
 
-    ordered = sorted(numeric, key=lambda r: (Decimal(str(r.value_numeric)),
+    # A range is an ordering, and two results in different units cannot be
+    # ordered by their bare magnitudes: 500 mg sorts above 2 g, and the cell
+    # would print an inverted range across two dimensions with nothing saying
+    # so. Convert where the conversion is exact, refuse where it is not.
+    scale_unit = next((r.unit for r in numeric if (r.unit or "").strip()), None)
+    magnitudes: dict = {}
+    mixed = False
+    for row in numeric:
+        magnitude = Decimal(str(row.value_numeric))
+        row_unit = (row.unit or "").strip()
+        if scale_unit and row_unit and normalise(row_unit) != normalise(scale_unit):
+            converted = convert(magnitude, row_unit, scale_unit)
+            if converted is None:
+                tally.missing.append(
+                    f"{test.test_name}: results are reported in {row_unit} and "
+                    f"{scale_unit}, which have no exact conversion between them, so no "
+                    "range can be stated")
+                return HOLE
+            magnitude, mixed = converted, True
+        magnitudes[row.id] = magnitude
+
+    ordered = sorted(numeric, key=lambda r: (magnitudes[r.id],
                                              batch_numbers.get(r.batch_id, ""), r.id))
     low, high = ordered[0], ordered[-1]
     if len(numeric) != len(usable):
         tally.notes.append(
             f"{test.test_name}: {len(usable) - len(numeric)} result(s) carry no number and "
             "are outside the range shown")
+    if mixed:
+        tally.notes.append(
+            f"{test.test_name}: results are reported in more than one unit; the range was "
+            f"ordered in {scale_unit} and each end is printed as its source reported it")
 
     # Both ends go through the same door every other cell does, so that the one
     # method able to print a result stays the only one -- and so that the two
     # values a range actually shows are the two counted as unverified, rather
     # than every result that went into choosing them.
-    ends = [tally.cell(row, f"{test.test_name} / batch {batch_numbers.get(row.batch_id, '')}")
-            for row in (low, high)]
+    #
+    # Once, when a single result was both ends of its own range: it went
+    # through that door twice, counting one unverified value as two and
+    # printing its note twice.
+    def _end(row) -> str:
+        return tally.cell(
+            row, f"{test.test_name} / batch {batch_numbers.get(row.batch_id, '')}")
+
+    if low is high:
+        return _end(low)
+    ends = [_end(low), _end(high)]
     if HOLE in ends:
         return HOLE
     return ends[0] if ends[0] == ends[1] else f"{ends[0]} - {ends[1]}"

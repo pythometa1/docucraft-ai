@@ -41,6 +41,7 @@ from functools import cached_property
 from sqlalchemy import select
 
 from app.cmc.limits import FAIL, UNKNOWN, compare
+from app.cmc.tables import ON_STABILITY, classify_result
 from app.cmc.values import limits_of, parse_criterion, parse_value
 # The acronym grammar is the same grammar wherever a draft is scanned, and a
 # second copy of it would drift from this one the first time a stoplist word
@@ -409,7 +410,10 @@ def _unverified_data(store: _Store) -> list:
         if result.verified_by:
             continue
         test = tests.get(result.test_id)
-        kind = _STABILITY if result.storage_condition else _RELEASE
+        # `classify_result` is imported rather than restated: this line used
+        # to read `result.storage_condition`, which disagreed with the table
+        # builders about any result carrying a timepoint and no condition.
+        kind = _STABILITY if classify_result(result) in ON_STABILITY else _RELEASE
         buckets[kind].append(((test.test_name if test else "an unrecorded test"),
                               kind, result.id))
     for row in store.formula_rows:
@@ -466,7 +470,12 @@ def _conformance(store: _Store) -> tuple:
             ))
             continue
 
-        verdict = compare(result.value_text, test.acceptance_criterion_text or "")
+        # `result.unit` is passed, not just the text: a cell reading "2500"
+        # under a `ppm` column header carries its unit in that column and
+        # nowhere else, and comparing the bare magnitude against a limit
+        # written in % is how an out-of-specification batch passed QC.
+        verdict = compare(parse_value(result.value_text, unit_hint=result.unit),
+                          test.acceptance_criterion_text or "")
         detail = dict(detail,
                       acceptance_criterion_text=test.acceptance_criterion_text,
                       reason=verdict.reason)

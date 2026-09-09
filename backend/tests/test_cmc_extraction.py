@@ -292,3 +292,76 @@ def test_extraction_captions_use_the_uploaders_filename(tmp_path):
 
     human = extract(str(stored), source_name="Stability Data - 25C-60RH")
     assert human.tables[0].title == "Stability Data - 25C-60RH"
+
+
+# ------------------------------------------ the unit belongs to the result
+
+def test_a_result_keeps_its_own_unit_not_the_specifications(store):
+    """A certificate reporting ppm against a specification written in % must
+    store ppm.
+
+    The defect this was written against: `_record_result` parsed every cell
+    with `unit_hint=test.unit`, so the row's own Unit column was read, handed
+    to `_test_for` (which kept the specification's unit and dropped it), and
+    never reached the value. The result was stored as "2500" stamped `%` -- a
+    concentration ten thousand times its real one -- and because extraction
+    had just made `result.unit` and `test.unit` identical by construction,
+    `qc._unit_drift` could never fire. The only unit check in the module was
+    blind to exactly the drift it exists for.
+    """
+    db, cmc, user = store
+    # spec_dp, not spec_ds: a certificate of analysis is filed against the
+    # drug product, and a specification for the substance governs a different
+    # material entirely -- pairing those two would be comparing a result with
+    # a limit nobody set for it.
+    spec = _document(db, cmc.id, cmc.org_id, user.id, "spec_dp")
+    _run(db, spec, [ExtractedTable(
+        table_id=None, title="Specification", page=1,
+        rows=[["Test", "Unit", "Acceptance Criteria"],
+              ["Residual solvent - Methanol", "%", "NMT 0.3 %"]])])
+
+    coa = _document(db, cmc.id, cmc.org_id, user.id, "coa")
+    _run(db, coa, [ExtractedTable(
+        table_id=None, title="Certificate of Analysis - Batch B-2026-009", page=1,
+        rows=[["Test", "Unit", "Result"],
+              ["Residual solvent - Methanol", "ppm", "2500"]])])
+
+    from app.models import CmcResult, CmcTest
+
+    test = db.query(CmcTest).filter(
+        CmcTest.cmc_project_id == cmc.id,
+        CmcTest.test_name == "Residual solvent - Methanol").one()
+    result = db.query(CmcResult).filter(
+        CmcResult.cmc_project_id == cmc.id, CmcResult.test_id == test.id).one()
+
+    # The specification still owns the test's unit...
+    assert test.unit == "%"
+    # ...and the certificate owns its own result's.
+    assert result.unit == "ppm"
+    assert result.value_text == "2500"
+
+    # And with both units present the comparison is now the real one:
+    # 2500 ppm is 0.25 %, inside a limit of NMT 0.3 %.
+    from app.cmc.limits import PASS, evaluate_row
+
+    verdict = evaluate_row(value_text=result.value_text,
+                           acceptance_criterion_text=test.acceptance_criterion_text,
+                           unit=result.unit)
+    assert verdict.outcome == PASS
+
+
+def test_a_cell_that_carries_its_own_unit_outranks_the_column(store):
+    """Most specific wins: a unit written in the cell beats the Unit column,
+    which beats the test's."""
+    db, cmc, user = store
+    coa = _document(db, cmc.id, cmc.org_id, user.id, "coa")
+    _run(db, coa, [ExtractedTable(
+        table_id=None, title="Certificate of Analysis - Batch B-2026-010", page=1,
+        rows=[["Test", "Unit", "Acceptance Criteria", "Result"],
+              ["Related substance B", "%", "NMT 0.5 %", "300 ppm"]])])
+
+    from app.models import CmcResult
+
+    result = db.query(CmcResult).filter(CmcResult.cmc_project_id == cmc.id).one()
+    assert result.value_text == "300 ppm"
+    assert result.unit == "ppm"

@@ -119,6 +119,12 @@ FLOORS = {
     # there is a conformance claim nobody made. Both fail by looking right.
     "cmc/values.py": 95,
     "cmc/limits.py": 92,
+    # The one place a number is allowed to change on its way to a comparison.
+    # Every branch of it decides whether two quantities may be compared at all,
+    # and the failure mode of a wrong one is not an error -- it is a confident
+    # PASS on a batch that is out of specification, which is what this module
+    # was written to stop.
+    "cmc/units.py": 100,
     # Flow B end to end. `tables` is the only thing that writes a laboratory
     # value into a document, and it does so by copying a stored string -- an
     # untested branch there is a number nobody typed. `qc` decides whether a
