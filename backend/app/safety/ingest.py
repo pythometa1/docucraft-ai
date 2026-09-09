@@ -1,55 +1,70 @@
-"""Turning an uploaded safety source into rows, and stopping.
+"""Turning an uploaded safety source into rows, and masking them before
+anything else can see them.
 
-The stopping is the design. §2's fourth principle says patient identifiers are
-masked *before* content is indexed, embedded, or sent to any model, and §6
-makes de-identification a blocking pipeline stage rather than a warning. M3 is
-where that stage is built.
+    queued -> parsing -> deidentifying -> [awaiting_deid] -> indexing -> done
 
-So this milestone's pipeline is deliberately short:
+The bracketed state is a gate, not a step. §2's fourth principle puts masking
+before indexing, embedding or any model call, and §6 makes it blocking: a
+detection the machine cannot settle stops the source where it is until a person
+answers it. Nothing writes a `pv_chunks` row until that queue is empty, so an
+identifier cannot reach the vector store while somebody is still deciding
+whether it is one -- and an identifier removed from a store it never entered is
+a problem that does not exist.
 
-    queued -> parsing -> awaiting_deid
+Free text is kept twice, on purpose. `pv_case_originals` holds what arrived:
+access-controlled, read by nothing downstream, never exported.
+`pv_case_narratives.raw_text_redacted` holds the masked working copy, which is
+the only thing retrieval, drafting and export ever see. The column is named for
+what belongs in it.
 
-and it does not chunk, does not embed, and does not call a model. Nothing here
-writes a `pv_chunks` row. A pipeline that indexed narratives now and masked
-them at M3 would mean every case ingested in between had its patient names
-embedded into a vector store, where deleting them later is a different and much
-harder problem than never putting them there. `AWAITING_DEID` is a real gate
-with nothing behind it yet, which is the honest state of the module.
-
-Free text goes to `pv_case_originals` -- the access-controlled store that
-nothing reads -- and NOT to `pv_case_narratives.raw_text_redacted`, whose name
-says what belongs in it. The masked working copy does not exist until something
-has masked it.
-
-What this milestone does do is the structured half: an E2B export or a line
-listing becomes `pv_cases`, `pv_case_events` and `pv_case_drugs`, with every
-absent field recorded rather than defaulted. Nothing arrives confirmed:
-`confirmed_by` is null on every row, so nothing counts anywhere until a person
-says so in the M4 review grid.
+The structured half arrives unconfirmed. `confirmed_by` is null on every row,
+so nothing counts anywhere until a person says so in the review grid.
 """
 
 import hashlib
 import threading
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db import SessionLocal
 from app.models import (
-    PvCase, PvCaseDrug, PvCaseEvent, PvCaseOriginal, PvDocument, PvProduct,
+    PvCase, PvCaseDrug, PvCaseEvent, PvCaseNarrative, PvCaseOriginal, PvChunk,
+    PvDeidItem, PvDocument, PvProduct,
 )
-from app.safety import e2b, line_listing, registry
+from app.safety import deident, e2b, line_listing, registry
 from app.storage import abs_path
 
-#: The pipeline's states. `awaiting_deid` is where M2 ends and M3 begins.
+#: The pipeline's states. `awaiting_deid` is a gate: a source sits there while
+#: a person answers the detections the machine would not settle.
 QUEUED = "queued"
 PARSING = "parsing"
+DEIDENTIFYING = "deidentifying"
 AWAITING_DEID = "awaiting_deid"
+INDEXING = "indexing"
 DONE = "done"
 FAILED = "failed"
+
+#: The states the worker passes through. Named once so a caller cannot decide
+#: a source has settled while it is halfway through masking.
+IN_FLIGHT = (QUEUED, PARSING, DEIDENTIFYING, INDEXING)
 
 #: Input types that carry case-level data and are therefore parsed rather than
 #: chunked.
 CASE_INPUTS = ("e2b_r3_xml", "line_listing", "cioms_form", "case_narrative_doc")
+
+#: This module's chunking policy, bound explicitly rather than defaulted. The
+#: shared chunker's defaults are the CLINICAL ones, and a caller that leaves
+#: them alone silently gets another module's page semantics -- which is how a
+#: citation comes to point at the wrong page while the draft reads perfectly
+#: (see `tests/test_docgen_bindings.py`).
+#:
+#: Empty on purpose: nothing here is page-local. A masked narrative is one
+#: piece of text with a synthetic page number, and treating its pages as hard
+#: boundaries would split a single case's story for no reason.
+PAGE_LOCAL_TYPES: tuple = ()
+
+#: A safety source calls its tables tables.
+TABLE_LABEL = "Table"
 
 #: Input types whose free text must be masked before anything reads it. In
 #: practice that is all of them: §6 lists site and investigator names alongside
@@ -326,13 +341,234 @@ def ingest_document(document_id: str, *, mapping: dict | None = None) -> None:
             return
 
         document.case_count = count
-        # The gate. Nothing was chunked and nothing was embedded, because
-        # nothing has been masked. M3 is what moves a document past here.
-        document.processing_status = (
-            AWAITING_DEID if document.input_type in NEEDS_DEID else DONE)
         db.commit()
+        deidentify_document(db, document)
     finally:
         db.close()
+
+
+# ------------------------------------------------------- de-identification
+
+#: How the document's own text is stored so the masking pass has something to
+#: work on for a supporting document, which has no case.
+DOCUMENT_KIND = "document_text"
+
+
+def _known_for(db, case) -> dict:
+    """The identifying values this case already carries.
+
+    A name the structured data gave us is the surest detection there is: no
+    pattern is as reliable as knowing the string in advance.
+    """
+    known = deident.known_values(case)
+    reporter = (case.primary_reporter_qualification or "").strip()
+    if reporter and len(reporter) > 3 and " " in reporter:
+        known.setdefault(deident.REPORTER_NAME, []).append(reporter)
+    return known
+
+
+def _queue_item(db, document, *, case_id, detection) -> None:
+    """One unsettled detection, put in front of a person.
+
+    Deduplicated on the text within a product: a narrative naming the same
+    person six times is one question, not six, and a queue that asks the same
+    thing repeatedly is a queue people clear without reading.
+    """
+    existing = db.scalar(select(PvDeidItem).where(
+        PvDeidItem.pv_product_id == document.pv_product_id,
+        PvDeidItem.detected_text == detection.text,
+        PvDeidItem.status == "pending"))
+    if existing is not None:
+        return
+    db.add(PvDeidItem(
+        org_id=document.org_id, pv_product_id=document.pv_product_id,
+        case_id=case_id, document_id=document.id,
+        identifier_type=detection.identifier_type,
+        detected_text=detection.text,
+        context_snippet=detection.basis,
+        proposed_mask=detection.identifier_type,
+        status="pending"))
+
+
+def _accepted_answers(db, pv_product_id: str) -> dict:
+    """What people have already decided, so a re-run does not ask again.
+
+    `None` means "not an identifier" and is remembered exactly as firmly as a
+    mask: a reviewer who has said that "Severe Headache" is a diagnosis should
+    not be asked about it on every later source.
+    """
+    answers: dict = {}
+    for item in db.scalars(select(PvDeidItem).where(
+            PvDeidItem.pv_product_id == pv_product_id,
+            PvDeidItem.status.in_(
+                ("masked", "not_an_identifier", "overridden")))).all():
+        # `overridden` is an answer too, and it means "leave it". A qualified
+        # person waved it through with a reason on the record. Treating it as
+        # unanswered would re-queue it on the next pass and the override would
+        # release nothing -- a gate that cannot be opened even by the person
+        # authorised to open it.
+        answers[item.detected_text] = (
+            item.identifier_type if item.status == "masked" else None)
+    return answers
+
+
+def deidentify_document(db, document) -> None:
+    """Mask everything this source produced, then index it -- or stop.
+
+    The order is the guarantee. Masking runs over the original text, the
+    result goes to the working copy, and chunking only happens when nothing is
+    left in the queue for this source. A document with an unanswered detection
+    ends at `awaiting_deid` and has no chunks at all, rather than chunks that
+    are mostly masked.
+    """
+    document.processing_status = DEIDENTIFYING
+    # Whatever the parse had to say about this file is kept. The line-listing
+    # reader records "2 of 3 rows were not read" here, and this stage
+    # overwriting it would take away the only place that refusal was reported.
+    parse_note = document.error_message
+    db.commit()
+    salt = document.pv_product_id
+    answers = _accepted_answers(db, document.pv_product_id)
+
+    originals = db.scalars(select(PvCaseOriginal).where(
+        PvCaseOriginal.source_document_id == document.id)).all()
+    queued_here = 0
+    for original in originals:
+        if not (original.content or "").strip():
+            continue
+        case = db.get(PvCase, original.case_id) if original.case_id else None
+        known = _known_for(db, case) if case is not None else {}
+        result = deident.mask(original.content, known=known, salt=salt,
+                              accept=answers)
+        for detection in result.queued:
+            _queue_item(db, document, case_id=original.case_id,
+                        detection=detection)
+        queued_here += len(result.queued)
+
+        if case is not None:
+            narrative = db.scalar(select(PvCaseNarrative).where(
+                PvCaseNarrative.case_id == case.id,
+                PvCaseNarrative.version == 1))
+            if narrative is None:
+                narrative = PvCaseNarrative(
+                    org_id=document.org_id, pv_product_id=document.pv_product_id,
+                    case_id=case.id, version=1)
+                db.add(narrative)
+            narrative.raw_text_redacted = result.masked_text
+            # The case is only clear when nothing about it is still open.
+            case.deidentification_status = (
+                "pending" if result.queued else "clear")
+    db.flush()
+
+    # Counted from what the masking pass found in THIS document's text, not
+    # from the queue rows it created. The queue is deduplicated per product --
+    # one question for a name appearing in six files -- so a second source
+    # naming the same person creates no row of its own, and a count by
+    # `document_id` would read zero and index it with the name still in it.
+    outstanding = queued_here
+    gate_note = (
+        f"{outstanding} detection(s) need a person before this source can be "
+        "indexed." if outstanding else None)
+    document.error_message = " · ".join(
+        note for note in (parse_note, gate_note) if note) or None
+    if outstanding:
+        document.processing_status = AWAITING_DEID
+        db.commit()
+        return
+    _index_document(db, document)
+
+
+def _index_document(db, document) -> None:
+    """Chunk and index, from the masked copy only.
+
+    Reached only with an empty queue for this source, which is what makes the
+    gate a gate. The text handed to the chunker is `raw_text_redacted` for a
+    case and the masked document text otherwise -- `pv_case_originals` is not
+    read here and must never be.
+    """
+    from app.docgen.chunking import chunk_extraction
+    from app.docgen.extraction import Extraction, ExtractedPage
+
+    document.processing_status = INDEXING
+    db.commit()
+
+    for chunk in db.scalars(select(PvChunk).where(
+            PvChunk.document_id == document.id)).all():
+        db.delete(chunk)
+    db.flush()
+
+    texts: list = []
+    for narrative in db.scalars(select(PvCaseNarrative).where(
+            PvCaseNarrative.pv_product_id == document.pv_product_id)).all():
+        case = db.get(PvCase, narrative.case_id)
+        if case is None or case.source_document_id != document.id:
+            continue
+        if (narrative.raw_text_redacted or "").strip():
+            texts.append(narrative.raw_text_redacted)
+
+    if not texts and document.input_type == "document":
+        masked = _masked_document_text(db, document)
+        if masked:
+            texts.append(masked)
+
+    written = 0
+    for page_number, text in enumerate(texts, start=1):
+        extraction = Extraction(
+            pages=[ExtractedPage(page=page_number, text=text)], tables=[],
+            page_count=len(texts))
+        for chunk in chunk_extraction(extraction, doc_type=document.doc_type,
+                                      page_local_types=PAGE_LOCAL_TYPES,
+                                      table_label=TABLE_LABEL):
+            db.add(PvChunk(
+                org_id=document.org_id, pv_product_id=document.pv_product_id,
+                document_id=document.id,
+                report_instance_id=document.report_instance_id,
+                doc_type=document.doc_type, page=chunk.get("page"),
+                section_hint=chunk.get("section_hint"),
+                is_table=bool(chunk.get("is_table")),
+                table_id=chunk.get("table_id"),
+                content=chunk["content"],
+                token_count=chunk.get("token_count", 0)))
+            written += 1
+    document.chunk_count = written
+    document.processing_status = DONE
+    db.commit()
+
+
+def _masked_document_text(db, document) -> str | None:
+    """A supporting document's text, masked, for indexing.
+
+    Held on a `pv_case_originals` row with no case: a previous report or an
+    investigator's brochure has no case behind it but has exactly the site and
+    investigator names §6 lists.
+    """
+    original = db.scalar(select(PvCaseOriginal).where(
+        PvCaseOriginal.source_document_id == document.id,
+        PvCaseOriginal.kind == DOCUMENT_KIND))
+    if original is None or not (original.content or "").strip():
+        return None
+    answers = _accepted_answers(db, document.pv_product_id)
+    result = deident.mask(original.content, salt=document.pv_product_id,
+                          accept=answers)
+    return result.masked_text
+
+
+def resume_after_review(db, pv_product_id: str) -> list:
+    """Re-run every source that was waiting, now that the queue has moved.
+
+    Every source, not just the one an item came from: a person who decides
+    that "Jane Smith" is a name has decided it for the whole product, and the
+    other four sources naming her are waiting on the same answer.
+    """
+    documents = db.scalars(select(PvDocument).where(
+        PvDocument.pv_product_id == pv_product_id,
+        PvDocument.processing_status == AWAITING_DEID)).all()
+    moved = []
+    for document in documents:
+        deidentify_document(db, document)
+        if document.processing_status == DONE:
+            moved.append(document.id)
+    return moved
 
 
 def ingest_in_background(jobs: list) -> None:

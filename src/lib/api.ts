@@ -18,7 +18,7 @@ import type {
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
-  PvCaseRow, PvDeidGate, PvMappingProfile, PvReadiness,
+  PvCaseRow, PvDeidGate, PvDeidItem, PvMappingProfile, PvReadiness,
   PvRsiVersion, PvScopePreview, PvSection, PvSource,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
 } from "@/lib/types";
@@ -764,6 +764,25 @@ export const api = {
     report_instance_id?: string; q?: string; limit?: number; offset?: number;
   } = {}) => request<{ items: PvCaseRow[]; total: number }>(
     "GET", `/pv/products/${id}/cases`, { query: params }),
+
+  /* ---- Safety M3: the de-identification gate ---- */
+  pvDeidQueue: (id: string, status = "pending") =>
+    request<{ items: PvDeidItem[]; pending: number; documents_waiting: number;
+              identifier_types: string[]; cleared: boolean }>(
+      "GET", `/pv/products/${id}/deid-queue`, { query: { status } }),
+  /** Answering one detection releases every source waiting on it: deciding a
+   *  string is a person's name decides it for the whole product. */
+  pvResolveDeidItem: (itemId: string, body: {
+    action: "mask" | "not_an_identifier"; identifier_type?: string;
+  }) => request<{ resolved: string; documents_indexed: number }>(
+    "POST", `/pv/deid-items/${itemId}/resolve`, { json: body }),
+  pvOverrideDeidQueue: (id: string, reason: string) =>
+    request<{ overridden: number; documents_indexed: number; reason: string }>(
+      "POST", `/pv/products/${id}/deid-queue:override`, { json: { reason } }),
+  pvLeakageScan: (id: string) =>
+    request<{ findings: { where: string; identifier_type: string; text: string;
+                          basis: string }[]; clean: boolean }>(
+      "POST", `/pv/products/${id}/leakage-scan`),
 
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>

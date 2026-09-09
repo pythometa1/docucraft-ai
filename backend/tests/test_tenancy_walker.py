@@ -56,8 +56,9 @@ def org_a_resources(app_client, two_orgs):
         CmcResult, CmcSection, CmcSite,
         Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
-        GenerationJob, Invoice, Mapping, Project, PvDocument, PvProduct,
-        PvReportInstance, PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
+        GenerationJob, Invoice, Mapping, Project, PvDeidItem, PvDocument,
+        PvProduct, PvReportInstance, PvRsiVersion, ReviewComment, ReviewTask,
+        SourceFile, Study,
         SourceVersion,
         TemplateBlueprint,
         TemplateBlueprintVersion, TemplateFile, TemplateLibrary, TemplateLibraryVersion,
@@ -229,6 +230,11 @@ def org_a_resources(app_client, two_orgs):
             blob_path="pv/none/none.csv", uploaded_by=user.id)
         db.add(pv_document)
         db.flush()
+        pv_deid = PvDeidItem(
+            org_id=org, pv_product_id=pv_product.id, document_id=pv_document.id,
+            identifier_type="patient_name", detected_text="A Name")
+        db.add(pv_deid)
+        db.flush()
 
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
@@ -250,7 +256,7 @@ def org_a_resources(app_client, two_orgs):
             "cmc_export_id": cmc_export.id,
             "pv_product_id": pv_product.id, "rsi_version_id": pv_rsi.id,
             "report_instance_id": pv_report.id,
-            "pv_document_id": pv_document.id,
+            "pv_document_id": pv_document.id, "deid_item_id": pv_deid.id,
         }
         db.commit()
     finally:
@@ -538,6 +544,14 @@ ROUTES: list[dict] = [
     {"method": "POST", "path": "/pv/documents/{pv_document_id}/retry",
      "body": {"mappings": {}}},
     {"method": "GET", "path": "/pv/documents/{pv_document_id}/columns"},
+
+    # Safety M3: the de-identification gate.
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/deid-queue"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/deid-queue:override",
+     "body": {"reason": "x"}},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/leakage-scan"},
+    {"method": "POST", "path": "/pv/deid-items/{deid_item_id}/resolve",
+     "body": {"action": "mask"}},
 ]
 
 

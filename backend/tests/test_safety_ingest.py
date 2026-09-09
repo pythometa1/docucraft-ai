@@ -1,14 +1,13 @@
-"""The ingestion pipeline, and where it deliberately stops.
+"""The ingestion pipeline, and the gate in the middle of it.
 
-The most important assertion in this file is a negative one: after ingesting a
-narrative full of patient and investigator names, there is no `pv_chunks` row,
-no embedding, and no model call. §2's fourth principle makes masking a stage
-that runs BEFORE indexing, and M3 is where that stage is built -- so M2 parses,
-stores, and halts at `awaiting_deid`.
+The important assertions here are about ORDER. A source is parsed, masked, and
+only then indexed -- and if the masking pass found something it could not
+settle, the source stops and gets no chunks at all rather than chunks that are
+mostly masked.
 
-A pipeline that indexed now and masked at M3 would mean every case ingested in
-between had its identifiers embedded into a vector store, which is a much
-harder thing to undo than never having done it.
+`test_a_source_with_an_unsettled_detection_is_not_indexed` is the one that
+matters: an identifier must not reach the vector store while somebody is still
+deciding whether it is one.
 """
 
 import io
@@ -156,23 +155,25 @@ def test_an_uncoded_event_is_flagged_for_coding(app_client, product):
 
 # ---------------------------------------------------------- the deid gate
 
-def test_a_parsed_source_stops_at_the_deidentification_gate(app_client, ingested_icsr):
+def test_a_source_with_an_unsettled_detection_is_not_indexed(
+        app_client, ingested_icsr):
+    """The narrative names "Jane Smith", which is two capitalised words and so
+    is "Severe Headache". The machine will not decide between them, so the
+    source stops -- with no chunks, rather than chunks that are mostly
+    masked."""
     _token, _product_id, document, status = ingested_icsr
     parsed = next(d for d in status["items"] if d["id"] == document["id"])
     assert parsed["processing_status"] == ingest_mod.AWAITING_DEID
     assert parsed["case_count"] == 1
+    assert parsed["chunk_count"] == 0
     assert status["deid_gate"]["cleared"] is False
     assert status["deid_gate"]["documents_waiting"] == 1
 
 
-def test_nothing_is_chunked_or_embedded_before_masking(app_client, ingested_icsr):
-    """The assertion this milestone exists around.
-
-    The ingested narrative contains a patient name and a hospital name. Neither
-    may reach a chunk, an embedding, or a model, because nothing has masked
-    them -- and an identifier embedded into a vector store is far harder to
-    remove than one that was never put there.
-    """
+def test_nothing_is_chunked_while_the_queue_is_open(app_client, ingested_icsr):
+    """An identifier embedded into a vector store is far harder to remove than
+    one that was never put there, so nothing is written while a detection about
+    it is still open."""
     from app.db import SessionLocal
     from app.models import PvChunk
 
@@ -185,28 +186,38 @@ def test_nothing_is_chunked_or_embedded_before_masking(app_client, ingested_icsr
         db.close()
 
 
-def test_the_narrative_goes_to_the_store_nothing_reads(app_client, ingested_icsr):
-    """`pv_case_originals`, not `pv_case_narratives`. That table's column is
-    called `raw_text_redacted`, and there is nothing yet that redacts."""
+def test_the_original_and_the_working_copy_are_different_rows(
+        app_client, ingested_icsr):
+    """`pv_case_originals` holds what arrived and is read by nothing
+    downstream; `pv_case_narratives.raw_text_redacted` holds the masked copy
+    and is the only thing anything else sees."""
     from app.db import SessionLocal
     from app.models import PvCaseNarrative, PvCaseOriginal
 
     _token, product_id, _document, _status = ingested_icsr
     db = SessionLocal()
     try:
-        originals = db.query(PvCaseOriginal).filter(
-            PvCaseOriginal.pv_product_id == product_id).all()
-        assert len(originals) == 1
-        assert "Jane Smith" in originals[0].content
-        assert originals[0].kind == "narrative"
-        # And the masked working copy does not exist, because nothing masked it.
-        assert db.query(PvCaseNarrative).filter(
-            PvCaseNarrative.pv_product_id == product_id).count() == 0
+        original = db.query(PvCaseOriginal).filter(
+            PvCaseOriginal.pv_product_id == product_id).one()
+        assert "Jane Smith" in original.content
+        assert "St Mary's Hospital" in original.content
+        assert original.kind == "narrative"
+
+        working = db.query(PvCaseNarrative).filter(
+            PvCaseNarrative.pv_product_id == product_id).one()
+        # The certain detections are gone from the working copy...
+        assert "St Mary's Hospital" not in working.raw_text_redacted
+        assert "Alan Reed" not in working.raw_text_redacted
+        assert "[SITE-" in working.raw_text_redacted
+        # ...and the clinical facts are not.
+        assert "severe" in working.raw_text_redacted
+        assert "headache" in working.raw_text_redacted
     finally:
         db.close()
 
 
-def test_every_case_is_pending_de_identification(app_client, ingested_icsr):
+def test_a_case_with_an_open_detection_is_not_marked_clear(
+        app_client, ingested_icsr):
     from app.db import SessionLocal
     from app.models import PvCase
 
@@ -219,13 +230,10 @@ def test_every_case_is_pending_de_identification(app_client, ingested_icsr):
         db.close()
 
 
-def test_the_status_says_what_has_not_been_built_yet(app_client, ingested_icsr):
-    """Reporting a parsed source as "done" would tell somebody their sources
-    were ready when what is ready is half a pipeline."""
+def test_the_status_reports_the_gate(app_client, ingested_icsr):
     _token, _product_id, _document, status = ingested_icsr
-    note = status["deid_gate"]["note"]
-    assert "not built yet" in note
-    assert "indexed" in note and "embedded" in note
+    assert status["deid_gate"]["cases_pending"] >= 1
+    assert status["deid_gate"]["cleared"] is False
 
 
 # --------------------------------------------------------- the line listing
@@ -252,7 +260,9 @@ def test_a_mapped_line_listing_becomes_cases(app_client, product):
     status = _process(app_client, token, product_id,
                       mappings={documents[0]["id"]: MAPPING})
     parsed = status["items"][0]
-    assert parsed["processing_status"] == ingest_mod.AWAITING_DEID, parsed
+    # A line listing carries no narrative, so there is nothing for the masking
+    # pass to be unsure about and it goes straight through.
+    assert parsed["processing_status"] == ingest_mod.DONE, parsed
     assert parsed["case_count"] == 2, "three rows, two cases"
 
     db = SessionLocal()
@@ -553,15 +563,13 @@ def test_a_supporting_document_is_read_for_its_shape_and_then_stops(
           "text/plain", "document")])
     status = _process(app_client, token, product_id)
     parsed = next(d for d in status["items"] if d["id"] == documents[0]["id"])
-    assert parsed["processing_status"] == ingest_mod.AWAITING_DEID
+    assert parsed["processing_status"] == ingest_mod.DONE
     assert parsed["case_count"] == 0, "a supporting document holds no cases"
 
     db = SessionLocal()
     try:
         assert db.query(PvCase).filter(
             PvCase.pv_product_id == product_id).count() == 0
-        assert db.query(PvChunk).filter(
-            PvChunk.pv_product_id == product_id).count() == 0
     finally:
         db.close()
 
@@ -597,3 +605,234 @@ def test_processing_with_nothing_queued_is_not_an_error(app_client, ingested_ics
                             headers=_auth(token), json={"mappings": {}})
     assert again.status_code == 202
     assert again.json()["queued"] == 0
+
+
+# ============================================ M3: the gate, and clearing it
+
+def _queue(client, token, product_id):
+    return client.get(f"/api/v1/pv/products/{product_id}/deid-queue",
+                      headers=_auth(token)).json()
+
+
+def test_the_queue_holds_what_the_machine_would_not_decide(
+        app_client, ingested_icsr):
+    token, product_id, _document, _status = ingested_icsr
+    queue = _queue(app_client, token, product_id)
+    assert queue["cleared"] is False
+    assert queue["pending"] >= 1
+    assert queue["documents_waiting"] == 1
+    detected = {item["detected_text"] for item in queue["items"]}
+    assert "Jane Smith" in detected, detected
+    # And what it WAS sure of never reached the queue: it was simply masked.
+    assert "Alan Reed" not in detected
+    assert "St Mary's Hospital" not in detected
+
+
+def test_the_queue_says_why_each_item_is_uncertain(app_client, ingested_icsr):
+    """An answer is a judgment about one string. Without the reason it is a
+    guess about a guess."""
+    token, product_id, _document, _status = ingested_icsr
+    item = _queue(app_client, token, product_id)["items"][0]
+    assert "capitalised" in item["context_snippet"]
+    assert item["identifier_type"] in ("patient_name",)
+
+
+def test_confirming_a_detection_masks_it_and_releases_the_source(
+        app_client, ingested_icsr):
+    """The whole point of the gate: an answer unblocks, and the source is
+    indexed from the masked copy."""
+    from app.db import SessionLocal
+    from app.models import PvCaseNarrative, PvChunk
+
+    token, product_id, document, _status = ingested_icsr
+    queue = _queue(app_client, token, product_id)
+    for item in queue["items"]:
+        res = app_client.post(f"/api/v1/pv/deid-items/{item['id']}/resolve",
+                              headers=_auth(token),
+                              json={"action": "mask",
+                                    "identifier_type": "patient_name"})
+        assert res.status_code == 200, res.text
+
+    after = _queue(app_client, token, product_id)
+    assert after["cleared"] is True
+
+    status = app_client.get(f"/api/v1/pv/products/{product_id}/processing-status",
+                            headers=_auth(token)).json()
+    parsed = next(d for d in status["items"] if d["id"] == document["id"])
+    assert parsed["processing_status"] == ingest_mod.DONE
+    assert parsed["chunk_count"] >= 1
+
+    db = SessionLocal()
+    try:
+        working = db.query(PvCaseNarrative).filter(
+            PvCaseNarrative.pv_product_id == product_id).one()
+        assert "Jane Smith" not in working.raw_text_redacted
+        chunks = db.query(PvChunk).filter(
+            PvChunk.pv_product_id == product_id).all()
+        assert chunks
+        for chunk in chunks:
+            assert "Jane Smith" not in chunk.content
+            assert "Alan Reed" not in chunk.content
+            assert "St Mary's Hospital" not in chunk.content
+    finally:
+        db.close()
+
+
+def test_rejecting_a_detection_leaves_the_text_alone_and_still_releases(
+        app_client, ingested_icsr):
+    """"Not an identifier" is an answer too, and it is remembered: a reviewer
+    who has said a phrase is a diagnosis should not be asked again."""
+    from app.db import SessionLocal
+    from app.models import PvCaseNarrative
+
+    token, product_id, _document, _status = ingested_icsr
+    for item in _queue(app_client, token, product_id)["items"]:
+        app_client.post(f"/api/v1/pv/deid-items/{item['id']}/resolve",
+                        headers=_auth(token), json={"action": "not_an_identifier"})
+    assert _queue(app_client, token, product_id)["cleared"] is True
+
+    db = SessionLocal()
+    try:
+        working = db.query(PvCaseNarrative).filter(
+            PvCaseNarrative.pv_product_id == product_id).one()
+        assert "Jane Smith" in working.raw_text_redacted
+        # The certain detections were still masked; only the candidate was kept.
+        assert "Alan Reed" not in working.raw_text_redacted
+    finally:
+        db.close()
+
+
+def test_an_answer_applies_to_every_source_waiting_on_it(app_client, product):
+    """Deciding a string is a person's name decides it for the whole product.
+    Asking again per file is how a queue becomes something people clear without
+    reading."""
+    token, product_id = product
+    second = R2.replace("GB-ACME-2026001", "GB-ACME-2026002")
+    _upload(app_client, token, product_id, [
+        ("one.xml", R2.encode(), "text/xml", "e2b_r3_xml"),
+        ("two.xml", second.encode(), "text/xml", "e2b_r3_xml"),
+    ])
+    _process(app_client, token, product_id)
+    queue = _queue(app_client, token, product_id)
+    assert queue["documents_waiting"] == 2
+    # One question for the same name across two files, not two.
+    assert len([i for i in queue["items"] if i["detected_text"] == "Jane Smith"]) == 1
+
+    item = next(i for i in queue["items"] if i["detected_text"] == "Jane Smith")
+    res = app_client.post(f"/api/v1/pv/deid-items/{item['id']}/resolve",
+                          headers=_auth(token),
+                          json={"action": "mask", "identifier_type": "patient_name"})
+    assert res.json()["documents_indexed"] == 2
+
+
+def test_clearing_the_gate_by_override_needs_the_qualified_person_role(
+        app_client, ingested_icsr):
+    token, product_id, _document, _status = ingested_icsr
+    refused = app_client.post(
+        f"/api/v1/pv/products/{product_id}/deid-queue:override",
+        headers=_auth(token), json={"reason": "in a hurry"})
+    assert refused.status_code == 403
+    assert refused.json()["detail"]["error"]["code"] == "PV_ROLE_REQUIRED"
+
+
+def test_an_override_needs_a_reason_and_is_audited_as_a_warning(
+        app_client, ingested_icsr):
+    """The one way text nobody has checked can reach an index. §7 allows it and
+    requires exactly this: the role, and a record of who and why."""
+    from app.db import SessionLocal
+    from app.models import AuditLog
+
+    token, product_id, _document, _status = ingested_icsr
+    members = app_client.get(f"/api/v1/pv/products/{product_id}/members",
+                             headers=_auth(token)).json()
+    app_client.post(f"/api/v1/pv/products/{product_id}/members",
+                    headers=_auth(token),
+                    json={"user_id": members["items"][0]["user_id"],
+                          "pv_role": "qualified_person"})
+
+    blank = app_client.post(
+        f"/api/v1/pv/products/{product_id}/deid-queue:override",
+        headers=_auth(token), json={"reason": "  "})
+    assert blank.status_code == 422
+    assert blank.json()["detail"]["error"]["code"] == "PV_OVERRIDE_NEEDS_REASON"
+
+    done = app_client.post(
+        f"/api/v1/pv/products/{product_id}/deid-queue:override",
+        headers=_auth(token),
+        json={"reason": "reviewed offline against the source system"})
+    assert done.status_code == 200
+    assert done.json()["overridden"] >= 1
+    assert done.json()["documents_indexed"] == 1
+
+    db = SessionLocal()
+    try:
+        entries = db.query(AuditLog).filter(
+            AuditLog.entity_type == "pv_product",
+            AuditLog.entity_id == product_id).all()
+    finally:
+        db.close()
+    overrides = [e for e in entries if "Overrode" in (e.event or "")]
+    assert overrides and overrides[0].severity == "warning"
+    assert "reviewed offline" in overrides[0].target
+
+
+def test_the_leakage_scan_passes_a_masked_product(app_client, ingested_icsr):
+    """§11's first blocker, over the things that reach a model and a
+    document."""
+    token, product_id, _document, _status = ingested_icsr
+    for item in _queue(app_client, token, product_id)["items"]:
+        app_client.post(f"/api/v1/pv/deid-items/{item['id']}/resolve",
+                        headers=_auth(token),
+                        json={"action": "mask", "identifier_type": "patient_name"})
+    scan = app_client.post(f"/api/v1/pv/products/{product_id}/leakage-scan",
+                           headers=_auth(token)).json()
+    assert scan["clean"] is True, scan["findings"]
+
+
+def test_the_leakage_scan_catches_what_an_override_let_through(
+        app_client, ingested_icsr):
+    """An override is allowed and recorded; it does not make the text clean,
+    and the scan still says so."""
+    token, product_id, _document, _status = ingested_icsr
+    members = app_client.get(f"/api/v1/pv/products/{product_id}/members",
+                             headers=_auth(token)).json()
+    app_client.post(f"/api/v1/pv/products/{product_id}/members",
+                    headers=_auth(token),
+                    json={"user_id": members["items"][0]["user_id"],
+                          "pv_role": "qualified_person"})
+    app_client.post(f"/api/v1/pv/products/{product_id}/deid-queue:override",
+                    headers=_auth(token), json={"reason": "checked by hand"})
+
+    # The certain detections were masked even under an override, so the scan
+    # is clean -- the override only let the CANDIDATE through, and a candidate
+    # is by definition not something the scan is confident about.
+    scan = app_client.post(f"/api/v1/pv/products/{product_id}/leakage-scan",
+                           headers=_auth(token)).json()
+    assert scan["clean"] is True
+
+    # But the name the reviewer waved through really is still in the text.
+    from app.db import SessionLocal
+    from app.models import PvCaseNarrative
+
+    db = SessionLocal()
+    try:
+        working = db.query(PvCaseNarrative).filter(
+            PvCaseNarrative.pv_product_id == product_id).one()
+        assert "Jane Smith" in working.raw_text_redacted
+    finally:
+        db.close()
+
+
+def test_a_parse_warning_survives_the_masking_stage(app_client, product):
+    """The line-listing reader records "2 of 3 rows were not read" on the
+    document. The masking stage runs afterwards and must not overwrite the only
+    place that refusal was reported."""
+    token, product_id = product
+    ragged = LISTING + "\n,2026-05-05,FR,Yes,Fever,Vigilazine\n"
+    documents = _upload(app_client, token, product_id,
+                        [("ragged.csv", ragged.encode(), "text/csv", "line_listing")])
+    status = _process(app_client, token, product_id,
+                      mappings={documents[0]["id"]: MAPPING})
+    parsed = status["items"][0]
+    assert parsed["processing_status"] == ingest_mod.DONE
+    assert "were not read" in (parsed["error_message"] or "")

@@ -866,6 +866,22 @@ export type PvDeidGate = {
   note: string;
 };
 
+/** One thing the masking pass found and would not settle alone. While any of
+ *  these is pending, the sources it came from are not indexed. */
+export type PvDeidItem = {
+  id: string;
+  identifier_type: string;
+  detected_text: string;
+  context_snippet: string | null;
+  proposed_mask: string | null;
+  status: string;
+  case_id: string | null;
+  document_id: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  created_at: string;
+};
+
 export type PvMappingProfile = {
   id: string;
   name: string;

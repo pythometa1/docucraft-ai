@@ -21,7 +21,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle, CalendarDays, CheckCircle2, ClipboardList, Database, FileText,
-  Globe, Info, ListTree, Plus, ShieldCheck, Trash2, Upload, Users,
+  Globe, Info, ListTree, Plus, ShieldAlert, ShieldCheck, Trash2, Upload, Users,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -35,7 +35,9 @@ import { Input } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, StageSkeleton } from "@/components/skeletons";
 import { SwapIn } from "@/components/motion";
-import { SafetyCases, SafetySources } from "@/components/safety-sources";
+import {
+  SafetyCases, SafetyDeidQueue, SafetySources,
+} from "@/components/safety-sources";
 import { cn } from "@/lib/utils";
 
 const SELECT_CLASS =
@@ -233,12 +235,14 @@ function Field({ label, hint, required, children }: {
 
 /* --------------------------------------------------------------- the tab shell */
 
-type Tab = "profile" | "reports" | "sources" | "cases" | "calendar" | "roles";
+type Tab = "profile" | "reports" | "sources" | "deid" | "cases" | "calendar"
+  | "roles";
 
 const TABS: [Tab, string, typeof ListTree][] = [
   ["profile", "Product profile", ClipboardList],
   ["reports", "Reporting intervals", FileText],
   ["sources", "Sources", Upload],
+  ["deid", "De-identification", ShieldAlert],
   ["cases", "Case store", Database],
   ["calendar", "Calendar", CalendarDays],
   ["roles", "Roles", Users],
@@ -293,6 +297,7 @@ function SafetyOverview({ product, onChanged }: {
         {tab === "profile" && <ProfileTab product={product} onChanged={onChanged} />}
         {tab === "reports" && <ReportsTab product={product} onChanged={onChanged} />}
         {tab === "sources" && <SafetySources productId={product.id} />}
+        {tab === "deid" && <SafetyDeidQueue productId={product.id} />}
         {tab === "cases" && <CasesTab product={product} />}
         {tab === "calendar" && <CalendarTab product={product} />}
         {tab === "roles" && <RolesTab product={product} onChanged={onChanged} />}

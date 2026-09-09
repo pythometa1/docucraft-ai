@@ -9,10 +9,10 @@
  * an ICSR fails on every field — so both are asked for at upload, and the
  * server refuses a combination that cannot be right.
  *
- * **A parsed source is not a finished source.** Files stop at
- * `awaiting_deid`, because de-identification runs before anything is indexed,
- * embedded or sent to a model, and that stage is M3. The gate says so out loud
- * rather than showing a green tick over half a pipeline.
+ * **A parsed source is not a finished source.** Masking runs before anything is
+ * indexed, embedded or sent to a model, and a detection the machine will not
+ * settle stops the file at `awaiting_deid` with no chunks at all — rather than
+ * chunks that are mostly masked. The banner says which files are held and why.
  */
 import { useEffect, useRef, useState } from "react";
 import {
@@ -23,7 +23,7 @@ import { toast } from "sonner";
 
 import { api } from "@/lib/api";
 import type {
-  PvCaseRow, PvDeidGate, PvMappingProfile, PvReadiness, PvSource,
+  PvCaseRow, PvDeidGate, PvDeidItem, PvMappingProfile, PvReadiness, PvSource,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,12 +37,16 @@ const SELECT_CLASS =
 const STATUS_LABEL: Record<string, string> = {
   queued: "Queued",
   parsing: "Parsing",
-  awaiting_deid: "Parsed — awaiting de-identification",
+  deidentifying: "De-identifying",
+  awaiting_deid: "Held — detections need an answer",
+  indexing: "Indexing",
   done: "Done",
   failed: "Failed",
 };
 
-const BUSY_STATES = new Set(["queued", "parsing"]);
+/** Every state the worker passes through. A screen that stopped polling at
+ *  `deidentifying` would show a half-finished pipeline as a finished one. */
+const BUSY_STATES = new Set(["queued", "parsing", "deidentifying", "indexing"]);
 
 type Staged = { file: File; doc_type: string; input_type: string };
 
@@ -790,6 +794,205 @@ export function SafetyCases({ productId, reportInstanceId }: {
               Next
             </Button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------ S4: the de-identification queue */
+
+/**
+ * The gate, as a screen.
+ *
+ * Every row is one string the masking pass found and would not settle: a
+ * capitalised pair might be a person and might be a diagnosis, and guessing
+ * either way is silent — one leaks a name, the other destroys the clinical
+ * fact the case exists to record. So the question is asked once per string per
+ * product, with the reason it was uncertain, and answering it releases every
+ * source waiting on the same answer.
+ */
+export function SafetyDeidQueue({ productId, onCleared }: {
+  productId: string;
+  onCleared?: () => void;
+}) {
+  const [items, setItems] = useState<PvDeidItem[] | null>(null);
+  const [types, setTypes] = useState<string[]>([]);
+  const [waiting, setWaiting] = useState(0);
+  const [cleared, setCleared] = useState(false);
+  const [scan, setScan] = useState<{ clean: boolean; findings: unknown[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    api.pvDeidQueue(productId)
+      .then((res) => {
+        if (!live) return;
+        setItems(res.items);
+        setTypes(res.identifier_types);
+        setWaiting(res.documents_waiting);
+        setCleared(res.cleared);
+        if (res.cleared) onCleared?.();
+      })
+      .catch((e: any) => { if (live) { setError(e?.message ?? String(e)); setItems([]); } });
+    return () => { live = false; };
+  }, [productId, reload, onCleared]);
+
+  async function resolve(item: PvDeidItem, action: "mask" | "not_an_identifier",
+                         identifierType?: string) {
+    setBusy(item.id);
+    try {
+      const res = await api.pvResolveDeidItem(item.id, {
+        action, identifier_type: identifierType,
+      });
+      setReload((n) => n + 1);
+      if (res.documents_indexed) {
+        toast.success(`${res.documents_indexed} source(s) released and indexed.`);
+      }
+    } catch (e: any) {
+      toast.error("The answer could not be recorded",
+                  { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function override() {
+    const reason = window.prompt(
+      "Clearing the gate without answering it lets unchecked text reach the "
+      + "index. This is recorded against your name. Why?");
+    if (!reason?.trim()) return;
+    setBusy("override");
+    try {
+      const res = await api.pvOverrideDeidQueue(productId, reason.trim());
+      setReload((n) => n + 1);
+      toast.warning(`${res.overridden} detection(s) left unmasked.`,
+                    { description: `${res.documents_indexed} source(s) indexed. Recorded.` });
+    } catch (e: any) {
+      toast.error("The gate could not be overridden",
+                  { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function runScan() {
+    setBusy("scan");
+    try {
+      setScan(await api.pvLeakageScan(productId));
+    } catch (e: any) {
+      toast.error("The scan could not run", { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (items === null) return <TableSkeleton rows={4} cols={3} />;
+  if (error) {
+    return <ErrorBanner title="The queue could not be loaded"
+                        message="Try again in a moment." detail={error} />;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className={cn(
+        "flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3",
+        cleared ? "border-success/40 bg-success/10" : "border-warning/40 bg-warning/10")}>
+        <div className="flex items-center gap-2 text-sm">
+          {cleared ? <CheckCircle2 className="h-4 w-4 text-success" />
+                   : <Lock className="h-4 w-4 text-warning" />}
+          <span className="font-medium text-foreground">
+            {cleared
+              ? "Nothing is waiting. Sources are masked and indexed."
+              : `${items.length} detection(s) open · ${waiting} source(s) held`}
+          </span>
+          {!cleared && (
+            <span className="text-muted-foreground">
+              — nothing is indexed, embedded or sent to a model until these are
+              answered.
+            </span>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={runScan} disabled={busy !== null}>
+            Scan for leaks
+          </Button>
+          {!cleared && (
+            <Button variant="outline" size="sm" onClick={override}
+                    disabled={busy !== null}
+                    className="text-destructive hover:bg-destructive/10">
+              Override (recorded)
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {scan && (
+        <div className={cn(
+          "rounded-lg border px-3 py-2 text-xs",
+          scan.clean ? "border-success/40 bg-success/10" : "border-destructive/40 bg-destructive/10")}>
+          {scan.clean
+            ? "No identifier patterns found in the masked narratives or the indexed chunks."
+            : `${scan.findings.length} identifier(s) found in text that should be clean.`}
+        </div>
+      )}
+
+      {items.length === 0 ? (
+        <PolishedEmpty
+          icon={<CheckCircle2 className="h-8 w-8 text-success" />}
+          title="Nothing to review"
+          subtitle="What the masking pass was sure of was masked without asking. Anything it was not sure of would appear here."
+        />
+      ) : (
+        <div className="overflow-x-auto rounded-xl border border-border">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-muted/40 text-left text-xs text-muted-foreground">
+                <th className="px-3 py-2 font-medium">Found</th>
+                <th className="px-3 py-2 font-medium">Why it is uncertain</th>
+                <th className="px-3 py-2 text-right font-medium">Answer</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.id} className="border-b border-border/60 last:border-0">
+                  <td className="px-3 py-2 font-medium text-foreground">
+                    {item.detected_text}
+                  </td>
+                  <td className="max-w-md px-3 py-2 text-xs text-muted-foreground">
+                    {item.context_snippet}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex flex-wrap justify-end gap-1.5">
+                      <select className={SELECT_CLASS}
+                              defaultValue={item.proposed_mask ?? "patient_name"}
+                              id={`type-${item.id}`}>
+                        {types.map((kind) => (
+                          <option key={kind} value={kind}>
+                            {kind.replace(/_/g, " ")}
+                          </option>
+                        ))}
+                      </select>
+                      <Button size="sm" className="h-8" disabled={busy !== null}
+                              onClick={() => resolve(
+                                item, "mask",
+                                (document.getElementById(`type-${item.id}`) as
+                                  HTMLSelectElement | null)?.value)}>
+                        Mask it
+                      </Button>
+                      <Button size="sm" variant="outline" className="h-8"
+                              disabled={busy !== null}
+                              onClick={() => resolve(item, "not_an_identifier")}>
+                        Not an identifier
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

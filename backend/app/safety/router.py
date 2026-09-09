@@ -37,6 +37,7 @@ from app.models import (
     PvRsiListedTerm, PvRsiVersion, PvSection, PvSectionDraft, User, now,
 )
 from app.ownership import owned_project
+from app.safety import deident
 from app.safety import ingest as ingest_mod
 from app.safety import registry, roles, scope as scope_mod, trees
 from app.security import error, get_current_user
@@ -1366,8 +1367,11 @@ def processing_status(pv_product_id: str, db: Session = Depends(get_db),
     product = _owned_product(db, pv_product_id, user)
     rows = db.scalars(select(PvDocument).where(
         PvDocument.pv_product_id == product.id).order_by(PvDocument.created_at)).all()
-    in_flight = [d for d in rows if d.processing_status in
-                 (ingest_mod.QUEUED, ingest_mod.PARSING)]
+    # Every state the worker moves through, not just the first two. Masking
+    # and indexing are stages, and a screen told "nothing is in flight" while a
+    # document is mid-masking stops polling and shows a half-finished pipeline
+    # as a finished one.
+    in_flight = [d for d in rows if d.processing_status in ingest_mod.IN_FLIGHT]
     waiting = [d for d in rows if d.processing_status == ingest_mod.AWAITING_DEID]
     cases = db.scalar(select(func.count(PvCase.id)).where(
         PvCase.pv_product_id == product.id)) or 0
@@ -1573,3 +1577,164 @@ def list_cases(pv_product_id: str,
         } for case in rows],
         "total": total,
     }
+
+
+# ================================================== M3: de-identification queue
+
+def _deid_out(item) -> dict:
+    return {
+        "id": item.id, "identifier_type": item.identifier_type,
+        "detected_text": item.detected_text,
+        "context_snippet": item.context_snippet,
+        "proposed_mask": item.proposed_mask, "status": item.status,
+        "case_id": item.case_id, "document_id": item.document_id,
+        "resolved_by": item.resolved_by, "resolved_at": item.resolved_at,
+        "created_at": item.created_at,
+    }
+
+
+@router.get("/pv/products/{pv_product_id}/deid-queue")
+def deid_queue(pv_product_id: str, status: str = "pending",
+               db: Session = Depends(get_db),
+               user: User = Depends(get_current_user)):
+    """What the de-identification pass could not settle on its own.
+
+    A gate rather than a report: while anything here is pending, the sources it
+    came from are not indexed, and nothing downstream may run. Each item says
+    what was found and why it was uncertain, so the answer is a judgment about
+    one string rather than about the whole file.
+    """
+    from app.models import PvDeidItem, PvDocument
+
+    product = _owned_product(db, pv_product_id, user)
+    statement = select(PvDeidItem).where(PvDeidItem.pv_product_id == product.id)
+    if status != "all":
+        statement = statement.where(PvDeidItem.status == status)
+    items = db.scalars(statement.order_by(PvDeidItem.created_at)).all()
+    waiting = db.scalar(select(func.count(PvDocument.id)).where(
+        PvDocument.pv_product_id == product.id,
+        PvDocument.processing_status == ingest_mod.AWAITING_DEID)) or 0
+    pending = db.scalar(select(func.count(PvDeidItem.id)).where(
+        PvDeidItem.pv_product_id == product.id,
+        PvDeidItem.status == "pending")) or 0
+    return {
+        "items": [_deid_out(i) for i in items],
+        "pending": pending,
+        "documents_waiting": waiting,
+        "identifier_types": list(deident.IDENTIFIER_TYPES),
+        "cleared": pending == 0 and waiting == 0,
+    }
+
+
+class DeidResolution(BaseModel):
+    #: mask | not_an_identifier
+    action: str
+    #: Which kind, when masking. Defaults to what the detector proposed.
+    identifier_type: str | None = None
+
+
+@router.post("/pv/deid-items/{deid_item_id}/resolve")
+def resolve_deid_item(deid_item_id: str, body: DeidResolution,
+                      db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """Answer one detection, and re-run everything that was waiting on it.
+
+    Every waiting source, not only the one the item came from: deciding that a
+    string is a person's name decides it for the whole product, and the other
+    sources naming them are blocked on the same answer.
+    """
+    from app.models import PvDeidItem
+
+    item = db.get(PvDeidItem, deid_item_id)
+    if not item or item.org_id != user.org_id:
+        raise error("PV_DEID_ITEM_NOT_FOUND", "Detection not found", 404)
+    if body.action not in ("mask", "not_an_identifier"):
+        raise error("PV_BAD_DEID_ACTION",
+                    "action must be 'mask' or 'not_an_identifier'.", 422)
+    if body.action == "mask":
+        chosen = body.identifier_type or item.proposed_mask or deident.OTHER
+        if chosen not in deident.IDENTIFIER_TYPES:
+            raise error("PV_BAD_IDENTIFIER_TYPE",
+                        f"identifier_type must be one of "
+                        f"{', '.join(deident.IDENTIFIER_TYPES)}.", 422)
+        item.identifier_type = chosen
+        item.status = "masked"
+    else:
+        item.status = "not_an_identifier"
+    item.resolved_by = user.id
+    item.resolved_at = now()
+    log_audit(db, user, "Resolved a de-identification detection", "pv_product",
+              item.pv_product_id, None,
+              "info" if body.action == "mask" else "warning",
+              f"{item.detected_text!r} -> {item.status}")
+    db.commit()
+
+    moved = ingest_mod.resume_after_review(db, item.pv_product_id)
+    return {"resolved": item.status, "documents_indexed": len(moved)}
+
+
+class DeidOverride(BaseModel):
+    reason: str
+
+
+@router.post("/pv/products/{pv_product_id}/deid-queue:override")
+def override_deid_queue(pv_product_id: str, body: DeidOverride,
+                        db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    """Clear the gate without answering it, one time, with a reason.
+
+    A qualified-person act and audited as a warning, because it is the one way
+    text nobody has checked can reach an index. §7's S4 allows it and requires
+    exactly this: the role, and an entry saying who did it and why.
+    """
+    from app.models import PvDeidItem
+
+    product = _owned_product(db, pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.QUALIFIED_PERSON,
+                          action="Overriding the de-identification gate")
+    if not body.reason.strip():
+        raise error("PV_OVERRIDE_NEEDS_REASON",
+                    "An override of the de-identification gate has to say why.", 422)
+    items = db.scalars(select(PvDeidItem).where(
+        PvDeidItem.pv_product_id == product.id,
+        PvDeidItem.status == "pending")).all()
+    for item in items:
+        item.status = "overridden"
+        item.resolved_by = user.id
+        item.resolved_at = now()
+    log_audit(db, user, "Overrode the de-identification gate", "pv_product",
+              product.id, product.project_id, "warning",
+              f"{len(items)} detection(s) left unmasked: {body.reason.strip()}")
+    db.commit()
+    moved = ingest_mod.resume_after_review(db, product.id)
+    return {"overridden": len(items), "documents_indexed": len(moved),
+            "reason": body.reason.strip()}
+
+
+@router.post("/pv/products/{pv_product_id}/leakage-scan")
+def leakage_scan(pv_product_id: str, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """§11's first blocker: look for identifiers in text that should be clean.
+
+    Runs over the masked narratives and every indexed chunk -- the things that
+    reach a model and a document. Only confident detections count: a scan that
+    fired on every capitalised pair would flag "Preferred Term" in every file
+    and teach people to ignore it.
+    """
+    from app.models import PvCaseNarrative, PvChunk
+
+    product = _owned_product(db, pv_product_id, user)
+    findings = []
+    for narrative in db.scalars(select(PvCaseNarrative).where(
+            PvCaseNarrative.pv_product_id == product.id)).all():
+        for hit in deident.scan(narrative.raw_text_redacted or ""):
+            findings.append({"where": "narrative", "case_id": narrative.case_id,
+                             "identifier_type": hit.identifier_type,
+                             "text": hit.text, "basis": hit.basis})
+    for chunk in db.scalars(select(PvChunk).where(
+            PvChunk.pv_product_id == product.id)).all():
+        for hit in deident.scan(chunk.content or ""):
+            findings.append({"where": "chunk", "document_id": chunk.document_id,
+                             "identifier_type": hit.identifier_type,
+                             "text": hit.text, "basis": hit.basis})
+    return {"findings": findings, "clean": not findings}

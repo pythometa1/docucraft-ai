@@ -155,6 +155,11 @@ FLOORS = {
     # source recorded as read that was not, or -- much worse -- one that
     # travelled past de-identification before de-identification exists.
     "safety/ingest.py": 90,
+    # The one thing standing between a patient's name and a vector store.
+    # Every branch decides either to mask something or to ask a person about
+    # it, and both failures are silent: an unmasked name leaks, and an
+    # over-eager mask destroys the clinical fact the case exists to record.
+    "safety/deident.py": 97,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,
