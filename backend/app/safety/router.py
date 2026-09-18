@@ -1738,3 +1738,447 @@ def leakage_scan(pv_product_id: str, db: Session = Depends(get_db),
                              "identifier_type": hit.identifier_type,
                              "text": hit.text, "basis": hit.basis})
     return {"findings": findings, "clean": not findings}
+
+
+# ============================== M4: coding, expectedness, duplicates, the grid
+
+def _event_out(event, *, case=None) -> dict:
+    return {
+        "id": event.id, "case_id": event.case_id,
+        "verbatim_term": event.verbatim_term,
+        "meddra_llt": event.meddra_llt, "meddra_pt": event.meddra_pt,
+        "meddra_hlt": event.meddra_hlt, "meddra_hlgt": event.meddra_hlgt,
+        "meddra_soc": event.meddra_soc, "meddra_version": event.meddra_version,
+        "coding_required": event.coding_required,
+        "is_serious": event.is_serious,
+        "seriousness_criteria": event.seriousness_criteria or [],
+        "expectedness": event.expectedness,
+        "expectedness_rsi_version_id": event.expectedness_rsi_version_id,
+        "causality_reporter": event.causality_reporter,
+        "causality_company": event.causality_company,
+        "onset_date": event.onset_date, "outcome": event.outcome,
+        "is_aesi": event.is_aesi,
+        "suggested": event.suggested_by_system_json or {},
+        "confirmed_by": event.confirmed_by, "confirmed_at": event.confirmed_at,
+        "worldwide_case_id": getattr(case, "worldwide_case_id", None),
+    }
+
+
+@router.post("/pv/products/{pv_product_id}/code", status_code=202)
+def code_events(pv_product_id: str, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    """Code every uncoded event against the licensed MedDRA dictionary.
+
+    A deployment with no licence codes nothing and says so per event. That is
+    the honest outcome: a guessed preferred term puts an event under the wrong
+    System Organ Class, inside a total a regulator compares against the last
+    report, and nothing in the output looks wrong -- while an uncoded event
+    sits in a queue with a number beside it.
+    """
+    from app.models import PvCaseEvent
+    from app.safety import meddra
+
+    product = _owned_product(db, pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Coding events")
+    dictionary = meddra.dictionary_for(db, user.org_id, None)
+    events = db.scalars(select(PvCaseEvent).where(
+        PvCaseEvent.pv_product_id == product.id,
+        PvCaseEvent.meddra_pt.is_(None))).all()
+
+    coded = 0
+    reasons: dict = {}
+    for event in events:
+        result = meddra.code_term(event.verbatim_term, dictionary)
+        if result.coded:
+            event.meddra_llt = result.llt
+            event.meddra_pt = result.pt
+            event.meddra_hlt = result.hlt
+            event.meddra_hlgt = result.hlgt
+            event.meddra_soc = result.soc
+            event.meddra_version = result.version
+            event.coding_required = False
+            coded += 1
+        else:
+            event.coding_required = True
+            reasons[result.reason] = reasons.get(result.reason, 0) + 1
+    log_audit(db, user, "Coded safety events", "pv_product", product.id,
+              product.project_id, "info",
+              f"{coded} of {len(events)} coded"
+              + (f" (MedDRA {dictionary.version})" if dictionary.loaded else
+                 "; no dictionary is licensed in this deployment"))
+    db.commit()
+    return {"coded": coded, "still_uncoded": len(events) - coded,
+            "dictionary_loaded": dictionary.loaded,
+            "meddra_version": dictionary.version,
+            "reasons": [{"reason": r, "events": n} for r, n in reasons.items()]}
+
+
+@router.post("/pv/reports/{report_instance_id}/suggest-expectedness", status_code=202)
+def suggest_expectedness(report_instance_id: str, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    """Propose listedness for every event, against this report's pinned RSI.
+
+    Written to `suggested_by_system_json` and never to the confirmed column.
+    The suggestion carries its basis, because the person confirming is
+    accountable for the determination and cannot be accountable for reasoning
+    they cannot see.
+    """
+    from app.models import PvCaseEvent
+    from app.safety import expectedness as exp
+
+    report = _owned_report(db, report_instance_id, user)
+    product = _owned_product(db, report.pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Computing expectedness suggestions")
+    rsi = db.get(PvRsiVersion, report.rsi_version_id) if report.rsi_version_id else None
+    terms = exp.listed_terms(db, rsi.id) if rsi is not None else {}
+
+    events = db.scalars(select(PvCaseEvent).where(
+        PvCaseEvent.pv_product_id == product.id)).all()
+    counts = {"listed": 0, "unlisted": 0, "needs_person": 0}
+    for event in events:
+        suggestion = exp.suggest(event, terms=terms, rsi_version=rsi)
+        merged = dict(event.suggested_by_system_json or {})
+        merged.update(suggestion.as_json())
+        event.suggested_by_system_json = merged
+        key = suggestion.value or "needs_person"
+        counts[key] = counts.get(key, 0) + 1
+    log_audit(db, user, "Computed expectedness suggestions", "pv_report_instance",
+              report.id, None, "info",
+              f"{len(events)} event(s) against "
+              + (f"{rsi.rsi_type} {rsi.version_label}" if rsi else "no pinned RSI"))
+    db.commit()
+    return {"events": len(events), "counts": counts,
+            "rsi_version_id": rsi.id if rsi else None,
+            "note": ("These are suggestions. Nothing counts anywhere until a "
+                     "qualified person confirms it.")}
+
+
+class EventConfirmation(BaseModel):
+    """What a qualified person is deciding. Anything omitted is left alone."""
+    expectedness: str | None = None
+    is_serious: bool | None = None
+    seriousness_criteria: list | None = None
+    causality_reporter: str | None = None
+    causality_company: str | None = None
+    is_aesi: bool | None = None
+    meddra_pt: str | None = None
+    meddra_soc: str | None = None
+    meddra_version: str | None = None
+
+
+@router.patch("/pv/case-events/{case_event_id}/confirm")
+def confirm_event(case_event_id: str, body: EventConfirmation,
+                  report_instance_id: str | None = None,
+                  db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    """Record a determination. Qualified persons only.
+
+    The RSI version is stamped from the report at the moment of confirming, so
+    the determination says which version it was made against. §2's sixth
+    principle: changing the pin later leaves this one attached to the version
+    it was actually about.
+    """
+    from app.models import PvCaseEvent
+    from app.safety.expectedness import LISTED, NOT_ASSESSED, UNLISTED
+
+    event = db.get(PvCaseEvent, case_event_id)
+    if not event or event.org_id != user.org_id:
+        raise error("PV_EVENT_NOT_FOUND", "Event not found", 404)
+    roles.require_pv_role(
+        db, event.pv_product_id, user, roles.QUALIFIED_PERSON,
+        action="Confirming seriousness, expectedness or causality")
+
+    changes = body.model_dump(exclude_unset=True)
+    if "expectedness" in changes and changes["expectedness"] not in (
+            LISTED, UNLISTED, NOT_ASSESSED):
+        raise error("PV_BAD_EXPECTEDNESS",
+                    f"expectedness must be one of {LISTED}, {UNLISTED}, "
+                    f"{NOT_ASSESSED}.", 422)
+
+    if changes.get("expectedness") in (LISTED, UNLISTED):
+        if report_instance_id:
+            report = _owned_report(db, report_instance_id, user)
+            if report.pv_product_id != event.pv_product_id:
+                raise error("PV_REPORT_WRONG_PRODUCT",
+                            "That report belongs to a different product.", 422)
+            if not report.rsi_version_id:
+                raise error("PV_NO_RSI_PINNED",
+                            "This report pins no reference safety information, so "
+                            "there is nothing for the event to be expected "
+                            "against. Pin a version first.", 409)
+            event.expectedness_rsi_version_id = report.rsi_version_id
+        elif not event.expectedness_rsi_version_id:
+            raise error("PV_RSI_CONTEXT_REQUIRED",
+                        "An expectedness determination has to say which reference "
+                        "safety information version it was made against. Confirm it "
+                        "from a report instance.", 422)
+
+    before = {k: getattr(event, k) for k in changes}
+    for key, value in changes.items():
+        setattr(event, key, value)
+    event.confirmed_by = user.id
+    event.confirmed_at = now()
+    event.updated_at = now()
+    moved = [f"{k}: {before[k]!r} -> {getattr(event, k)!r}" for k in changes
+             if before[k] != getattr(event, k)]
+    log_audit(db, user, "Confirmed a safety determination", "pv_case_event",
+              event.id, None, "warning",
+              "; ".join(moved) if moved else "re-confirmed unchanged")
+    db.commit()
+    db.refresh(event)
+    return _event_out(event)
+
+
+class BulkConfirmation(BaseModel):
+    """Confirm every event sharing one preferred term.
+
+    Scoped to a term rather than to a list of ids on purpose: expectedness is a
+    property of a TERM against an RSI version, so confirming it for "Headache"
+    across forty cases is one determination applied consistently, while
+    confirming forty ids is forty chances to be inconsistent.
+    """
+    meddra_pt: str
+    expectedness: str
+    report_instance_id: str | None = None
+
+
+@router.post("/pv/products/{pv_product_id}/case-events:bulk-confirm")
+def bulk_confirm(pv_product_id: str, body: BulkConfirmation,
+                 db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    from app.models import PvCaseEvent
+    from app.safety.expectedness import LISTED, UNLISTED
+
+    product = _owned_product(db, pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.QUALIFIED_PERSON,
+                          action="Confirming expectedness in bulk")
+    if body.expectedness not in (LISTED, UNLISTED):
+        raise error("PV_BAD_EXPECTEDNESS",
+                    f"expectedness must be {LISTED} or {UNLISTED}.", 422)
+    rsi_version_id = None
+    if body.report_instance_id:
+        report = _owned_report(db, body.report_instance_id, user)
+        if report.pv_product_id != product.id:
+            raise error("PV_REPORT_WRONG_PRODUCT",
+                        "That report belongs to a different product.", 422)
+        rsi_version_id = report.rsi_version_id
+    if not rsi_version_id:
+        raise error("PV_RSI_CONTEXT_REQUIRED",
+                    "An expectedness determination has to say which reference "
+                    "safety information version it was made against.", 422)
+
+    events = db.scalars(select(PvCaseEvent).where(
+        PvCaseEvent.pv_product_id == product.id,
+        func.lower(PvCaseEvent.meddra_pt) == body.meddra_pt.strip().lower())).all()
+    for event in events:
+        event.expectedness = body.expectedness
+        event.expectedness_rsi_version_id = rsi_version_id
+        event.confirmed_by = user.id
+        event.confirmed_at = now()
+    log_audit(db, user, "Confirmed expectedness in bulk", "pv_product", product.id,
+              product.project_id, "warning",
+              f"{body.meddra_pt}: {len(events)} event(s) -> {body.expectedness}")
+    db.commit()
+    return {"confirmed": len(events), "meddra_pt": body.meddra_pt,
+            "expectedness": body.expectedness}
+
+
+@router.get("/pv/products/{pv_product_id}/case-events")
+def list_case_events(pv_product_id: str,
+                     report_instance_id: str | None = None,
+                     only: str | None = None,
+                     q: str | None = None,
+                     limit: int = Query(200, ge=1, le=2000),
+                     offset: int = Query(0, ge=0),
+                     db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """The Events tab of the review grid.
+
+    `only` narrows to the two queues that gate everything downstream:
+    `unconfirmed` and `coding_required`. The header count comes from the same
+    query the rows do, so "X of Y confirmed" cannot disagree with the list
+    underneath it.
+    """
+    from app.models import PvCase, PvCaseEvent
+
+    product = _owned_product(db, pv_product_id, user)
+    statement = select(PvCaseEvent).where(PvCaseEvent.pv_product_id == product.id)
+    if only == "unconfirmed":
+        statement = statement.where(PvCaseEvent.confirmed_by.is_(None))
+    elif only == "coding_required":
+        statement = statement.where(PvCaseEvent.coding_required.is_(True))
+    elif only:
+        raise error("PV_UNKNOWN_FILTER",
+                    "only must be 'unconfirmed' or 'coding_required'.", 422)
+    if (q or "").strip():
+        like = f"%{q.strip()}%"
+        statement = statement.where(or_(PvCaseEvent.verbatim_term.ilike(like),
+                                        PvCaseEvent.meddra_pt.ilike(like),
+                                        PvCaseEvent.meddra_soc.ilike(like)))
+    total = db.scalar(statement.with_only_columns(
+        func.count(PvCaseEvent.id)).order_by(None)) or 0
+    rows = db.scalars(statement.order_by(PvCaseEvent.created_at)
+                      .limit(limit).offset(offset)).all()
+    cases = {c.id: c for c in db.scalars(select(PvCase).where(
+        PvCase.id.in_([r.case_id for r in rows] or [""]))).all()}
+
+    confirmed = db.scalar(select(func.count(PvCaseEvent.id)).where(
+        PvCaseEvent.pv_product_id == product.id,
+        PvCaseEvent.confirmed_by.is_not(None))) or 0
+    all_events = db.scalar(select(func.count(PvCaseEvent.id)).where(
+        PvCaseEvent.pv_product_id == product.id)) or 0
+    uncoded = db.scalar(select(func.count(PvCaseEvent.id)).where(
+        PvCaseEvent.pv_product_id == product.id,
+        PvCaseEvent.coding_required.is_(True))) or 0
+
+    out = {
+        "items": [_event_out(e, case=cases.get(e.case_id)) for e in rows],
+        "total": total,
+        "summary": {"events": all_events, "confirmed": confirmed,
+                    "unconfirmed": all_events - confirmed,
+                    "coding_required": uncoded,
+                    "all_confirmed": all_events > 0 and confirmed == all_events},
+        "my_role": roles.role_of(db, product.id, user),
+    }
+    if report_instance_id:
+        from app.safety import expectedness as exp
+
+        report = _owned_report(db, report_instance_id, user)
+        stale = exp.stale_determinations(db, report)
+        out["stale_expectedness"] = [
+            {"event_id": e.id, "meddra_pt": e.meddra_pt,
+             "confirmed_against": e.expectedness_rsi_version_id} for e in stale]
+    return out
+
+
+@router.post("/pv/products/{pv_product_id}/duplicates:detect", status_code=202)
+def detect_duplicates(pv_product_id: str, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """Look for cases that might be the same case. Never merges anything."""
+    from app.safety import duplicates as dup
+
+    product = _owned_product(db, pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Detecting duplicates")
+    candidates = dup.find(db, pv_product_id=product.id, org_id=user.org_id)
+    written = dup.record(db, pv_product_id=product.id, org_id=user.org_id,
+                         candidates=candidates)
+    log_audit(db, user, "Ran duplicate detection", "pv_product", product.id,
+              product.project_id, "info",
+              f"{len(candidates)} candidate pair(s), {written} new")
+    db.commit()
+    return {"candidates": len(candidates), "new": written,
+            "note": "Candidates only. Nothing is merged without a person."}
+
+
+@router.get("/pv/products/{pv_product_id}/duplicates")
+def list_duplicates(pv_product_id: str, status: str = "pending",
+                    db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    from app.models import PvCase, PvDuplicateCandidate
+
+    product = _owned_product(db, pv_product_id, user)
+    statement = select(PvDuplicateCandidate).where(
+        PvDuplicateCandidate.pv_product_id == product.id)
+    if status != "all":
+        statement = statement.where(PvDuplicateCandidate.status == status)
+    rows = db.scalars(statement.order_by(
+        PvDuplicateCandidate.score.desc())).all()
+    ids = {r.case_id for r in rows} | {r.other_case_id for r in rows}
+    cases = {c.id: c for c in db.scalars(select(PvCase).where(
+        PvCase.id.in_(ids or {""}))).all()}
+
+    def brief(case_id):
+        case = cases.get(case_id)
+        if case is None:
+            return {"id": case_id}
+        return {"id": case.id, "worldwide_case_id": case.worldwide_case_id,
+                "country_of_occurrence": case.country_of_occurrence,
+                "initial_receipt_date": case.initial_receipt_date,
+                "patient_age": case.patient_age, "patient_sex": case.patient_sex,
+                "is_serious": case.is_serious}
+
+    return {"items": [{
+        "id": r.id, "score": r.score, "matched_on": r.matched_on or [],
+        "status": r.status, "case": brief(r.case_id),
+        "other_case": brief(r.other_case_id),
+        "resolved_by": r.resolved_by,
+    } for r in rows]}
+
+
+class DuplicateResolution(BaseModel):
+    #: merged | kept_both | linked
+    action: str
+    #: When merging, which of the pair survives.
+    keep_case_id: str | None = None
+
+
+@router.post("/pv/duplicates/{duplicate_id}/resolve")
+def resolve_duplicate(duplicate_id: str, body: DuplicateResolution,
+                      db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """Answer one candidate pair.
+
+    Merging changes every figure the merged case contributed to and cannot be
+    undone by re-importing, so it needs the qualified-person role and it says
+    which case survives -- there is no "merge these" that leaves the system to
+    choose.
+    """
+    from app.models import (
+        PvCase, PvCaseDrug, PvCaseEvent, PvCaseNarrative, PvCaseOriginal,
+        PvDuplicateCandidate,
+    )
+
+    candidate = db.get(PvDuplicateCandidate, duplicate_id)
+    if not candidate or candidate.org_id != user.org_id:
+        raise error("PV_DUPLICATE_NOT_FOUND", "Candidate not found", 404)
+    if body.action not in ("merged", "kept_both", "linked"):
+        raise error("PV_BAD_DUPLICATE_ACTION",
+                    "action must be 'merged', 'kept_both' or 'linked'.", 422)
+
+    if body.action == "merged":
+        roles.require_pv_role(db, candidate.pv_product_id, user,
+                              roles.QUALIFIED_PERSON,
+                              action="Merging two cases")
+        keep = body.keep_case_id
+        if keep not in (candidate.case_id, candidate.other_case_id):
+            raise error("PV_MERGE_NEEDS_SURVIVOR",
+                        "keep_case_id has to be one of the two cases in the pair.",
+                        422)
+        drop = (candidate.other_case_id if keep == candidate.case_id
+                else candidate.case_id)
+        survivor = db.get(PvCase, keep)
+        merged_case = db.get(PvCase, drop)
+        if survivor is None or merged_case is None:
+            raise error("PV_CASE_NOT_FOUND", "One of the cases is gone.", 404)
+        # The merged case's identifiers move to the survivor, so the case can
+        # still be found by the number the other source used for it.
+        identifiers = list(survivor.local_case_ids or [])
+        for value in [merged_case.worldwide_case_id,
+                      *(merged_case.local_case_ids or [])]:
+            if value and value not in identifiers:
+                identifiers.append(value)
+        survivor.local_case_ids = identifiers
+        for model in (PvCaseEvent, PvCaseDrug, PvCaseNarrative, PvCaseOriginal):
+            for row in db.scalars(select(model).where(
+                    model.case_id == merged_case.id)).all():
+                db.delete(row)
+        db.flush()
+        merged_label = merged_case.worldwide_case_id
+        db.delete(merged_case)
+        log_audit(db, user, "Merged two safety cases", "pv_case", keep, None,
+                  "warning",
+                  f"{merged_label} merged into {survivor.worldwide_case_id}; "
+                  f"score {candidate.score}")
+    else:
+        log_audit(db, user, "Resolved a duplicate candidate", "pv_product",
+                  candidate.pv_product_id, None, "info",
+                  f"{body.action}, score {candidate.score}")
+
+    candidate.status = body.action
+    candidate.resolved_by = user.id
+    candidate.resolved_at = now()
+    db.commit()
+    return {"resolved": candidate.status}

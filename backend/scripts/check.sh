@@ -160,6 +160,13 @@ FLOORS = {
     # it, and both failures are silent: an unmasked name leaks, and an
     # over-eager mask destroys the clinical fact the case exists to record.
     "safety/deident.py": 97,
+    # The three things the machine proposes and a person decides. `meddra`
+    # refuses to guess a code, `expectedness` refuses to flatten a qualified
+    # listing, and `duplicates` refuses to merge -- every branch is one of
+    # those refusals, and a refusal that is not exercised is not there.
+    "safety/meddra.py": 98,
+    "safety/expectedness.py": 100,
+    "safety/duplicates.py": 98,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

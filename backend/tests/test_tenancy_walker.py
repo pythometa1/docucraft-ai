@@ -56,9 +56,9 @@ def org_a_resources(app_client, two_orgs):
         CmcResult, CmcSection, CmcSite,
         Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
-        GenerationJob, Invoice, Mapping, Project, PvDeidItem, PvDocument,
-        PvProduct, PvReportInstance, PvRsiVersion, ReviewComment, ReviewTask,
-        SourceFile, Study,
+        GenerationJob, Invoice, Mapping, Project, PvCase, PvCaseEvent, PvDeidItem,
+        PvDocument, PvDuplicateCandidate, PvProduct, PvReportInstance,
+        PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
         TemplateBlueprint,
         TemplateBlueprintVersion, TemplateFile, TemplateLibrary, TemplateLibraryVersion,
@@ -234,6 +234,18 @@ def org_a_resources(app_client, two_orgs):
             org_id=org, pv_product_id=pv_product.id, document_id=pv_document.id,
             identifier_type="patient_name", detected_text="A Name")
         db.add(pv_deid)
+        pv_case = PvCase(org_id=org, pv_product_id=pv_product.id,
+                         worldwide_case_id="TEN-1")
+        pv_other_case = PvCase(org_id=org, pv_product_id=pv_product.id,
+                               worldwide_case_id="TEN-2")
+        db.add_all([pv_case, pv_other_case])
+        db.flush()
+        pv_event = PvCaseEvent(org_id=org, pv_product_id=pv_product.id,
+                               case_id=pv_case.id, meddra_pt="Headache")
+        pv_duplicate = PvDuplicateCandidate(
+            org_id=org, pv_product_id=pv_product.id, case_id=pv_case.id,
+            other_case_id=pv_other_case.id, score=0.9)
+        db.add_all([pv_event, pv_duplicate])
         db.flush()
 
         ids = {
@@ -257,6 +269,7 @@ def org_a_resources(app_client, two_orgs):
             "pv_product_id": pv_product.id, "rsi_version_id": pv_rsi.id,
             "report_instance_id": pv_report.id,
             "pv_document_id": pv_document.id, "deid_item_id": pv_deid.id,
+            "case_event_id": pv_event.id, "duplicate_id": pv_duplicate.id,
         }
         db.commit()
     finally:
@@ -552,6 +565,19 @@ ROUTES: list[dict] = [
     {"method": "POST", "path": "/pv/products/{pv_product_id}/leakage-scan"},
     {"method": "POST", "path": "/pv/deid-items/{deid_item_id}/resolve",
      "body": {"action": "mask"}},
+
+    # Safety M4: coding, expectedness, duplicates.
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/code"},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/suggest-expectedness"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/case-events"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/case-events:bulk-confirm",
+     "body": {"meddra_pt": "Headache", "expectedness": "listed"}},
+    {"method": "PATCH", "path": "/pv/case-events/{case_event_id}/confirm",
+     "body": {"is_aesi": True}},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/duplicates:detect"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/duplicates"},
+    {"method": "POST", "path": "/pv/duplicates/{duplicate_id}/resolve",
+     "body": {"action": "kept_both"}},
 ]
 
 

@@ -18,7 +18,8 @@ import type {
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
-  PvCaseRow, PvDeidGate, PvDeidItem, PvMappingProfile, PvReadiness,
+  PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDuplicatePair,
+  PvEventSummary, PvMappingProfile, PvReadiness,
   PvRsiVersion, PvScopePreview, PvSection, PvSource,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
 } from "@/lib/types";
@@ -783,6 +784,43 @@ export const api = {
     request<{ findings: { where: string; identifier_type: string; text: string;
                           basis: string }[]; clean: boolean }>(
       "POST", `/pv/products/${id}/leakage-scan`),
+
+  /* ---- Safety M4: coding, expectedness and duplicates ---- */
+  pvCaseEvents: (id: string, params: {
+    report_instance_id?: string; only?: string; q?: string;
+    limit?: number; offset?: number;
+  } = {}) => request<{ items: PvCaseEvent[]; total: number;
+                       summary: PvEventSummary; my_role: string | null;
+                       stale_expectedness?: { event_id: string; meddra_pt: string }[] }>(
+    "GET", `/pv/products/${id}/case-events`, { query: params }),
+  pvCodeEvents: (id: string) =>
+    request<{ coded: number; still_uncoded: number; dictionary_loaded: boolean;
+              meddra_version: string | null;
+              reasons: { reason: string; events: number }[] }>(
+      "POST", `/pv/products/${id}/code`),
+  /** Written to the suggestion column, never to the confirmed one. */
+  pvSuggestExpectedness: (reportId: string) =>
+    request<{ events: number; counts: Record<string, number>; note: string }>(
+      "POST", `/pv/reports/${reportId}/suggest-expectedness`),
+  pvConfirmEvent: (eventId: string, body: Record<string, unknown>,
+                   reportInstanceId?: string) =>
+    request<PvCaseEvent>("PATCH", `/pv/case-events/${eventId}/confirm`, {
+      json: body, query: { report_instance_id: reportInstanceId },
+    }),
+  pvBulkConfirm: (id: string, body: {
+    meddra_pt: string; expectedness: string; report_instance_id?: string;
+  }) => request<{ confirmed: number }>(
+    "POST", `/pv/products/${id}/case-events:bulk-confirm`, { json: body }),
+  pvDetectDuplicates: (id: string) =>
+    request<{ candidates: number; new: number; note: string }>(
+      "POST", `/pv/products/${id}/duplicates:detect`),
+  pvDuplicates: (id: string, status = "pending") =>
+    request<{ items: PvDuplicatePair[] }>(
+      "GET", `/pv/products/${id}/duplicates`, { query: { status } }),
+  pvResolveDuplicate: (pairId: string, body: {
+    action: string; keep_case_id?: string;
+  }) => request<{ resolved: string }>(
+    "POST", `/pv/duplicates/${pairId}/resolve`, { json: body }),
 
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>

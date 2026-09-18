@@ -915,6 +915,53 @@ export type PvCaseRow = {
   scope: string | null;
 };
 
+/** One adverse event within a case. `expectedness` is the confirmed column and
+ *  `suggested` is what the system proposed — they are deliberately different
+ *  fields, and only a qualified person writes the first. */
+export type PvCaseEvent = {
+  id: string;
+  case_id: string;
+  worldwide_case_id: string | null;
+  verbatim_term: string | null;
+  meddra_llt: string | null;
+  meddra_pt: string | null;
+  meddra_soc: string | null;
+  meddra_version: string | null;
+  coding_required: boolean;
+  is_serious: boolean;
+  seriousness_criteria: string[];
+  expectedness: string;
+  expectedness_rsi_version_id: string | null;
+  causality_reporter: string | null;
+  causality_company: string | null;
+  onset_date: string | null;
+  outcome: string | null;
+  is_aesi: boolean;
+  suggested: {
+    expectedness?: { value: string | null; basis: string; rsi_label: string | null };
+  };
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+};
+
+export type PvEventSummary = {
+  events: number;
+  confirmed: number;
+  unconfirmed: number;
+  coding_required: number;
+  all_confirmed: boolean;
+};
+
+export type PvDuplicatePair = {
+  id: string;
+  score: number;
+  matched_on: string[];
+  status: string;
+  case: Record<string, unknown>;
+  other_case: Record<string, unknown>;
+  resolved_by: string | null;
+};
+
 /* ---- The CSR module ---- */
 
 export type CsrSection = {
