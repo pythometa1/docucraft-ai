@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.audit.service import log_audit
 from app.cmc import registry
 from app.cmc.ctd import seed_sections
-from app.db import get_db
+from app.db import delete_in_order, get_db
 from app.models import (
     CmcDeliverable, CmcProject, CmcSection, CmcSite, Project, User, now,
 )
@@ -255,15 +255,11 @@ def delete_cmc_project(cmc_project_id: str, db: Session = Depends(get_db),
         [d.id for d in deliverables]))).all() if deliverables else []
 
     counts = {"sections": len(sections), "deliverables": len(deliverables)}
-    for section in sections:
-        for draft in db.scalars(select(CmcSectionDraft).where(
-                CmcSectionDraft.cmc_section_id == section.id)).all():
-            for citation in db.scalars(select(CmcCitation).where(
-                    CmcCitation.draft_id == draft.id)).all():
-                db.delete(citation)
-            db.delete(draft)
-        db.delete(section)
-    db.flush()
+    drafts = db.scalars(select(CmcSectionDraft).where(CmcSectionDraft.cmc_section_id.in_(
+        [s.id for s in sections]))).all() if sections else []
+    citations = db.scalars(select(CmcCitation).where(CmcCitation.draft_id.in_(
+        [d.id for d in drafts]))).all() if drafts else []
+    delete_in_order(db, citations, drafts, sections)
 
     documents = db.scalars(select(CmcDocument).where(
         CmcDocument.cmc_project_id == cp.id)).all()
@@ -506,7 +502,7 @@ def remove_deliverable(cmc_deliverable_id: str, db: Session = Depends(get_db),
     """Remove a deliverable and its sections. Refused once any section carries
     work: dropping a deliverable with approved sections in it would discard a
     reviewed document silently."""
-    from app.models import CmcSectionDraft
+    from app.models import CmcBatchFormula, CmcSectionDraft
 
     deliverable = _owned_deliverable(db, cmc_deliverable_id, user)
     sections = db.scalars(select(CmcSection).where(
@@ -516,12 +512,14 @@ def remove_deliverable(cmc_deliverable_id: str, db: Session = Depends(get_db),
             "CMC_DELIVERABLE_HAS_WORK",
             "Sections of this deliverable already carry drafts. Remove them first, or "
             "keep the deliverable and disable the sections you do not need.", 409)
-    for section in sections:
-        for draft in db.scalars(select(CmcSectionDraft).where(
-                CmcSectionDraft.cmc_section_id == section.id)).all():
-            db.delete(draft)
-        db.delete(section)
-    db.delete(deliverable)
+    drafts = db.scalars(select(CmcSectionDraft).where(CmcSectionDraft.cmc_section_id.in_(
+        [s.id for s in sections]))).all() if sections else []
+    # A batch formula is verified data, not part of the deliverable's text: it
+    # is detached, not deleted, when the deliverable it was filed under goes.
+    for formula in db.scalars(select(CmcBatchFormula).where(
+            CmcBatchFormula.cmc_deliverable_id == deliverable.id)).all():
+        formula.cmc_deliverable_id = None
+    delete_in_order(db, drafts, sections, [deliverable])
     log_audit(db, user, "Removed a CMC deliverable", "cmc_deliverable",
               deliverable.id, None, "warning", deliverable.doc_type_key)
     db.commit()

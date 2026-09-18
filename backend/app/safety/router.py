@@ -31,7 +31,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.audit.service import log_audit
-from app.db import get_db
+from app.db import delete_in_order, get_db
 from app.models import (
     Project, PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance,
     PvRsiListedTerm, PvRsiVersion, PvSection, PvSectionDraft, User, now,
@@ -154,6 +154,18 @@ def _sync_regional_sections(db, report: PvReportInstance) -> None:
     for section in db.scalars(select(PvSection).where(
             PvSection.report_instance_id == report.id)).all():
         section.sort_order = order.get(section.section_code, section.sort_order)
+
+
+def _delete_sections(db, sections) -> None:
+    """Sections with their drafts and citations, children first."""
+    from app.models import PvCitation
+
+    ids = [s.id for s in sections]
+    drafts = db.scalars(select(PvSectionDraft).where(
+        PvSectionDraft.pv_section_id.in_(ids))).all() if ids else []
+    citations = db.scalars(select(PvCitation).where(
+        PvCitation.draft_id.in_([d.id for d in drafts]))).all() if drafts else []
+    delete_in_order(db, citations, drafts, sections)
 
 
 def _withdraw_signoff(db, report: PvReportInstance, user: User, why: str) -> bool:
@@ -348,16 +360,8 @@ def delete_product(pv_product_id: str, db: Session = Depends(get_db),
     report_ids = [r.id for r in reports]
     sections = db.scalars(select(PvSection).where(
         PvSection.report_instance_id.in_(report_ids))).all() if report_ids else []
-    for section in sections:
-        for draft in db.scalars(select(PvSectionDraft).where(
-                PvSectionDraft.pv_section_id == section.id)).all():
-            for citation in db.scalars(select(PvCitation).where(
-                    PvCitation.draft_id == draft.id)).all():
-                db.delete(citation)
-            db.delete(draft)
-        db.delete(section)
+    _delete_sections(db, sections)
     counts["pv_sections"] = len(sections)
-    db.flush()
 
     # Blobs are collected before the rows that name them are deleted.
     blobs = []
@@ -402,16 +406,17 @@ def delete_product(pv_product_id: str, db: Session = Depends(get_db),
                 PvRsiListedTerm.rsi_version_id.in_([v.id for v in versions]))).all():
             db.delete(term)
     db.flush()
-    for version in versions:
-        db.delete(version)
-    counts["pv_rsi_versions"] = len(versions)
-    for report in reports:
-        db.delete(report)
+    # Reports before the RSI versions they pin, and each report before the
+    # one it carries forward from -- latest first, one at a time, because a
+    # report and its baseline are rows of the same table and a single flush
+    # has no reason to delete them in the order the baseline key needs.
+    ordered = sorted(reports, key=lambda r: (r.period_start, r.created_at), reverse=True)
+    delete_in_order(db, *[[report] for report in ordered])
     counts["pv_report_instances"] = len(reports)
-    for member in db.scalars(select(PvMember).where(
-            PvMember.pv_product_id == product.id)).all():
-        db.delete(member)
-    db.flush()
+    delete_in_order(db, versions)
+    counts["pv_rsi_versions"] = len(versions)
+    delete_in_order(db, db.scalars(select(PvMember).where(
+        PvMember.pv_product_id == product.id)).all())
     db.delete(product)
     log_audit(db, user, "Deleted a safety product", "pv_product", product.id,
               product.project_id, "warning",
@@ -1015,16 +1020,7 @@ def delete_report(report_instance_id: str, db: Session = Depends(get_db),
 
     sections = db.scalars(select(PvSection).where(
         PvSection.report_instance_id == report.id)).all()
-    from app.models import PvCitation
-
-    for section in sections:
-        for draft in db.scalars(select(PvSectionDraft).where(
-                PvSectionDraft.pv_section_id == section.id)).all():
-            for citation in db.scalars(select(PvCitation).where(
-                    PvCitation.draft_id == draft.id)).all():
-                db.delete(citation)
-            db.delete(draft)
-        db.delete(section)
+    _delete_sections(db, sections)
     for due in db.scalars(select(PvDueDate).where(
             PvDueDate.report_instance_id == report.id)).all():
         db.delete(due)
@@ -2237,7 +2233,7 @@ def resolve_duplicate(duplicate_id: str, body: DuplicateResolution,
     choose.
     """
     from app.models import (
-        PvCase, PvCaseDrug, PvCaseEvent, PvCaseNarrative, PvCaseOriginal,
+        PvCase, PvCaseDrug, PvCaseEvent, PvCaseLab, PvCaseNarrative, PvCaseOriginal,
         PvDuplicateCandidate,
     )
 
@@ -2271,17 +2267,49 @@ def resolve_duplicate(duplicate_id: str, body: DuplicateResolution,
             if value and value not in identifiers:
                 identifiers.append(value)
         survivor.local_case_ids = identifiers
-        for model in (PvCaseEvent, PvCaseDrug, PvCaseNarrative, PvCaseOriginal):
-            for row in db.scalars(select(model).where(
-                    model.case_id == merged_case.id)).all():
-                db.delete(row)
-        db.flush()
+        # Everything that hangs off the merged case goes with it -- labs
+        # included, which this list once left out, so a merge of a case with
+        # a laboratory result failed on any database that enforces keys.
+        delete_in_order(db, *[
+            db.scalars(select(model).where(model.case_id == merged_case.id)).all()
+            for model in (PvCaseEvent, PvCaseDrug, PvCaseLab, PvCaseNarrative,
+                          PvCaseOriginal)])
+        # Other candidate pairs naming the merged case now name the survivor:
+        # whatever looked like a duplicate of one is a candidate duplicate of
+        # the other. A pair that would become the survivor with itself, or
+        # repeat a pair that already exists, has nothing left to ask.
+        existing = {frozenset((c.case_id, c.other_case_id)) for c in db.scalars(
+            select(PvDuplicateCandidate).where(
+                PvDuplicateCandidate.pv_product_id == candidate.pv_product_id)).all()}
+        stale = []
+        for other in db.scalars(select(PvDuplicateCandidate).where(
+                or_(PvDuplicateCandidate.case_id == merged_case.id,
+                    PvDuplicateCandidate.other_case_id == merged_case.id))).all():
+            if other.id == candidate.id:
+                continue
+            partner = other.other_case_id if other.case_id == merged_case.id \
+                else other.case_id
+            pair = frozenset((keep, partner))
+            if partner == keep or pair in existing:
+                stale.append(other)
+                continue
+            existing.add(pair)
+            if other.case_id == merged_case.id:
+                other.case_id = keep
+            else:
+                other.other_case_id = keep
         merged_label = merged_case.worldwide_case_id
-        db.delete(merged_case)
+        score = candidate.score
+        # The resolved pair names a case that no longer exists. The decision is
+        # kept where it can still be read: the merged identifiers on the
+        # survivor, and the audit entry below.
+        delete_in_order(db, stale + [candidate], [merged_case])
         log_audit(db, user, "Merged two safety cases", "pv_case", keep, None,
                   "warning",
                   f"{merged_label} merged into {survivor.worldwide_case_id}; "
-                  f"score {candidate.score}")
+                  f"score {score}")
+        db.commit()
+        return {"resolved": "merged"}
     else:
         log_audit(db, user, "Resolved a duplicate candidate", "pv_product",
                   candidate.pv_product_id, None, "info",

@@ -19,6 +19,22 @@ def uid() -> str:
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
+
+def delete_in_order(db, *levels) -> None:
+    """Delete rows level by level -- children first -- flushing after each.
+
+    The models declare foreign keys but no relationships, so SQLAlchemy's unit
+    of work does not know a draft must go before its section: inside a single
+    flush it may issue the parent's DELETE first. SQLite, which runs with
+    foreign keys off, never notices. PostgreSQL refuses, and the endpoint that
+    purges a project fails on the database it ships on. Flushing between levels
+    makes the order the one the caller wrote.
+    """
+    for rows in levels:
+        for row in rows:
+            db.delete(row)
+        db.flush()
+
 def _connect_args() -> dict:
     """Driver options that make the two backends agree about time.
 

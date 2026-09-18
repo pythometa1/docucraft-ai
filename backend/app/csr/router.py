@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.audit.service import log_audit
 from app.csr.ich_e3 import seed_sections
 from app.csr.ingest import DOC_TYPES, file_hash, ingest_in_background, readiness
-from app.db import get_db
+from app.db import delete_in_order, get_db
 from app.models import (
     CsrChunk, CsrCitation, CsrDocument, CsrProject, CsrSection, CsrSectionDraft,
     CsrTemplate, Project, Study, User, now,
@@ -207,20 +207,12 @@ def delete_csr_project(csr_project_id: str, db: Session = Depends(get_db),
             draft_count += 1
     db.flush()
 
-    chunk_count = 0
-    for chunk in db.scalars(select(CsrChunk).where(
-            CsrChunk.csr_project_id == cp.id)).all():
-        db.delete(chunk)
-        chunk_count += 1
+    chunks = db.scalars(select(CsrChunk).where(CsrChunk.csr_project_id == cp.id)).all()
+    chunk_count = len(chunks)
     blobs = [abs_path(d.storage_path) for d in documents]
-    for document in documents:
-        db.delete(document)
-    for section in sections:
-        db.delete(section)
-    for template in db.scalars(select(CsrTemplate).where(
-            CsrTemplate.csr_project_id == cp.id)).all():
-        db.delete(template)
-    db.delete(cp)
+    templates = db.scalars(select(CsrTemplate).where(
+        CsrTemplate.csr_project_id == cp.id)).all()
+    delete_in_order(db, chunks, documents, sections, templates, [cp])
     log_audit(db, user, "Deleted a CSR project", "csr_project", cp.id, cp.project_id,
               "warning",
               f"purged {len(sections)} sections, {len(documents)} sources, "

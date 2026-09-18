@@ -495,8 +495,12 @@ def test_a_narrative_report_checks_its_cases(app_client, org):
     assert "NO_CASES_BOUND" in codes(empty["id"])
     found = codes(bound["id"])
     assert {"BOUND_CASE_OUTSIDE_LOCK", "UNCONFIRMED_DATA"} <= found
+    from app.db import delete_in_order
+    from app.models import PvCaseEvent
+
     db = _db()
-    db.delete(db.get(PvCase, good))
+    delete_in_order(db, db.query(PvCaseEvent).filter(PvCaseEvent.case_id == good).all(),
+                    [db.get(PvCase, good)])
     db.commit()
     db.close()
     assert "BOUND_CASE_MISSING" in codes(bound["id"])
@@ -577,3 +581,44 @@ def test_changing_a_reports_regions_adds_and_disables_appendices(app_client, org
     codes = [s["section_code"] for s in sections()]
     assert codes.count("US.1") == 1                     # re-enabled, not re-seeded
     assert {s["section_code"]: s["enabled"] for s in sections()}["US.1"] is True
+
+
+# ------------------------------------------------------------------ merging
+
+def test_merging_a_case_with_labs_and_other_pairs(app_client, org):
+    """Found by running the suite on PostgreSQL: a merged case's laboratory
+    results were left behind (a foreign-key failure on any database that
+    enforces keys), and other candidate pairs naming it pointed at nothing."""
+    from app.models import PvCase, PvCaseLab, PvDuplicateCandidate, PvProduct
+
+    token = org["token"]
+    product = _product(app_client, token, "Mergazine")
+    keep, drop, third = _cases(product, [["Rash"], ["Rash"], ["Rash"]])
+    db = _db()
+    org_id = db.get(PvProduct, product).org_id
+    db.add(PvCaseLab(org_id=org_id, pv_product_id=product, case_id=drop,
+                     test_name="ALT", result="80"))
+    pair = PvDuplicateCandidate(org_id=org_id, pv_product_id=product, case_id=keep,
+                                other_case_id=drop, score=0.9)
+    other = PvDuplicateCandidate(org_id=org_id, pv_product_id=product, case_id=drop,
+                                 other_case_id=third, score=0.7)
+    db.add_all([pair, other])
+    db.commit()
+    pair_id, other_id = pair.id, other.id
+    db.close()
+
+    merged = app_client.post(f"/api/v1/pv/duplicates/{pair_id}/resolve",
+                             headers=_auth(token),
+                             json={"action": "merged", "keep_case_id": keep})
+    assert merged.status_code == 200, merged.text
+    assert merged.json() == {"resolved": "merged"}
+    db = _db()
+    try:
+        assert db.get(PvCase, drop) is None
+        assert db.query(PvCaseLab).filter(PvCaseLab.case_id == drop).count() == 0
+        assert db.get(PvDuplicateCandidate, pair_id) is None
+        moved = db.get(PvDuplicateCandidate, other_id)
+        assert {moved.case_id, moved.other_case_id} == {keep, third}
+        assert moved.status == "pending"
+    finally:
+        db.close()
