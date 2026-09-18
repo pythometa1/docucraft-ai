@@ -728,6 +728,9 @@ export type PvReportInstance = {
   status: string;
   qppv_signoff_by: string | null;
   qppv_signoff_at: string | null;
+  /** What this report stated, frozen at sign-off. The next report's QC checks
+   *  its cumulative count against this. */
+  figures_at_signoff: Record<string, number> | null;
   section_count?: number;
   due_dates?: PvDueDate[];
   created_at: string;
@@ -1029,6 +1032,24 @@ export type PvDelta = {
   new_studies: string[];
   section_badges: Record<string, number>;
   note: string;
+};
+
+export type PvFinding = {
+  code: string;
+  /** blocker | warning | info. Only a blocker stops export. */
+  severity: "blocker" | "warning" | "info";
+  message: string;
+  section_code: string | null;
+  detail: Record<string, unknown>;
+};
+
+export type PvQcReport = {
+  findings: PvFinding[];
+  blockers: PvFinding[];
+  warnings: PvFinding[];
+  info: PvFinding[];
+  /** Computed from exactly this list, by the same function the export calls. */
+  exportable: boolean;
 };
 
 /* ---- The CSR module ---- */

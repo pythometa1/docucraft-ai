@@ -225,6 +225,13 @@ class PvReportInstance(Base):
     status: Mapped[str] = mapped_column(String, default="setup")
     qppv_signoff_by: Mapped[str | None] = mapped_column(String, nullable=True)
     qppv_signoff_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: The figures this report stated, frozen when it was signed off. The next
+    #: report's QC compares its cumulative against THIS, not against a
+    #: recomputation -- because a recomputation over today's store can never be
+    #: smaller than the new report's own count, and "cumulative must not fall
+    #: between reports" is a check that cannot fire unless the earlier figure
+    #: was written down.
+    figures_at_signoff: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)

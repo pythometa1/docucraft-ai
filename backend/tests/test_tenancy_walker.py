@@ -621,6 +621,9 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/pv/reports/{report_instance_id}/delta"},
     {"method": "POST", "path": "/pv/cases/{case_id}/narrative",
      "ids": {"case_id": "pv_case_id"}},
+
+    # Safety M7: QC.
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/qc"},
 ]
 
 

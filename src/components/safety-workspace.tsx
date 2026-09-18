@@ -42,6 +42,7 @@ import {
 import { SafetyReview } from "@/components/safety-review";
 import { SafetyTables } from "@/components/safety-tables";
 import { SafetyEditor } from "@/components/safety-editor";
+import { SafetyQc } from "@/components/safety-qc";
 import { cn } from "@/lib/utils";
 
 const SELECT_CLASS =
@@ -240,7 +241,7 @@ function Field({ label, hint, required, children }: {
 /* --------------------------------------------------------------- the tab shell */
 
 type Tab = "profile" | "reports" | "sources" | "deid" | "cases" | "review"
-  | "tables" | "write" | "calendar" | "roles";
+  | "tables" | "write" | "qc" | "calendar" | "roles";
 
 const TABS: [Tab, string, typeof ListTree][] = [
   ["profile", "Product profile", ClipboardList],
@@ -251,6 +252,7 @@ const TABS: [Tab, string, typeof ListTree][] = [
   ["review", "Case review", ShieldQuestion],
   ["tables", "Tables", Table2],
   ["write", "Write", PenLine],
+  ["qc", "Checks & export", ShieldCheck],
   ["calendar", "Calendar", CalendarDays],
   ["roles", "Roles", Users],
 ];
@@ -311,6 +313,7 @@ function SafetyOverview({ product, onChanged }: {
         )}
         {tab === "tables" && <SafetyTables reports={product.reports} />}
         {tab === "write" && <SafetyEditor reports={product.reports} />}
+        {tab === "qc" && <SafetyQc reports={product.reports} />}
         {tab === "calendar" && <CalendarTab product={product} />}
         {tab === "roles" && <RolesTab product={product} onChanged={onChanged} />}
       </SwapIn>

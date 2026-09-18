@@ -18,7 +18,7 @@ import type {
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
-  PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDelta, PvDraft,
+  PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDelta, PvDraft, PvQcReport,
   PvDuplicatePair,
   PvEventSummary, PvExposure, PvMappingProfile, PvReadiness,
   PvRsiVersion, PvScopePreview, PvSection, PvSource, PvTabulation,
@@ -883,6 +883,9 @@ export const api = {
       "GET", `/pv/sections/${sectionId}/baseline-diff`),
   pvDelta: (reportId: string) =>
     request<PvDelta>("GET", `/pv/reports/${reportId}/delta`),
+  /** The §11 checks. `exportable` is the export gate itself, not a preview of it. */
+  pvQc: (reportId: string) =>
+    request<PvQcReport>("GET", `/pv/reports/${reportId}/qc`),
 
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>

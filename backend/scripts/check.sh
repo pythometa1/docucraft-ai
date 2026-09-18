@@ -176,6 +176,8 @@ FLOORS = {
     # refusal that keeps a name out of a provider's logs or a gap from becoming
     # a plausible sentence.
     "safety/drafting.py": 95,
+    # The export gate. A branch not exercised is a blocker that cannot fire.
+    "safety/qc.py": 94,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

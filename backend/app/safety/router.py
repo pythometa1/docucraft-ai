@@ -116,6 +116,7 @@ def _report_out(report: PvReportInstance, *, section_count: int | None = None) -
         "regions": report.regions or [], "status": report.status,
         "qppv_signoff_by": report.qppv_signoff_by,
         "qppv_signoff_at": report.qppv_signoff_at,
+        "figures_at_signoff": report.figures_at_signoff,
         "created_at": report.created_at, "updated_at": report.updated_at,
     }
     if section_count is not None:
@@ -3167,3 +3168,27 @@ def draft_case_narrative(case_id: str, db: Session = Depends(get_db),
     return {"case_id": case.id, "version": narrative.version,
             "content": result.content, "data_needed": result.data_needed,
             "model": result.model}
+
+
+# ============================================================ M7: QC
+
+@router.get("/pv/reports/{report_instance_id}/qc")
+def report_qc(report_instance_id: str, db: Session = Depends(get_db),
+              user: User = Depends(get_current_user)):
+    """Every §11 check, grouped by severity.
+
+    `exportable` is computed from exactly this list, and the export endpoint
+    will call the same function -- so the dashboard saying a report can go and
+    the endpoint agreeing are one question asked once, not two gates that can
+    each pass what the other would refuse.
+    """
+    from app.safety import qc
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    findings = qc.run_qc(db, report=report, product=product)
+    grouped: dict = {qc.BLOCKER: [], qc.WARNING: [], qc.INFO: []}
+    for finding in findings:
+        grouped[finding.severity].append(finding.as_dict())
+    return {"findings": [f.as_dict() for f in findings],
+            "blockers": grouped[qc.BLOCKER], "warnings": grouped[qc.WARNING],
+            "info": grouped[qc.INFO], "exportable": qc.exportable(findings)}
