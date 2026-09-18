@@ -23,11 +23,13 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from app.docgen.markers import TABLE_MARKER_RE as _SHARED_TABLE_MARKER_RE
 from app.templates import blueprint as bp
 
 #: `[TABLE: spec_table]` on a line of its own. Matched with its surrounding
 #: blank lines so removing it does not leave a hole in the prose.
-TABLE_MARKER_RE = re.compile(r"^[ \t]*\[TABLE:\s*([A-Za-z0-9_]+)\s*\][ \t]*$", re.MULTILINE)
+# The shared grammar -- see `app.docgen.markers`.
+TABLE_MARKER_RE = _SHARED_TABLE_MARKER_RE
 
 #: eCTD leaf file names, by the section a leaf begins at. Conventional rather
 #: than authoritative: the publishing tool renames as its own template

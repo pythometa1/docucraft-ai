@@ -1000,6 +1000,37 @@ export type PvExposure = {
   confirmed_at: string | null;
 };
 
+export type PvDraft = {
+  id: string;
+  version: number;
+  content: string;
+  /** model | edited | carried_forward */
+  origin: string;
+  model: string | null;
+  prompt_version: string | null;
+  created_by: string;
+  created_at: string;
+  data_needed: string[];
+  /** Judgments the draft leaves for a qualified person. Each blocks approval. */
+  assessments_required: string[];
+  table_markers: string[];
+  source_map: { index: number; document_id?: string; filename?: string;
+                page?: number | null; doc_type?: string }[];
+};
+
+export type PvDelta = {
+  since_baseline_lock: string | null;
+  events_by_soc: Record<string, number>;
+  interval_cases: number;
+  signals_opened: string[];
+  signals_closed: string[];
+  rsi_changes: string[];
+  safety_actions: string[];
+  new_studies: string[];
+  section_badges: Record<string, number>;
+  note: string;
+};
+
 /* ---- The CSR module ---- */
 
 export type CsrSection = {

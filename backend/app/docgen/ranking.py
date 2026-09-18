@@ -138,8 +138,13 @@ def in_id_range(table_id: str | None, range_prefix: str) -> bool:
 in_tlf_range = in_id_range
 
 
+#: What a reference-only extract is labelled, unless a module says otherwise.
+STYLE_REFERENCE_LABEL = "STYLE REFERENCE ONLY, never cite as fact"
+
+
 def format_extracts(chunks, *, style_reference_type: str | None = None,
-                    table_label: str = "Table") -> tuple:
+                    table_label: str = "Table",
+                    reference_label: str = STYLE_REFERENCE_LABEL) -> tuple:
     """The numbered `[S1] ...` block for the prompt, and the map that turns a
     marker back into a row.
 
@@ -156,7 +161,11 @@ def format_extracts(chunks, *, style_reference_type: str | None = None,
         # Rule 4 of the drafting prompt refuses facts from a style reference.
         # It can only refuse what it can see, so the warning goes in the header
         # of the extract itself rather than in a legend further up the prompt.
-        label = (f"[{marker} -- STYLE REFERENCE ONLY, never cite as fact]"
+        # `reference_label` is the module's to choose: CSR and CMC mean "this
+        # is somebody else's document, copy its tone and nothing else", while a
+        # periodic safety report's prior report is a real source whose figures
+        # belong to a different interval -- the same header, different warning.
+        label = (f"[{marker} -- {reference_label}]"
                  if style_reference_type and chunk.doc_type == style_reference_type
                  else f"[{marker}]")
         locators = [chunk.doc_type or "source"]

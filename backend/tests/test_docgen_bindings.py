@@ -144,3 +144,32 @@ def test_id_ranges_match_on_the_segment_boundary():
     assert in_id_range("14.1", "14.1") is True
     assert in_id_range("14.10", "14.1") is False
     assert in_id_range(None, "14.1") is False
+
+
+# ------------------------------------------------------ the Safety bindings
+
+def test_safety_labels_a_prior_report_as_prior_not_as_style():
+    """A periodic report's predecessor is a real source whose figures belong to a
+    different interval. Labelled with CSR's "style reference, never cite" it
+    would be refused as evidence; unlabelled, its interval figures would be
+    carried forward as current. The Safety binding says which."""
+    from app.safety.router import PRIOR_REPORT_LABEL, PRIOR_REPORT_TYPE
+
+    text, _ = format_extracts(
+        [_Chunk(id="a", doc_type=PRIOR_REPORT_TYPE, content="last year's text"),
+         _Chunk(id="b", doc_type="study_report", content="this year's")],
+        style_reference_type=PRIOR_REPORT_TYPE, reference_label=PRIOR_REPORT_LABEL)
+    first, second = text.split("\n\n")
+    assert "verify currency before reuse" in first
+    assert "never cite as fact" not in first
+    assert "PRIOR REPORT" not in second
+
+
+def test_safety_binds_its_chunking_policy_explicitly():
+    """Empty, on purpose, and stated rather than defaulted: the shared chunker's
+    default is the clinical page-local list, which would split one case's
+    masked narrative on synthetic page boundaries."""
+    from app.safety import ingest
+
+    assert ingest.PAGE_LOCAL_TYPES == ()
+    assert ingest.TABLE_LABEL == "Table"

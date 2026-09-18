@@ -447,8 +447,8 @@ def deidentify_document(db, document) -> None:
 
         if case is not None:
             narrative = db.scalar(select(PvCaseNarrative).where(
-                PvCaseNarrative.case_id == case.id,
-                PvCaseNarrative.version == 1))
+                PvCaseNarrative.case_id == case.id
+            ).order_by(PvCaseNarrative.version.desc()))
             if narrative is None:
                 narrative = PvCaseNarrative(
                     org_id=document.org_id, pv_product_id=document.pv_product_id,
@@ -498,8 +498,16 @@ def _index_document(db, document) -> None:
     db.flush()
 
     texts: list = []
+    # The latest working copy per case, and only that. A case gains a narrative
+    # version each time somebody drafts one, and indexing every version would put
+    # the same masked text into the store once per draft.
+    latest: dict = {}
     for narrative in db.scalars(select(PvCaseNarrative).where(
             PvCaseNarrative.pv_product_id == document.pv_product_id)).all():
+        held = latest.get(narrative.case_id)
+        if held is None or narrative.version > held.version:
+            latest[narrative.case_id] = narrative
+    for narrative in latest.values():
         case = db.get(PvCase, narrative.case_id)
         if case is None or case.source_document_id != document.id:
             continue

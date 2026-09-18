@@ -21,8 +21,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle, CalendarDays, CheckCircle2, ClipboardList, Database, FileText,
-  Globe, Info, ListTree, Plus, ShieldAlert, ShieldCheck, ShieldQuestion, Table2,
-  Trash2, Upload, Users,
+  Globe, Info, ListTree, PenLine, Plus, ShieldAlert, ShieldCheck, ShieldQuestion,
+  Table2, Trash2, Upload, Users,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -41,6 +41,7 @@ import {
 } from "@/components/safety-sources";
 import { SafetyReview } from "@/components/safety-review";
 import { SafetyTables } from "@/components/safety-tables";
+import { SafetyEditor } from "@/components/safety-editor";
 import { cn } from "@/lib/utils";
 
 const SELECT_CLASS =
@@ -239,7 +240,7 @@ function Field({ label, hint, required, children }: {
 /* --------------------------------------------------------------- the tab shell */
 
 type Tab = "profile" | "reports" | "sources" | "deid" | "cases" | "review"
-  | "tables" | "calendar" | "roles";
+  | "tables" | "write" | "calendar" | "roles";
 
 const TABS: [Tab, string, typeof ListTree][] = [
   ["profile", "Product profile", ClipboardList],
@@ -249,6 +250,7 @@ const TABS: [Tab, string, typeof ListTree][] = [
   ["cases", "Case store", Database],
   ["review", "Case review", ShieldQuestion],
   ["tables", "Tables", Table2],
+  ["write", "Write", PenLine],
   ["calendar", "Calendar", CalendarDays],
   ["roles", "Roles", Users],
 ];
@@ -308,6 +310,7 @@ function SafetyOverview({ product, onChanged }: {
           <SafetyReview productId={product.id} reports={product.reports} />
         )}
         {tab === "tables" && <SafetyTables reports={product.reports} />}
+        {tab === "write" && <SafetyEditor reports={product.reports} />}
         {tab === "calendar" && <CalendarTab product={product} />}
         {tab === "roles" && <RolesTab product={product} onChanged={onChanged} />}
       </SwapIn>

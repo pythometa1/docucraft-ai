@@ -2575,3 +2575,595 @@ def add_to_register(pv_product_id: str, register: str, body: dict,
     db.commit()
     db.refresh(row)
     return _register_row_out(row, spec)
+
+
+# =========================================== M6: drafting and the workspace
+
+def _owned_section(db: Session, section_id: str, user: User) -> PvSection:
+    section = db.get(PvSection, section_id)
+    if not section or section.org_id != user.org_id:
+        raise error("PV_SECTION_NOT_FOUND", "Section not found", 404)
+    return section
+
+
+def _latest_draft(db: Session, section_id: str):
+    return db.scalar(select(PvSectionDraft).where(
+        PvSectionDraft.pv_section_id == section_id
+    ).order_by(PvSectionDraft.version.desc()))
+
+
+def _draft_out(draft) -> dict:
+    from app.docgen.markers import parse_assessments, parse_data_needed, table_markers
+
+    if draft is None:
+        return None
+    return {"id": draft.id, "version": draft.version, "content": draft.content,
+            "origin": draft.origin, "model": draft.model,
+            "prompt_version": draft.prompt_version,
+            "created_by": draft.created_by, "created_at": draft.created_at,
+            "data_needed": parse_data_needed(draft.content),
+            "assessments_required": parse_assessments(draft.content),
+            "table_markers": table_markers(draft.content),
+            "source_map": (draft.generation_params or {}).get("source_map", [])}
+
+
+def deid_gate(db, pv_product_id: str) -> dict:
+    """Whether anything is still waiting to be masked.
+
+    §7's S4: "no generation until the queue is clear". Checked in one place so
+    generation and QC ask the same question.
+    """
+    from app.models import PvDeidItem, PvDocument
+
+    pending = db.scalar(select(func.count(PvDeidItem.id)).where(
+        PvDeidItem.pv_product_id == pv_product_id,
+        PvDeidItem.status == "pending")) or 0
+    waiting = db.scalar(select(func.count(PvDocument.id)).where(
+        PvDocument.pv_product_id == pv_product_id,
+        PvDocument.processing_status == ingest_mod.AWAITING_DEID)) or 0
+    return {"pending": pending, "documents_waiting": waiting,
+            "open": bool(pending or waiting)}
+
+
+def unconfirmed_in_scope(db, product, report) -> int:
+    """Events in this report's windows that no qualified person has confirmed.
+
+    Interval and cumulative together, since a data section can print either.
+    The same scope predicates the tables use, so "unconfirmed data feeds this
+    section" and "this event is in that table" cannot disagree.
+    """
+    from sqlalchemy import or_ as _or
+
+    from app.models import PvCase, PvCaseEvent
+
+    scope = scope_mod.scope_for(product, report)
+    windows = [scope_mod.interval(scope)]
+    if scope.has_cumulative:
+        windows.append(scope_mod.cumulative(scope))
+    return db.scalar(select(func.count(PvCaseEvent.id)).where(
+        PvCaseEvent.confirmed_by.is_(None),
+        PvCaseEvent.case_id.in_(select(PvCase.id).where(_or(*windows))))) or 0
+
+
+def _confirmed_data(db, product, report, section) -> dict:
+    """What the model may quote: figures already computed, already split into
+    interval and cumulative, with the scope they describe.
+
+    Totals rather than rows. The table itself is inserted from the store at
+    export, and a model shown every row is a model tempted to re-typeset it --
+    the one thing rule 2 forbids. It gets the numbers a sentence would quote,
+    labelled so rule 6 (never merge interval and cumulative) has something to
+    hold on to.
+    """
+    from app.safety import tabulations as tab
+
+    scope = scope_mod.scope_for(product, report)
+    counts = scope_mod.preview(db, scope)
+    data = {"scope": {"period_start": report.period_start,
+                      "period_end": report.period_end,
+                      "data_lock_point": report.data_lock_point,
+                      "cumulative_from": scope.cumulative_from,
+                      "cumulative_anchor": scope.anchor},
+            "case_counts": {"interval_cases": counts["interval_cases"],
+                            "cumulative_cases": counts["cumulative_cases"]}}
+    if section.table_key:
+        data["table_in_this_section"] = section.table_key
+        try:
+            built = tab.render(db, report=report, product=product,
+                               table_key=section.table_key)
+            data["table_totals"] = built.totals
+            data["table_gaps"] = built.missing
+        except tab.TableUnavailable as exc:
+            data["table_totals"] = {}
+            data["table_gaps"] = [str(exc)]
+    return data
+
+
+def _rsi_context(db, report) -> dict:
+    if not report.rsi_version_id:
+        return {}
+    version = db.get(PvRsiVersion, report.rsi_version_id)
+    if version is None:
+        return {}
+    return {"label": (version.rsi_type or "").upper(), "version": version.version_label,
+            "effective_date": version.effective_date}
+
+
+def _baseline_text(db, section) -> str | None:
+    if not section.baseline_section_id:
+        return None
+    draft = _latest_draft(db, section.baseline_section_id)
+    return draft.content if draft else None
+
+
+#: §5: a previous report is retrievable, but "tagged 'prior report -- verify
+#: currency before reuse'". The label goes on the extract itself, where the
+#: model reads it, rather than in a legend further up the prompt.
+PRIOR_REPORT_TYPE = "previous_report"
+PRIOR_REPORT_LABEL = ("PRIOR REPORT -- verify currency before reuse; never carry an "
+                      "interval figure forward")
+
+
+def _retrieve(db, product, report, section, k: int = 16):
+    """Masked chunks for this section, ranked.
+
+    Only `pv_chunks` -- built from masked text and nothing else -- and only from
+    documents that are the product's or this report's. A document uploaded for
+    a different interval's report does not become evidence for this one.
+    """
+    from app.docgen.ranking import build_query, format_extracts, score_chunks
+    from app.models import PvChunk
+
+    statement = select(PvChunk).where(
+        PvChunk.org_id == product.org_id, PvChunk.pv_product_id == product.id,
+        or_(PvChunk.report_instance_id.is_(None),
+            PvChunk.report_instance_id == report.id))
+    if section.source_types:
+        statement = statement.where(PvChunk.doc_type.in_(list(section.source_types)))
+    candidates = list(db.scalars(statement.order_by(PvChunk.id)))
+    query = build_query(section_number=section.section_code,
+                        section_title=section.title,
+                        guidance_text=section.guidance_text,
+                        study_metadata={"product": product.product_name,
+                                        "inn": product.inn or ""})
+    scores = score_chunks(query, candidates)
+    ranked = sorted(candidates, key=lambda c: (-scores.get(c.id, 0.0), c.id))
+    chunks = [c for c in ranked if scores.get(c.id, 0.0) > 0][:k]
+    extracts, source_map = format_extracts(
+        chunks, style_reference_type=PRIOR_REPORT_TYPE,
+        table_label=ingest_mod.TABLE_LABEL, reference_label=PRIOR_REPORT_LABEL)
+    return chunks, extracts, source_map
+
+
+class PvGenerateRequest(BaseModel):
+    instruction: str | None = None
+
+
+@router.post("/pv/sections/{section_id}/generate", status_code=201)
+def generate_pv_section(section_id: str, body: PvGenerateRequest,
+                        db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    """Draft one section's prose, from masked evidence and computed figures.
+
+    Three gates run before the model is asked anything:
+
+    * the de-identification queue must be clear -- §7: no generation until it is;
+    * a data section needs every event in the report's windows confirmed -- S5's
+      "hard gate on generating data-dependent sections", since a paragraph
+      written around unconfirmed figures is a paragraph about numbers that are
+      about to change;
+    * the text about to be sent is scanned for identifiers, and one confident
+      hit refuses the call (`drafting.IdentifierInPrompt`).
+    """
+    from app.models import PvCitation
+    from app.safety import drafting
+    from app.tenancy import llm_policy_for
+
+    section = _owned_section(db, section_id, user)
+    report = _owned_report(db, section.report_instance_id, user)
+    product = _owned_product(db, report.pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Generating a section")
+    if section.is_container:
+        raise error("PV_SECTION_IS_CONTAINER",
+                    "A container heading has no prose of its own; generate its "
+                    "subsections.", 422)
+    if not section.enabled:
+        raise error("PV_SECTION_DISABLED", "This section is excluded from the report.",
+                    409)
+    gate = deid_gate(db, product.id)
+    if gate["open"]:
+        raise error("PV_DEID_GATE_OPEN",
+                    f"{gate['pending']} detection(s) and {gate['documents_waiting']} "
+                    "source(s) are waiting for de-identification. Nothing is drafted "
+                    "until the queue is clear.", 409, gate)
+    if section.table_key:
+        unconfirmed = unconfirmed_in_scope(db, product, report)
+        if unconfirmed:
+            raise error("PV_UNCONFIRMED_DATA",
+                        f"{unconfirmed} event(s) in this report's windows are not "
+                        "confirmed, and this section is written around their "
+                        "figures. Confirm them in Case review first.", 409,
+                        {"unconfirmed_events": unconfirmed})
+
+    entry = registry.DELIVERABLES.get(report.doc_type_key) or {}
+    chunks, extracts, source_map = _retrieve(db, product, report, section)
+    previous_status = section.status
+    section.status = "generating"
+    db.commit()
+    try:
+        result = drafting.draft_section(
+            section_code=section.section_code, section_title=section.title,
+            deliverable_name=entry.get("name") or report.doc_type_key,
+            structure_basis=entry.get("structure_basis") or "",
+            target_regions=report.regions or [],
+            product={"product_name": product.product_name, "inn": product.inn,
+                     "mah_name": product.mah_name, "ibd": product.ibd,
+                     "dibd": product.dibd},
+            report={"period_start": report.period_start,
+                    "period_end": report.period_end,
+                    "data_lock_point": report.data_lock_point,
+                    "meddra_version": report.meddra_version,
+                    "sequence_number": report.sequence_number},
+            rsi=_rsi_context(db, report),
+            confirmed_data=_confirmed_data(db, product, report, section),
+            baseline_text=_baseline_text(db, section),
+            guidance=section.guidance_text,
+            chunks=chunks, source_map=source_map, extracts=extracts,
+            wanted_doc_types=section.source_types, instruction=body.instruction,
+            llm_policy=llm_policy_for(db, user.org_id, project_id=product.project_id,
+                                      user_id=user.id, subject_type="pv_section",
+                                      subject_id=section.id))
+    except drafting.IdentifierInPrompt as exc:
+        section.status = previous_status if previous_status != "generating" else "not_started"
+        db.commit()
+        raise error("PV_IDENTIFIER_IN_PROMPT", str(exc), 422)
+    except Exception:
+        section.status = "draft" if _latest_draft(db, section.id) else "not_started"
+        db.commit()
+        raise
+
+    previous = _latest_draft(db, section.id)
+    draft = PvSectionDraft(
+        org_id=user.org_id, pv_section_id=section.id,
+        version=(previous.version + 1) if previous else 1,
+        content=result.content, origin="model", model=result.model,
+        prompt_version=result.prompt_version, created_by=user.id,
+        generation_params={"instruction": body.instruction,
+                           "chunk_ids": [c.id for c in chunks],
+                           "source_map": source_map})
+    db.add(draft)
+    db.flush()
+    for citation in result.citations:
+        db.add(PvCitation(org_id=user.org_id, draft_id=draft.id,
+                          marker=citation.get("marker", ""),
+                          source_index=citation.get("source_index", 0),
+                          chunk_id=citation.get("chunk_id"),
+                          document_id=citation.get("document_id"),
+                          page=citation.get("page"),
+                          quoted_number=citation.get("quoted_number")))
+    section.status = "draft"
+    if section.delta_status in ("changed", "fresh", "carried_forward"):
+        # Regenerated against this interval's data: whatever the badge said
+        # about the baseline no longer describes this text.
+        section.delta_status = "new_data" if section.baseline_section_id else "fresh"
+    section.updated_at = now()
+    log_audit(db, user, "Generated a safety report section", "pv_section", section.id,
+              product.project_id, "info",
+              f"{section.section_code} v{draft.version} ({len(chunks)} sources)")
+    db.commit()
+    db.refresh(draft)
+    return {"draft": _draft_out(draft), "section": _section_out(section)}
+
+
+@router.get("/pv/sections/{section_id}/draft")
+def get_pv_draft(section_id: str, version: int | None = None,
+                 db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    section = _owned_section(db, section_id, user)
+    statement = select(PvSectionDraft).where(PvSectionDraft.pv_section_id == section.id)
+    if version is not None:
+        draft = db.scalar(statement.where(PvSectionDraft.version == version))
+    else:
+        draft = db.scalar(statement.order_by(PvSectionDraft.version.desc()))
+    versions = [v for (v,) in db.execute(select(PvSectionDraft.version).where(
+        PvSectionDraft.pv_section_id == section.id
+    ).order_by(PvSectionDraft.version)).all()]
+    return {"section": _section_out(section), "draft": _draft_out(draft),
+            "versions": versions}
+
+
+class PvDraftEdit(BaseModel):
+    content: str
+
+
+@router.put("/pv/sections/{section_id}/draft", status_code=201)
+def edit_pv_draft(section_id: str, body: PvDraftEdit, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    """Save a person's version.
+
+    Two rules beyond "it becomes the newest version":
+
+    * Any new version withdraws an approval. Export assembles the newest draft,
+      so an approved section edited afterwards would ship text nobody approved
+      under a status saying otherwise -- the defect the CMC module had.
+    * Removing an `[ASSESSMENT REQUIRED: ...]` is answering it, and §11's eighth
+      blocker says only a qualified person may. So an edit that leaves fewer of
+      them than the version before needs that role. Deleting the marker is not
+      a way round the person who has to make the judgment.
+
+    The draft is scanned for identifiers on every save, per §11's first
+    blocker, and the findings come back with it. Saving is not refused -- saving
+    is how somebody removes the name -- but approval is, while any remain.
+    """
+    from app.docgen.markers import parse_assessments
+
+    section = _owned_section(db, section_id, user)
+    report = _owned_report(db, section.report_instance_id, user)
+    roles.require_pv_role(db, report.pv_product_id, user, roles.WRITER,
+                          action="Editing a section")
+    if not body.content.strip():
+        raise error("PV_DRAFT_EMPTY", "A draft needs content.", 422)
+    previous = _latest_draft(db, section.id)
+    open_before = len(parse_assessments(previous.content)) if previous else 0
+    open_after = len(parse_assessments(body.content))
+    if open_after < open_before:
+        roles.require_pv_role(
+            db, report.pv_product_id, user, roles.QUALIFIED_PERSON,
+            action="Answering an [ASSESSMENT REQUIRED] judgment")
+
+    draft = PvSectionDraft(
+        org_id=user.org_id, pv_section_id=section.id,
+        version=(previous.version + 1) if previous else 1,
+        content=body.content, origin="edited", created_by=user.id,
+        generation_params={
+            "edited_from_version": previous.version if previous else None,
+            "source_map": (previous.generation_params or {}).get("source_map", [])
+            if previous else []})
+    db.add(draft)
+    was = section.status
+    section.status = "draft"
+    section.updated_at = now()
+    leaks = deident.scan(body.content)
+    log_audit(db, user, "Edited a safety report section", "pv_section", section.id,
+              None, "warning" if was == "approved" or open_after < open_before
+              else "info",
+              f"{section.section_code} v{draft.version}"
+              + (f" (was {was.replace('_', ' ')}; approval withdrawn)"
+                 if was in ("in_review", "approved") else "")
+              + (f"; {open_before - open_after} assessment(s) answered"
+                 if open_after < open_before else ""))
+    db.commit()
+    db.refresh(draft)
+    return {"draft": _draft_out(draft), "section": _section_out(section),
+            "leakage": [{"identifier_type": h.identifier_type, "text": h.text,
+                         "basis": h.basis} for h in leaks]}
+
+
+class PvStatusPatch(BaseModel):
+    status: str
+
+
+@router.patch("/pv/sections/{section_id}/status")
+def set_pv_section_status(section_id: str, body: PvStatusPatch,
+                          db: Session = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    """Move a section through draft -> in review -> approved.
+
+    Approval is a reviewer's act and it checks the text it is approving:
+    an open [ASSESSMENT REQUIRED], a data section whose table marker has gone,
+    unconfirmed data behind a data section, or an identifier in the text each
+    refuse it. Those are all things a reviewer reading the prose could miss,
+    and all of them would otherwise ship.
+    """
+    from app.docgen.markers import parse_assessments, table_markers
+
+    section = _owned_section(db, section_id, user)
+    report = _owned_report(db, section.report_instance_id, user)
+    product = _owned_product(db, report.pv_product_id, user)
+    if body.status not in SECTION_STATUSES:
+        raise error("PV_BAD_STATUS",
+                    f"status must be one of {', '.join(SECTION_STATUSES)}.", 422)
+    draft = _latest_draft(db, section.id)
+    if draft is None:
+        raise error("PV_NOTHING_TO_REVIEW", "This section has no draft yet.", 409)
+
+    if body.status == "approved":
+        roles.require_pv_role(db, product.id, user, roles.REVIEWER,
+                              action="Approving a section")
+        problems = []
+        open_items = parse_assessments(draft.content)
+        if open_items:
+            problems.append(f"{len(open_items)} [ASSESSMENT REQUIRED] judgment(s) are "
+                            "open; a qualified person answers them first")
+        if section.table_key and section.table_key not in table_markers(draft.content):
+            problems.append(f"this section's table [TABLE: {section.table_key}] is not "
+                            "in its text, so it would be missing from the report")
+        if section.table_key:
+            unconfirmed = unconfirmed_in_scope(db, product, report)
+            if unconfirmed:
+                problems.append(f"{unconfirmed} event(s) behind this section's figures "
+                                "are not confirmed")
+        leaks = deident.scan(draft.content)
+        if leaks:
+            problems.append(f"{len(leaks)} likely identifier(s) are in the text")
+        if problems:
+            raise error("PV_CANNOT_APPROVE",
+                        "This section cannot be approved: " + "; ".join(problems) + ".",
+                        409, {"problems": problems})
+
+    was = section.status
+    section.status = body.status
+    section.updated_at = now()
+    log_audit(db, user, "Set a safety section status", "pv_section", section.id, None,
+              "success" if body.status == "approved" else "info",
+              f"{section.section_code}: {was} -> {body.status}")
+    db.commit()
+    return _section_out(section)
+
+
+@router.get("/pv/sections/{section_id}/baseline-diff")
+def baseline_diff(section_id: str, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    """The previous approved report's text for this section beside this one's.
+
+    A line diff rather than a character one: a reviewer is asking which
+    statements changed, and a character diff of re-flowed prose is noise.
+    """
+    import difflib
+
+    section = _owned_section(db, section_id, user)
+    baseline = _baseline_text(db, section) or ""
+    current = _latest_draft(db, section.id)
+    current_text = current.content if current else ""
+    lines = list(difflib.unified_diff(
+        baseline.splitlines(), current_text.splitlines(),
+        fromfile="previous report", tofile="this report", lineterm=""))
+    return {"has_baseline": bool(section.baseline_section_id),
+            "baseline": baseline, "current": current_text,
+            "diff": lines, "changed": baseline.strip() != current_text.strip()}
+
+
+@router.get("/pv/reports/{report_instance_id}/delta")
+def what_changed(report_instance_id: str, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """§10's "what changed this interval", computed and not written.
+
+    New cases by SOC, signals opened and closed, RSI changes, safety actions and
+    new studies -- each read from the store with this report's dates. There is
+    no model in this: a summary of what changed that a model had written would
+    be one more place a figure could be typed rather than counted.
+    """
+    from app.models import (
+        PvCase, PvCaseEvent, PvSafetyAction, PvSignal, PvStudy,
+    )
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    scope = scope_mod.scope_for(product, report)
+    baseline = (db.get(PvReportInstance, report.baseline_report_id)
+                if report.baseline_report_id else None)
+    since = baseline.data_lock_point if baseline else None
+
+    interval_case_ids = select(PvCase.id).where(scope_mod.interval(scope))
+    by_soc: dict = {}
+    for event in db.scalars(select(PvCaseEvent).where(
+            PvCaseEvent.case_id.in_(interval_case_ids))).all():
+        soc = event.meddra_soc or "SOC not coded"
+        by_soc[soc] = by_soc.get(soc, 0) + 1
+
+    signals = db.scalars(select(PvSignal).where(
+        PvSignal.pv_product_id == product.id)).all()
+    opened = [s for s in signals if s.detection_date
+              and scope.period_start <= s.detection_date <= scope.data_lock_point]
+    closed = [s for s in signals if s.closure_date
+              and scope.period_start <= s.closure_date <= scope.data_lock_point]
+    actions = [a for a in db.scalars(select(PvSafetyAction).where(
+        PvSafetyAction.pv_product_id == product.id)).all()
+        if a.action_date and scope.period_start <= a.action_date <= scope.period_end]
+    studies = [s for s in db.scalars(select(PvStudy).where(
+        PvStudy.pv_product_id == product.id)).all()
+        if s.start_date and scope.period_start <= s.start_date <= scope.period_end]
+    rsi_changes = [v for v in db.scalars(select(PvRsiVersion).where(
+        PvRsiVersion.pv_product_id == product.id)).all()
+        if v.effective_date and scope.period_start <= v.effective_date
+        <= scope.data_lock_point]
+    sections = db.scalars(select(PvSection).where(
+        PvSection.report_instance_id == report.id)).all()
+    badges: dict = {}
+    for s in sections:
+        if not s.is_container:
+            badges[s.delta_status] = badges.get(s.delta_status, 0) + 1
+
+    return {
+        "since_baseline_lock": since,
+        "events_by_soc": dict(sorted(by_soc.items(), key=lambda kv: -kv[1])),
+        "interval_cases": scope_mod.count_cases(db, scope, scope_mod.interval(scope)),
+        "signals_opened": [s.signal_reference or s.id for s in opened],
+        "signals_closed": [s.signal_reference or s.id for s in closed],
+        "rsi_changes": [f"{v.rsi_type.upper()} {v.version_label}" for v in rsi_changes],
+        "safety_actions": [f"{a.action_type.replace('_', ' ')} ({a.region or 'all'})"
+                           for a in actions],
+        "new_studies": [s.study_id for s in studies],
+        "section_badges": badges,
+        "note": "Computed from the case store and registers; no model wrote this.",
+    }
+
+
+@router.post("/pv/cases/{case_id}/narrative", status_code=201)
+def draft_case_narrative(case_id: str, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    """An ICSR narrative, from the case's structured fields and its MASKED
+    narrative -- never the original.
+
+    The case must be clear of de-identification first: a case still `pending`
+    has a working copy that is not yet the working copy.
+    """
+    from app.models import (
+        PvCase, PvCaseDrug, PvCaseEvent, PvCaseLab, PvCaseNarrative,
+    )
+    from app.safety import drafting
+    from app.tenancy import llm_policy_for
+
+    case = db.get(PvCase, case_id)
+    if not case or case.org_id != user.org_id:
+        raise error("PV_CASE_NOT_FOUND", "Case not found", 404)
+    product = _owned_product(db, case.pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Drafting a case narrative")
+    if case.deidentification_status == "pending":
+        raise error("PV_DEID_GATE_OPEN",
+                    "This case is still waiting for de-identification. A narrative "
+                    "is drafted from masked text only.", 409)
+
+    events = db.scalars(select(PvCaseEvent).where(PvCaseEvent.case_id == case.id)).all()
+    drugs = db.scalars(select(PvCaseDrug).where(PvCaseDrug.case_id == case.id)).all()
+    labs = db.scalars(select(PvCaseLab).where(PvCaseLab.case_id == case.id)).all()
+    working = db.scalar(select(PvCaseNarrative).where(
+        PvCaseNarrative.case_id == case.id).order_by(PvCaseNarrative.version.desc()))
+    record = {
+        "case_id": case.worldwide_case_id, "report_source": case.report_source,
+        "country": case.country_of_occurrence,
+        "patient": {"age": case.patient_age, "age_group": case.patient_age_group,
+                    "sex": case.patient_sex, "pregnancy": case.is_pregnancy_case},
+        "seriousness": {"serious": case.is_serious,
+                        "criteria": case.seriousness_criteria or []},
+        "outcome": case.case_outcome,
+        "events": [{"term": e.meddra_pt or "[uncoded]", "onset": e.onset_date,
+                    "outcome": e.outcome,
+                    "causality_reporter": e.causality_reporter,
+                    "causality_company": e.causality_company,
+                    "expectedness": (e.expectedness if e.confirmed_by
+                                     else "not assessed")} for e in events],
+        "drugs": [{"name": d.drug_name, "role": d.role, "dose": d.dose,
+                   "dose_unit": d.dose_unit, "route": d.route,
+                   "start": d.start_date, "end": d.end_date,
+                   "action_taken": d.action_taken, "dechallenge": d.dechallenge,
+                   "rechallenge": d.rechallenge} for d in drugs],
+        "laboratory": [{"test": l.test_name, "result": l.result, "unit": l.unit,
+                        "reference_range": l.reference_range} for l in labs],
+        "masked_source_narrative": working.raw_text_redacted if working else None,
+    }
+    try:
+        result = drafting.draft_narrative(
+            case_id=case.worldwide_case_id or case.id,
+            product_name=product.product_name, case_record=record,
+            llm_policy=llm_policy_for(db, user.org_id, project_id=product.project_id,
+                                      user_id=user.id, subject_type="pv_case",
+                                      subject_id=case.id))
+    except drafting.IdentifierInPrompt as exc:
+        raise error("PV_IDENTIFIER_IN_PROMPT", str(exc), 422)
+
+    latest = db.scalar(select(PvCaseNarrative).where(
+        PvCaseNarrative.case_id == case.id).order_by(PvCaseNarrative.version.desc()))
+    narrative = PvCaseNarrative(
+        org_id=user.org_id, pv_product_id=product.id, case_id=case.id,
+        version=(latest.version + 1) if latest else 1,
+        raw_text_redacted=latest.raw_text_redacted if latest else None,
+        generated_text=result.content, created_by=user.id)
+    db.add(narrative)
+    log_audit(db, user, "Drafted a case narrative", "pv_case", case.id, None, "info",
+              f"{case.worldwide_case_id} v{narrative.version}")
+    db.commit()
+    return {"case_id": case.id, "version": narrative.version,
+            "content": result.content, "data_needed": result.data_needed,
+            "model": result.model}

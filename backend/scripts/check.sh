@@ -172,6 +172,10 @@ FLOORS = {
     # suggestion as a determination -- in a table that reads as complete.
     "safety/tabulations.py": 90,
     "docgen/grids.py": 95,
+    # The one place a periodic report's prose meets a model. Every branch is a
+    # refusal that keeps a name out of a provider's logs or a gap from becoming
+    # a plausible sentence.
+    "safety/drafting.py": 95,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

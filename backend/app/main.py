@@ -10,6 +10,7 @@ from app.csr.router import router as csr_router
 from app.finance.router import router as finance_router
 from app.safety.router import router as safety_router
 from app.routers import admin, auth, bindings, blueprints, chat, downloads, generation, manifests, metrics, projects, review, reviews, sources, templates
+from app.docgen.markers import DraftingFailed
 from app.llm.provider import LLMNotConfiguredError
 
 app = FastAPI(title="DocuMind AI Backend", version="1.0.0")
@@ -32,6 +33,16 @@ async def llm_not_configured_handler(request: Request, exc: LLMNotConfiguredErro
     explicit refusal the caller can show the user.
     """
     return JSONResponse(status_code=503, content={"error": {"code": "LLM_NOT_CONFIGURED", "message": str(exc), "details": {}}})
+
+
+@app.exception_handler(DraftingFailed)
+async def drafting_failed_handler(request: Request, exc: DraftingFailed):
+    """502, not 500: the model refused or returned nothing, and the server is
+    fine. Registered centrally for the same reason as the handler above -- every
+    drafting module (CSR, CMC, Safety) raises this, and each one answering its
+    own way is how one of them ends up reporting a model refusal as a crash."""
+    return JSONResponse(status_code=502, content={"detail": {"error": {
+        "code": "DRAFTING_FAILED", "message": str(exc), "details": {}}}})
 
 
 @app.exception_handler(Exception)

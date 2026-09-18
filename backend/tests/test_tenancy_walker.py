@@ -58,6 +58,7 @@ def org_a_resources(app_client, two_orgs):
         GeneratedDocument,
         GenerationJob, Invoice, Mapping, Project, PvCase, PvCaseEvent, PvDeidItem,
         PvDocument, PvDuplicateCandidate, PvExposure, PvProduct, PvReportInstance,
+        PvSection,
         PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
         TemplateBlueprint,
@@ -249,7 +250,9 @@ def org_a_resources(app_client, two_orgs):
             org_id=org, pv_product_id=pv_product.id,
             report_instance_id=pv_report.id, context="marketing",
             measure="subjects", value_text="10")
-        db.add_all([pv_event, pv_duplicate, pv_exposure])
+        pv_section = PvSection(org_id=org, report_instance_id=pv_report.id,
+                               section_code="1", title="Introduction")
+        db.add_all([pv_event, pv_duplicate, pv_exposure, pv_section])
         db.flush()
 
         ids = {
@@ -275,7 +278,8 @@ def org_a_resources(app_client, two_orgs):
             "pv_document_id": pv_document.id, "deid_item_id": pv_deid.id,
             "case_event_id": pv_event.id, "duplicate_id": pv_duplicate.id,
             "exposure_id": pv_exposure.id, "pv_table_key": "summary_tab_soc_pt",
-            "register": "studies",
+            "register": "studies", "pv_section_id": pv_section.id,
+            "pv_case_id": pv_case.id,
         }
         db.commit()
     finally:
@@ -602,6 +606,21 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/pv/products/{pv_product_id}/registers/{register}"},
     {"method": "POST", "path": "/pv/products/{pv_product_id}/registers/{register}",
      "body": {"study_id": "S-1"}},
+
+    # Safety M6: drafting and the workspace.
+    {"method": "POST", "path": "/pv/sections/{section_id}/generate", "body": {},
+     "ids": {"section_id": "pv_section_id"}},
+    {"method": "GET", "path": "/pv/sections/{section_id}/draft",
+     "ids": {"section_id": "pv_section_id"}},
+    {"method": "PUT", "path": "/pv/sections/{section_id}/draft",
+     "body": {"content": "x"}, "ids": {"section_id": "pv_section_id"}},
+    {"method": "PATCH", "path": "/pv/sections/{section_id}/status",
+     "body": {"status": "draft"}, "ids": {"section_id": "pv_section_id"}},
+    {"method": "GET", "path": "/pv/sections/{section_id}/baseline-diff",
+     "ids": {"section_id": "pv_section_id"}},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/delta"},
+    {"method": "POST", "path": "/pv/cases/{case_id}/narrative",
+     "ids": {"case_id": "pv_case_id"}},
 ]
 
 

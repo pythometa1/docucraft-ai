@@ -18,7 +18,8 @@ import type {
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
-  PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDuplicatePair,
+  PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDelta, PvDraft,
+  PvDuplicatePair,
   PvEventSummary, PvExposure, PvMappingProfile, PvReadiness,
   PvRsiVersion, PvScopePreview, PvSection, PvSource, PvTabulation,
   PvTabulationStatus,
@@ -860,6 +861,28 @@ export const api = {
   pvAddToRegister: (id: string, register: string, body: Record<string, unknown>) =>
     request<Record<string, unknown>>(
       "POST", `/pv/products/${id}/registers/${register}`, { json: body }),
+
+  /* ---- Safety M6: drafting and the workspace ---- */
+  pvGenerateSection: (sectionId: string, instruction?: string) =>
+    request<{ draft: PvDraft; section: PvSection }>(
+      "POST", `/pv/sections/${sectionId}/generate`, { json: { instruction } }),
+  pvGetDraft: (sectionId: string, version?: number) =>
+    request<{ section: PvSection; draft: PvDraft | null; versions: number[] }>(
+      "GET", `/pv/sections/${sectionId}/draft`, { query: { version } }),
+  /** Any new version withdraws an approval; removing an [ASSESSMENT REQUIRED]
+   *  needs the qualified-person role. */
+  pvSaveDraft: (sectionId: string, content: string) =>
+    request<{ draft: PvDraft; section: PvSection;
+              leakage: { identifier_type: string; text: string; basis: string }[] }>(
+      "PUT", `/pv/sections/${sectionId}/draft`, { json: { content } }),
+  pvSetSectionStatus: (sectionId: string, status: string) =>
+    request<PvSection>("PATCH", `/pv/sections/${sectionId}/status`, { json: { status } }),
+  pvBaselineDiff: (sectionId: string) =>
+    request<{ has_baseline: boolean; baseline: string; current: string;
+              diff: string[]; changed: boolean }>(
+      "GET", `/pv/sections/${sectionId}/baseline-diff`),
+  pvDelta: (reportId: string) =>
+    request<PvDelta>("GET", `/pv/reports/${reportId}/delta`),
 
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>

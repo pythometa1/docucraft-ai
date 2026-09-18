@@ -130,3 +130,43 @@ def parse_data_needed(content: str) -> list:
     return [match.group("what").strip() for match in _DATA_NEEDED_RE.finditer(content or "")]
 
 
+
+
+# ------------------------------------------------------------- table markers
+
+#: `[TABLE: key]` alone on its line -- the one shape a renderer resolves.
+#: Shared by every module whose sections carry computed tables, so the drafting
+#: side that reports "this section's table is present" and the export side that
+#: replaces the marker are asking the same question of the same text. The key
+#: is a named group and also group 1, so `findall` and `.group(1)` both work.
+#:
+#: Deliberately strict. "[Table: x]", a dotted key or a marker mid-sentence all
+#: reach a renderer as prose and are printed literally, while a permissive match
+#: would report the table resolved. Reported as no marker at all, the section is
+#: visibly missing its table instead -- which is the failure somebody notices.
+TABLE_MARKER_RE = re.compile(
+    r"^[ \t]*\[TABLE:\s*(?P<key>[A-Za-z0-9_]+)\s*\][ \t]*$", re.MULTILINE)
+
+
+def table_markers(content: str) -> list:
+    """Every table key the renderer will place, in order. Duplicates kept."""
+    return [match.group("key") for match in TABLE_MARKER_RE.finditer(content or "")]
+
+
+# ------------------------------------------------------ judgments left open
+
+_ASSESSMENT_RE = re.compile(r"\[ASSESSMENT REQUIRED:\s*(?P<what>[^\]]*)\]",
+                            re.IGNORECASE)
+
+
+def parse_assessments(content: str) -> list:
+    """Every [ASSESSMENT REQUIRED: ...] a draft leaves for a qualified person.
+
+    The Safety module's prompt tells the model to write one of these wherever a
+    section needs a benefit-risk or causality conclusion that no source states.
+    Each is an open judgment, not a gap in the data, and it blocks export until
+    somebody authorised to make that judgment has made it. An empty payload is
+    kept for the same reason `parse_data_needed` keeps one.
+    """
+    return [match.group("what").strip()
+            for match in _ASSESSMENT_RE.finditer(content or "")]

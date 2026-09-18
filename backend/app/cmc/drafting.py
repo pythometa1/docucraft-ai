@@ -26,8 +26,8 @@ import json
 import re
 
 from app.docgen.markers import (
-    MISSING_VALUE, DraftingFailed, DraftResult, _one_line, parse_citations,
-    parse_data_needed,
+    MISSING_VALUE, TABLE_MARKER_RE, DraftingFailed, DraftResult, _one_line,
+    parse_citations, parse_data_needed,
 )
 from app.llm import provider as llm_provider
 
@@ -134,8 +134,7 @@ DRAFT_SCHEMA = {
 # workspace and QC that the section's specification table resolved. Reported as
 # no marker at all, the section is instead visibly missing its table, which is
 # the failure somebody notices.
-_TABLE_MARKER_RE = re.compile(
-    r"^[ \t]*\[TABLE:\s*(?P<key>[A-Za-z0-9_]+)\s*\][ \t]*$", re.MULTILINE)
+_TABLE_MARKER_RE = TABLE_MARKER_RE
 
 
 def _header_value(project_metadata: dict, name: str) -> str:
