@@ -39,6 +39,7 @@ from app.models import (
     DocumentReview, DocumentVersion, GeneratedDocument, ReviewComment, ReviewTask, User, now,
 )
 from app.ownership import owned_document_version, owned_project
+from app.generation.workflow_status import effective as effective_workflow
 from app.security import error, get_current_user
 
 router = APIRouter(tags=["reviews"])
@@ -492,6 +493,11 @@ def review_queue(state: str = "open", assigned_to: str | None = None,
             "document_id": review.document_id,
             "document_version_id": review.document_version_id,
             "document_status": version.status if version else None,
+            # The other axis, so a queue row can say where the document sits in
+            # somebody's own process as well as what the engine thinks of it --
+            # a letter already marked cancelled is a different thing to pick up
+            # from one still being worked on.
+            "workflow_status": effective_workflow(document) if document else None,
             "requested_by_name": _name(db, review.requested_by),
             "assigned_to": review.assigned_to,
             "created_at": review.created_at,

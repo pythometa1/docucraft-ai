@@ -115,7 +115,7 @@ TemplateAI/
 │   │   ├── _app.tsx              layout route → RequireAuth → <AppShell><Outlet/></AppShell>
 │   │   ├── _app.dashboard.tsx    "/dashboard" project table  ★ LIVE
 │   │   ├── _app.projects.$id.tsx "/projects/:id" 4-stage pipeline  ★ LIVE
-│   │   ├── _app.projects.$id_.studio.$templateId.tsx  Template Studio (compile/review/bind/generate,
+│   │   ├── (Template Studio was here and has been removed — templates are read at upload,
 │   │   │                                              per template, full-screen)  ★ LIVE
 │   │   ├── _app.projects.$id_.edit.$docId.tsx        document editor  ★ LIVE
 │   │   ├── _app.templates.tsx    "/templates" token library  ★ LIVE
@@ -430,7 +430,7 @@ This is the most important thing to understand about the codebase. Two independe
 | Determinism | Partial | **Byte-identical for identical input** |
 | Traceability | `section_outputs` per token | `field_lineage` + `condition_lineage` + QA gates + `manifest_generations` |
 | Approval gate | None | **A manifest must be approved before it can generate** — `409 MANIFEST_NOT_APPROVED` otherwise |
-| Driven by UI | ⚠️ Editor and library are live; **nothing calls `generateFromLibrary`** | ✅ **This is the product.** [components/document-mapping.tsx](src/components/document-mapping.tsx) (stage 3 of every project) and [Template Studio](src/routes/_app.projects.$id_.studio.$templateId.tsx) |
+| Driven by UI | ⚠️ Editor and library are live; **nothing calls `generateFromLibrary`** | ✅ **This is the product.** [components/document-mapping.tsx](src/components/document-mapping.tsx), stage 3 of every project |
 
 The reasoning behind C is documented at length in [docs/TEMPLATE_COMPILER_RESEARCH.md](docs/TEMPLATE_COMPILER_RESEARCH.md); the short version is its own thesis:
 
@@ -456,7 +456,7 @@ flowchart TB
   M3 --> M4[4 · Generate<br/>POST .../generate-batch → 202<br/>poll GET /jobs/:id → ZIP]
   M4 --> S4[Stage 4 · Documents<br/>everything this project produced]
   S4 --> ED[/projects/:id/edit/:docId/<br/>TipTap editor → approve]
-  S1 -.->|Open in Studio, per template| ST[/projects/:id/studio/:templateId/<br/>the same four steps, full-screen]
+  S1 -.->|Edit wording, per template| ST[/templates/:blueprintId<br/>the words of the template itself]
 ```
 
 Stage list and completion logic in [src/routes/_app.projects.$id.tsx](src/routes/_app.projects.$id.tsx) — `STAGES` is the authoritative list:
@@ -510,7 +510,7 @@ Two quirks worth knowing, both deliberate: the stage **keys** `mapping2` and `dr
 
 The section tree is no longer on the critical path — nothing selects sections any more — but it still feeds `GET /template-versions/{id}/sections` and the template-kind heuristics.
 
-Each template row on this stage carries an **"Open in Studio"** link to `/projects/:id/studio/:templateId` and a delete button (`DELETE /templates/{id}`, soft delete).
+Each template row on this stage carries an **"Edit wording"** link to `/templates/:blueprintId` and a delete button (`DELETE /templates/{id}`, soft delete). Uploading a template compiles it, so the row shows what the compiler read rather than a Compile button; a failed read offers "Read again".
 
 ### Stage 2 — Source upload and ingestion
 
@@ -570,7 +570,7 @@ Changing the (template, source, sheet) triple resets every derived value. Left s
 
 **Known limit, surfaced in the UI:** the client cannot pass `sheet` to `generate-batch`, so a batch always reads the workbook's *first* sheet. Mapping against another sheet is safe to review but generation is blocked with an explanation rather than silently filling this sheet's headers from that sheet's rows.
 
-**Template Studio** ([src/routes/_app.projects.$id_.studio.$templateId.tsx](src/routes/_app.projects.$id_.studio.$templateId.tsx)) is the same four steps — Compile → Review → Bind → Generate — as a full-screen, per-template surface, reached from "Open in Studio" on a template row. It adds the manifest **preview** (`GET …/preview`: paragraphs, spans, colours, which span carries which field) and single-row preview (`POST …/preview-row`).
+**Template Studio has been removed.** It was a second full-screen copy of Compile → Review → Bind → Generate, reached from "Open in Studio" on a template row, and it shared a name with the *other* studio — the one that edits the words of a template. Templates are now read at upload and their manifests approved on the way through, so two of its four steps no longer exist as user-facing work; the remaining two are Document Mapping. The manifest preview endpoints (`GET …/preview`, `POST …/preview-row`) are still served and are now API-only.
 
 ### Stage 4 — Documents
 
@@ -638,7 +638,7 @@ There is a server-side parity endpoint, `POST /template-library:convert`, that r
 
 ---
 
-## 9.5 Flow D — the Template Authoring Studio
+## 9.5 Flow D — the template editor
 
 The loop the product was missing: **a legacy `.docx` in, an editable template
 out, and a manifest that fills it.** Before this, a template could be read and it
@@ -701,7 +701,7 @@ legal template by accident.
 
 ## 10. Flow C — Template Compiler + Universal Fill Engine
 
-The deterministic engine, built and verified against a real Hospira Australia / Pfizer HR offer letter: 207 paragraphs, 27 blue placeholder runs, 30 red instruction runs, 7 `MERGEFIELD` codes across two remuneration tables, one hyperlink, zero content controls. **This is now the product's main path and it has a full frontend** — [Document Mapping](src/components/document-mapping.tsx) as stage 3 of every project, and [Template Studio](src/routes/_app.projects.$id_.studio.$templateId.tsx) per template. (Earlier revisions of this file said "no frontend exists for this path — it is driven entirely through the API." That is now exactly backwards.) The parts that remain API-only are bulk onboarding, clustering, manifest inheritance and manifest diff.
+The deterministic engine, built and verified against a real Hospira Australia / Pfizer HR offer letter: 207 paragraphs, 27 blue placeholder runs, 30 red instruction runs, 7 `MERGEFIELD` codes across two remuneration tables, one hyperlink, zero content controls. **This is now the product's main path and it has a full frontend** — [Document Mapping](src/components/document-mapping.tsx) as stage 3 of every project. (Earlier revisions of this file said "no frontend exists for this path — it is driven entirely through the API." That is now exactly backwards.) The parts that remain API-only are bulk onboarding, clustering, manifest inheritance and manifest diff.
 
 ```mermaid
 flowchart TB
@@ -879,7 +879,7 @@ Two ways down:
 
 **Auth guard** — `_app.tsx` is a layout route whose component is `RequireAuth`: it checks `api.isAuthenticated()` on the **client** (the token lives in `localStorage`, which the SSR pass cannot see, so guarding in `beforeLoad` would bounce every first paint) and redirects to `/login?redirect=…`. A `redirected` ref latches the redirect, because the component stays mounted for one more render while the router unwinds — without it the effect re-fires and rewrites the redirect target to `/login` itself, so signing in successfully landed you straight back on the sign-in screen.
 
-**Routing** — file-based. `_app.` prefix nests under the shell layout; the trailing underscore in `_app.projects.$id_.studio.$templateId.tsx` means "**don't** nest under the `/projects/$id` route component" — this is why Template Studio and the document editor render full-screen instead of inside the project page. `routeTree.gen.ts` is generated. (`_app.projects.$id_.mapping.$draftId.tsx` used the same trick and has been deleted.)
+**Routing** — file-based. `_app.` prefix nests under the shell layout; the trailing underscore in `_app.projects.$id_.edit.$docId.tsx` means "**don't** nest under the `/projects/$id` route component" — this is why the document editor renders full-screen instead of inside the project page. `routeTree.gen.ts` is generated. (`_app.projects.$id_.mapping.$draftId.tsx` and `_app.projects.$id_.studio.$templateId.tsx` used the same trick and have both been deleted.)
 
 **State** ([src/lib/store.ts](src/lib/store.ts)) — a single Zustand store holding `projects`, `totalCount`, `loaded`, `currentUser`. Its real job is the **snake_case → camelCase adapter layer** (`mapProject`, `mapTemplateFile`, `mapSourceFile`, `mapGeneratedDoc` — `mapDraft` was removed with the pipeline) plus `STATUS_MAP` (`pending → "Pending"`, `archived → "Completed"`). `loadProjectDetail(id)` fires **four** requests in parallel — project, templates, sources, documents; the fifth, drafts, is gone — and merges the result into the array. `currentUser` starts empty and is filled by `GET /me`; it used to be a hardcoded name, and a fabricated identity in the header is indistinguishable from a real one.
 

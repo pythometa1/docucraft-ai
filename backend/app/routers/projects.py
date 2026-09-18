@@ -185,6 +185,74 @@ def archive_project(project_id: str, db: Session = Depends(get_db), user: User =
     return {"status": "archived"}
 
 
+class BulkProjectDelete(BaseModel):
+    project_ids: list[str]
+
+
+MAX_BULK_PROJECTS = 50
+
+
+@router.post("/projects:delete")
+def delete_projects(body: BulkProjectDelete, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    """Remove several projects from the workspace, and say what happened to each.
+
+    The same stamp `DELETE /projects/{id}` applies, run per project and pushed
+    down to the children the same way. Deliberately not a harder delete just
+    because several were selected: §16 puts the destruction of blobs and
+    embeddings on the retention sweep, which knows the customer's stated period,
+    and a bulk button that shredded signed letters and their lineage would take
+    that decision away from the customer at exactly the moment they were least
+    likely to be reading carefully.
+
+    **One commit for the whole request**, unlike `documents:delete`. That endpoint
+    unlinks files from disk, so it has to commit per document or a failure
+    part-way leaves the filesystem and the database disagreeing. Nothing here
+    touches disk -- it is a timestamp on rows -- so the request is atomic and a
+    failure leaves the workspace exactly as it was.
+
+    Ownership is checked per project, for the reason every bulk endpoint here
+    checks it per item: a caller can put any id in a JSON array.
+    """
+    if not body.project_ids:
+        raise error("NO_PROJECTS", "Select at least one project to delete.", 422)
+    ids = list(dict.fromkeys(body.project_ids))
+    if len(ids) > MAX_BULK_PROJECTS:
+        raise error(
+            "TOO_MANY_PROJECTS",
+            f"{len(ids)} projects were selected; this endpoint removes at most "
+            f"{MAX_BULK_PROJECTS} at a time.",
+            422,
+        )
+
+    stamped = datetime.now(timezone.utc)
+    deleted, refused = [], []
+    for project_id in ids:
+        p = db.get(Project, project_id)
+        if not p or p.org_id != user.org_id or p.deleted_at is not None:
+            refused.append({"project_id": project_id, "code": "PROJECT_NOT_FOUND",
+                            "name": None, "reason": "This project no longer exists."})
+            continue
+
+        p.deleted_at = stamped
+        for model in (TemplateFile, SourceFile, DraftDocument):
+            db.execute(
+                update(model)
+                .where(model.project_id == project_id, model.deleted_at.is_(None))
+                .values(deleted_at=stamped)
+            )
+        # One row per project, the same as the single-project endpoint writes. A
+        # bulk gesture must not collapse into one audit line that hides what it
+        # removed.
+        log_audit(db, user, "Deleted project", "project", project_id,
+                  project_id=project_id, severity="warning",
+                  target=f"{p.name} (bulk of {len(ids)})")
+        deleted.append({"project_id": project_id, "name": p.name})
+
+    db.commit()
+    return {"requested": len(ids), "deleted": deleted, "refused": refused}
+
+
 @router.delete("/projects/{project_id}")
 def delete_project(project_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Remove a project and everything reached through it from the workspace.

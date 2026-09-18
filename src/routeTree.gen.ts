@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as DocsRouteImport } from './routes/docs'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AppTemplatesRouteImport } from './routes/_app.templates'
@@ -23,12 +24,16 @@ import { Route as AppAuditLogRouteImport } from './routes/_app.audit-log'
 import { Route as AppAnalyticsRouteImport } from './routes/_app.analytics'
 import { Route as AppTemplatesBlueprintIdRouteImport } from './routes/_app.templates_.$blueprintId'
 import { Route as AppProjectsIdRouteImport } from './routes/_app.projects.$id'
-import { Route as AppProjectsIdStudioTemplateIdRouteImport } from './routes/_app.projects.$id_.studio.$templateId'
 import { Route as AppProjectsIdEditDocIdRouteImport } from './routes/_app.projects.$id_.edit.$docId'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DocsRoute = DocsRouteImport.update({
+  id: '/docs',
+  path: '/docs',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AppRoute = AppRouteImport.update({
@@ -95,12 +100,6 @@ const AppProjectsIdRoute = AppProjectsIdRouteImport.update({
   path: '/projects/$id',
   getParentRoute: () => AppRoute,
 } as any)
-const AppProjectsIdStudioTemplateIdRoute =
-  AppProjectsIdStudioTemplateIdRouteImport.update({
-    id: '/projects/$id_/studio/$templateId',
-    path: '/projects/$id/studio/$templateId',
-    getParentRoute: () => AppRoute,
-  } as any)
 const AppProjectsIdEditDocIdRoute = AppProjectsIdEditDocIdRouteImport.update({
   id: '/projects/$id_/edit/$docId',
   path: '/projects/$id/edit/$docId',
@@ -109,6 +108,7 @@ const AppProjectsIdEditDocIdRoute = AppProjectsIdEditDocIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/docs': typeof DocsRoute
   '/login': typeof LoginRoute
   '/analytics': typeof AppAnalyticsRoute
   '/audit-log': typeof AppAuditLogRoute
@@ -122,10 +122,10 @@ export interface FileRoutesByFullPath {
   '/projects/$id': typeof AppProjectsIdRoute
   '/templates/$blueprintId': typeof AppTemplatesBlueprintIdRoute
   '/projects/$id/edit/$docId': typeof AppProjectsIdEditDocIdRoute
-  '/projects/$id/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/docs': typeof DocsRoute
   '/login': typeof LoginRoute
   '/analytics': typeof AppAnalyticsRoute
   '/audit-log': typeof AppAuditLogRoute
@@ -139,12 +139,12 @@ export interface FileRoutesByTo {
   '/projects/$id': typeof AppProjectsIdRoute
   '/templates/$blueprintId': typeof AppTemplatesBlueprintIdRoute
   '/projects/$id/edit/$docId': typeof AppProjectsIdEditDocIdRoute
-  '/projects/$id/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_app': typeof AppRouteWithChildren
+  '/docs': typeof DocsRoute
   '/login': typeof LoginRoute
   '/_app/analytics': typeof AppAnalyticsRoute
   '/_app/audit-log': typeof AppAuditLogRoute
@@ -158,12 +158,12 @@ export interface FileRoutesById {
   '/_app/projects/$id': typeof AppProjectsIdRoute
   '/_app/templates_/$blueprintId': typeof AppTemplatesBlueprintIdRoute
   '/_app/projects/$id_/edit/$docId': typeof AppProjectsIdEditDocIdRoute
-  '/_app/projects/$id_/studio/$templateId': typeof AppProjectsIdStudioTemplateIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/docs'
     | '/login'
     | '/analytics'
     | '/audit-log'
@@ -177,10 +177,10 @@ export interface FileRouteTypes {
     | '/projects/$id'
     | '/templates/$blueprintId'
     | '/projects/$id/edit/$docId'
-    | '/projects/$id/studio/$templateId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/docs'
     | '/login'
     | '/analytics'
     | '/audit-log'
@@ -194,11 +194,11 @@ export interface FileRouteTypes {
     | '/projects/$id'
     | '/templates/$blueprintId'
     | '/projects/$id/edit/$docId'
-    | '/projects/$id/studio/$templateId'
   id:
     | '__root__'
     | '/'
     | '/_app'
+    | '/docs'
     | '/login'
     | '/_app/analytics'
     | '/_app/audit-log'
@@ -212,12 +212,12 @@ export interface FileRouteTypes {
     | '/_app/projects/$id'
     | '/_app/templates_/$blueprintId'
     | '/_app/projects/$id_/edit/$docId'
-    | '/_app/projects/$id_/studio/$templateId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AppRoute: typeof AppRouteWithChildren
+  DocsRoute: typeof DocsRoute
   LoginRoute: typeof LoginRoute
 }
 
@@ -228,6 +228,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/docs': {
+      id: '/docs'
+      path: '/docs'
+      fullPath: '/docs'
+      preLoaderRoute: typeof DocsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_app': {
@@ -321,13 +328,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppProjectsIdRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/projects/$id_/studio/$templateId': {
-      id: '/_app/projects/$id_/studio/$templateId'
-      path: '/projects/$id/studio/$templateId'
-      fullPath: '/projects/$id/studio/$templateId'
-      preLoaderRoute: typeof AppProjectsIdStudioTemplateIdRouteImport
-      parentRoute: typeof AppRoute
-    }
     '/_app/projects/$id_/edit/$docId': {
       id: '/_app/projects/$id_/edit/$docId'
       path: '/projects/$id/edit/$docId'
@@ -351,7 +351,6 @@ interface AppRouteChildren {
   AppProjectsIdRoute: typeof AppProjectsIdRoute
   AppTemplatesBlueprintIdRoute: typeof AppTemplatesBlueprintIdRoute
   AppProjectsIdEditDocIdRoute: typeof AppProjectsIdEditDocIdRoute
-  AppProjectsIdStudioTemplateIdRoute: typeof AppProjectsIdStudioTemplateIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
@@ -367,7 +366,6 @@ const AppRouteChildren: AppRouteChildren = {
   AppProjectsIdRoute: AppProjectsIdRoute,
   AppTemplatesBlueprintIdRoute: AppTemplatesBlueprintIdRoute,
   AppProjectsIdEditDocIdRoute: AppProjectsIdEditDocIdRoute,
-  AppProjectsIdStudioTemplateIdRoute: AppProjectsIdStudioTemplateIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
@@ -375,6 +373,7 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AppRoute: AppRouteWithChildren,
+  DocsRoute: DocsRoute,
   LoginRoute: LoginRoute,
 }
 export const routeTree = rootRouteImport

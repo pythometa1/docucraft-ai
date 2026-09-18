@@ -38,7 +38,12 @@ OPERATIONS = (
     "rewrite_condition",
     "remove_condition",
     "set_block_range",
+    "set_row_repeat",
+    "remove_row_repeat",
 )
+
+#: What a repeating row may do when its collection is empty.
+ROW_EMPTY_BEHAVIOURS = ("REMOVE_ROW", "REMOVE_TABLE")
 
 EDITABLE_ROLES = (bp.STATIC, bp.PLACEHOLDER, bp.INSTRUCTION)
 
@@ -86,6 +91,17 @@ def _segment_at(body: dict, paragraph_index, span_index):
 
 def _objects_by_id(objects):
     return {o.get("object_id"): o for o in objects}
+
+
+def _token_in_table(body: dict, token: str) -> bool:
+    """Whether `token` appears in a placeholder run inside a table."""
+    for _index, block, in_table in bp.walk_paragraphs(body):
+        if not in_table:
+            continue
+        for seg in block.get("segments") or ():
+            if seg.get("role") == bp.PLACEHOLDER and token in (seg.get("text") or ""):
+                return True
+    return False
 
 
 def apply_operations(body: dict, objects, ops) -> OperationResult:
@@ -258,6 +274,80 @@ def apply_operations(body: dict, objects, ops) -> OperationResult:
                             "comparison, such as region == 'EU'")
                     continue
                 target["expression"] = expression
+
+            elif kind == "set_row_repeat":
+                from app.compiler.rule_compiler import _slug
+
+                iterate_over = (op.get("iterate_over") or "").strip()
+                if not iterate_over:
+                    _reject(result.rejected, op,
+                            "a repeating row needs the name of the collection it repeats over, "
+                            "such as line_items")
+                    continue
+                raw_columns = [c for c in (op.get("columns") or ()) if isinstance(c, dict)]
+                columns = []
+                for c in raw_columns:
+                    token = (c.get("token") or "").strip()
+                    if not token:
+                        continue
+                    columns.append({
+                        "token": token,
+                        "field_id": c.get("field_id") or _slug(token[1:-1] if token.startswith("<") and token.endswith(">") else token),
+                        "source_key": c.get("source_key") or c.get("field_id") or _slug(token[1:-1] if token.startswith("<") and token.endswith(">") else token),
+                        "type": c.get("type") if c.get("type") in FIELD_TYPES else "string",
+                        "format": c.get("format"),
+                        "on_missing": (c.get("on_missing") or "BLANK").upper(),
+                        "default": c.get("default"),
+                    })
+                if not columns:
+                    _reject(result.rejected, op,
+                            "a repeating row needs at least one column token, such as "
+                            "<Item Description>, or repeating it would print the template row "
+                            "unchanged")
+                    continue
+                missing_tokens = [c["token"] for c in columns if not _token_in_table(body, c["token"])]
+                if missing_tokens:
+                    _reject(result.rejected, op,
+                            f"{', '.join(missing_tokens)} do(es) not appear as a placeholder "
+                            "inside any table of this template, so the row to repeat cannot be "
+                            "found")
+                    continue
+                empty_behaviour = (op.get("empty_behaviour") or "REMOVE_ROW").upper()
+                if empty_behaviour not in ROW_EMPTY_BEHAVIOURS:
+                    _reject(result.rejected, op,
+                            f"a repeating row's empty_behaviour can be "
+                            f"{', '.join(ROW_EMPTY_BEHAVIOURS)}; {empty_behaviour!r} is not one "
+                            "of them")
+                    continue
+                row_id = op.get("id") or f"{iterate_over}_rows"
+                existing = _objects_by_id(objects).get(row_id)
+                if existing is not None and existing.get("object_type") != "TABLE_ROW":
+                    _reject(result.rejected, op,
+                            f"{row_id!r} already names a {existing.get('object_type')}, not a "
+                            "repeating row")
+                    continue
+                spec = {
+                    "object_id": row_id, "object_type": "TABLE_ROW",
+                    "iterate_over": iterate_over,
+                    "columns": columns,
+                    "column_refs": {c["field_id"]: c["source_key"] for c in columns},
+                    "anchor_row": {"kind": "run_path", "token": columns[0]["token"]},
+                    "empty_behaviour": empty_behaviour,
+                    "required": bool(op.get("required")),
+                    "status": "PROPOSED",
+                }
+                if existing is not None:
+                    objects[objects.index(existing)] = spec
+                else:
+                    objects.append(spec)
+
+            elif kind == "remove_row_repeat":
+                target = _objects_by_id(objects).get(op.get("id"))
+                if target is None or target.get("object_type") != "TABLE_ROW":
+                    _reject(result.rejected, op,
+                            f"this template has no repeating row called {op.get('id')!r}")
+                    continue
+                objects.remove(target)
 
             elif kind == "set_block_range":
                 target = _objects_by_id(objects).get(op.get("id"))

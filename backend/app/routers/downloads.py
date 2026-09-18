@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.audit.service import log_audit
 from app.db import get_db
 from app.downloads import redeem
+from app.generation.document_status import DOWNLOADABLE
 from app.models import DocumentVersion, GeneratedDocument, Project, User
 from app.rate_limit import rate_limit_by_ip
 from app.security import error
@@ -54,6 +55,18 @@ def redeem_download(token: str, request: Request, db: Session = Depends(get_db))
     # moved organisation is not the document the grant was for.
     if gd is None or gd.org_id != grant.org_id:
         raise error("VERSION_NOT_FOUND", "Document version not found", 404)
+
+    # Re-read the approval on the way out, not only on the way in. The grant
+    # carries a version id and nothing about its state, and this handler
+    # deliberately has no current user -- so this is the only place the
+    # document's status can be consulted between minting and transfer. Two
+    # minutes is short, but "mint a link, have the approval withdrawn, follow the
+    # link" is a real sequence and a single-use token does not make it fewer than
+    # one. Without this the gate on the mint is a suggestion.
+    if dv.status not in DOWNLOADABLE:
+        raise error(
+            "DOCUMENT_NOT_APPROVED",
+            "This document is no longer approved, so this link no longer works.", 409)
 
     # Minting and fetching are separate events: a link requested and never
     # followed is a different fact from a document that actually left.

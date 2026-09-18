@@ -153,7 +153,7 @@ export function CreateProjectSheet({
           <Button
             onClick={submit}
             disabled={!canCreate || submitting}
-            className="bg-gradient-brand text-white hover:opacity-90"
+            className="bg-gradient-brand text-white shadow-lg shadow-brand/25 transition-all hover:opacity-95 hover:shadow-brand/40"
           >
             Create
           </Button>

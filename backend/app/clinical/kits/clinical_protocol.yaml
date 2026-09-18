@@ -1,0 +1,69 @@
+name: Protocol amendment
+description: Study identification, the rationale, a table of changes, and approval signatures.
+fields: [study_title, protocol_number, sponsor_name, document_number, document_date,
+         version_label, amendment_rationale, section_reference, previous_text,
+         revised_text, investigator_name]
+field_types:
+  document_date: date
+table_rows:
+  - id: amendment_items
+    iterate_over: amendment_items
+    empty_behaviour: REMOVE_ROW
+    required: true
+    columns:
+      - {token: "<Section Reference>", source_key: section_reference, type: string}
+      - {token: "<Previous Text>", source_key: previous_text, type: string}
+      - {token: "<Revised Text>", source_key: revised_text, type: string}
+blocks:
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "Protocol Amendment"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Study: "}
+      - {role: placeholder, text: "<Study Title>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Protocol "}
+      - {role: placeholder, text: "<Protocol Number>"}
+      - {role: static, text: ", sponsored by "}
+      - {role: placeholder, text: "<Sponsor Name>"}
+      - {role: static, text: "."}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Amendment "}
+      - {role: placeholder, text: "<Document Number>"}
+      - {role: static, text: ", version "}
+      - {role: placeholder, text: "<Version Label>"}
+      - {role: static, text: ", dated "}
+      - {role: placeholder, text: "<Document Date>"}
+      - {role: static, text: "."}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Rationale"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Amendment Rationale>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Changes"}]
+  - kind: table
+    rows:
+      - - [{kind: paragraph, segments: [{role: static, text: "Section"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Previous text"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Revised text"}]}]
+      - - [{kind: paragraph, segments: [{role: placeholder, text: "<Section Reference>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Previous Text>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Revised Text>"}]}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "These changes take effect on approval and apply to all participating sites."}
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "Approval"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Principal investigator: "}
+      - {role: placeholder, text: "<Investigator Name>"}
+      - {role: static, text: "   Date: "}
+      - {role: placeholder, text: "<Document Date>"}

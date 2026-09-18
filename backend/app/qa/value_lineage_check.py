@@ -27,13 +27,11 @@ with `qa_passed` True, because nothing was watching for absence.
 """
 
 import re
-from collections.abc import Iterable, Mapping
 
 from app.expressions.token_parser import _normalise_scalar
 from app.generation.missing_policy import BLOCK
 from app.qa.policy import (
     BRANCH_SELECTION,
-    REQUIRED_VALUE_MISSING,
     QaFinding,
     QaPolicy,
     findings_for,
@@ -64,23 +62,6 @@ def blocks_document(source: str, on_missing: str) -> bool:
 def missing_value_note(field_id: str) -> str:
     """The one wording for this failure, so tooling can match it in one place."""
     return f"Required field '{field_id}' has no value in the source record."
-
-
-def missing_required_failures(field_lineage: Iterable[Mapping]) -> list:
-    """Every required field that the source record did not supply.
-
-    Reported once per field id even when a field has several slots and therefore
-    several lineage rows: the reviewer has one thing to fix.
-    """
-    seen, failures = set(), []
-    for entry in field_lineage:
-        fid = entry.get("field_id")
-        if fid in seen:
-            continue
-        if blocks_document(entry.get("source") or "", entry.get("on_missing") or ""):
-            seen.add(fid)
-            failures.append(missing_value_note(fid))
-    return failures
 
 
 def branch_count_failures(
@@ -170,11 +151,6 @@ def branch_count_failures(
                 f"survived (expected exactly 1). Surviving: {survivors or 'none'}."
             )
     return failures
-
-
-def required_value_findings(field_lineage: Iterable[Mapping], policy: QaPolicy) -> list[QaFinding]:
-    """The §17 "Required source value missing" gate, re-read from the lineage."""
-    return findings_for(REQUIRED_VALUE_MISSING, missing_required_failures(field_lineage), policy)
 
 
 def branch_findings(

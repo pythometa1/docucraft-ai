@@ -167,26 +167,6 @@ def apply_scope_to_session(session, connection) -> None:
     )
 
 
-def apply_scope_to_connection(connection) -> None:
-    """Re-assert the request's tenant on whatever connection is in play.
-
-    Wired to SQLAlchemy's `after_begin`, so it runs at the start of every
-    transaction on every connection the session touches -- including the fresh
-    one it picks up after a commit.
-
-    Takes the Connection the event hands over, not the Session. Going through
-    the Session here would ask it to begin a transaction from inside the hook
-    that fires when a transaction begins, and SQLAlchemy refuses that
-    re-entrancy outright ("this session is provisioning a new connection").
-    """
-    org_id = _CURRENT_ORG.get()
-    if not org_id or connection.dialect.name != "postgresql":
-        return
-    connection.exec_driver_sql(
-        f"SELECT set_config('{ORG_GUC}', %s, false)", (str(org_id),)
-    )
-
-
 def set_current_org(session, org_id: str) -> bool:
     """Tell this session which tenant it speaks for. True if it was applied.
 

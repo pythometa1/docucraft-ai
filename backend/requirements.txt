@@ -9,6 +9,12 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.19
 python-docx==1.1.2
+# The CSR module's source extraction: protocols and TLF bundles arrive as PDF,
+# and SAS statistical output arrives as RTF. Both are optional at import time --
+# app/csr/extraction.py degrades with a named-package error rather than a crash --
+# but a deployment that ingests real study documents needs them.
+pymupdf==1.28.2
+striprtf==0.0.33
 pypdf==5.1.0
 openpyxl==3.1.5
 scikit-learn==1.5.2

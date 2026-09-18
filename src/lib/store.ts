@@ -45,11 +45,17 @@ function mapTemplateFile(t: any): TemplateFile {
     size: t.section_count != null ? `${t.section_count} sections` : "—",
     uploadedAt: toDisplayDateTime(t.created_at),
     uploadedBy: t.created_by_name ?? "—",
+    blueprintId: t.blueprint_id ?? undefined,
     manifestId: t.manifest_id ?? undefined,
     manifestStatus: t.manifest_status ?? undefined,
     compileError: t.compile_error ?? undefined,
     fieldCount: t.field_count ?? 0,
     conditionCount: t.condition_count ?? 0,
+    // Placeholders the reading did not claim. Each one is a document that will
+    // come back blocked with "Leftover placeholder brackets", known now rather
+    // than after a batch has run and stopped on its canary rows.
+    unfillable: t.unfillable ?? [],
+    unfillableCount: t.unfillable_count ?? 0,
   };
 }
 
@@ -79,6 +85,17 @@ function mapGeneratedDoc(g: any, projectName: string): GeneratedDoc {
     // `blocked` -- and a row inferring "already objected to" from the status
     // offered a button that could only 409.
     openReviewId: g.open_review_id ?? undefined,
+    // The other axis: where a person put this in their own process. Two fields
+    // rather than one because they answer different questions -- `workflowStatus`
+    // is what the card shows, with the signature and the QA verdict layered over
+    // the top, and `workflowStatusSet` is what the select shows as chosen. A
+    // document somebody marked completed that then failed QA must read "Blocked"
+    // without losing the fact that they marked it completed.
+    workflowStatus: g.workflow_status ?? "work_in_progress",
+    workflowStatusSet: g.workflow_status_set ?? "work_in_progress",
+    // Asked of the server rather than derived from the status here, so the
+    // download control and the endpoint cannot disagree about what is allowed.
+    downloadable: Boolean(g.downloadable),
     generatedAt: toDisplayDateTime(g.created_at),
     size: formatBytes(g.size_bytes),
     generatedBy: g.created_by_name ?? "—",
@@ -108,7 +125,9 @@ interface Store {
   loadProjectDetail: (id: string) => Promise<void>;
   createProject: (input: CreateProjectInput) => Promise<string>;
   getProject: (id: string) => Project | undefined;
-  addTemplate: (projectId: string, file: File) => Promise<void>;
+  /** Uploads, then compiles. `progressToken` is minted by the caller before the
+   *  call so it can poll the compile's stages while this runs. */
+  addTemplate: (projectId: string, file: File, progressToken?: string) => Promise<void>;
   addSource: (projectId: string, file: File) => Promise<void>;
   setGenerationMethod: (projectId: string, method: string, model?: string, temperature?: number) => Promise<void>;
   refreshGenerated: (projectId: string) => Promise<void>;
@@ -179,9 +198,36 @@ export const useStore = create<Store>((set, get) => ({
 
   getProject: (id) => get().projects.find((p) => p.id === id),
 
-  addTemplate: async (projectId, file) => {
-    await api.uploadTemplate(projectId, file, file.name);
-    await get().loadProjectDetail(projectId);
+  /** Upload a template and read it, as one act.
+   *
+   *  Uploading and compiling used to be two things the user did, and the second
+   *  one was a button they had to know to press: until a template has been read,
+   *  nothing downstream knows what data the letter needs, so a project sat at
+   *  "uploaded" looking finished and could not go anywhere. There is no case
+   *  where somebody wants the file stored and not read.
+   *
+   *  `progressToken` is minted by the caller *before* the request so the upload
+   *  dialog can poll `GET /jobs/{token}` while this runs -- a compile is between
+   *  two seconds and three minutes and the expensive stage is a model call, which
+   *  is worth showing rather than hiding behind one spinner.
+   *
+   *  A failed compile is not a failed upload. The file is stored either way, the
+   *  manifest row records the attempt and its reason, and the row on screen
+   *  offers a retry -- so this reports the compile failure to the caller without
+   *  unwinding the upload. */
+  addTemplate: async (projectId, file, progressToken) => {
+    // The id comes back on the upload response. Looking it up by name afterwards
+    // would pick the wrong row the first time somebody uploads two templates
+    // called `offer-letter.docx`, and compile a template they were not touching.
+    const uploaded = await api.uploadTemplate(projectId, file, file.name);
+    try {
+      await api.compileManifest(uploaded.id, progressToken ? { progressToken } : {});
+    } finally {
+      // Reloaded on both paths. The template is in the project whether or not
+      // the compile converged, and leaving it off the screen because the reading
+      // failed is how a failure becomes "the upload silently did nothing".
+      await get().loadProjectDetail(projectId);
+    }
   },
 
   addSource: async (projectId, file) => {
@@ -209,6 +255,7 @@ export const FUNCTIONS: FunctionKey[] = [
   "Human Resources",
   "Legal",
   "Regulatory Affairs",
+  "Finance",
 ];
 
 export const DOCUMENT_TYPES: Record<string, string[]> = {
@@ -216,11 +263,15 @@ export const DOCUMENT_TYPES: Record<string, string[]> = {
   Clinical: ["Clinical Study Report", "Protocol Amendment", "Informed Consent", "Investigator Brochure"],
   "Quality-CMC": ["CMC Section", "Batch Record", "Deviation Report"],
   Quality: ["Quality Report", "SOP", "Audit Report"],
-  Safety: ["Adverse Event Report", "PSUR", "Safety Communication"],
+  // A Safety project holds a product's whole safety profile; the document type
+  // names what it is mostly for, and every report type is available inside it.
+  Safety: ["PSUR / PBRER", "DSUR", "PADER", "Risk Management Plan",
+           "Signal Evaluation", "Adverse Event Report", "Safety Communication"],
   "Medical Affairs": ["Medical Letter", "Publication Summary", "SRD"],
   Marketing: ["Product Brief", "Campaign Copy", "Localized Content"],
   Legal: ["Contract", "NDA", "Legal Memo"],
   "Regulatory Affairs": ["Regulatory Cover Letter", "Submission Package"],
+  Finance: ["Invoice", "Quotation", "Purchase Order"],
 };
 
 export const REGIONS = ["Europe", "North America", "Asia Pacific", "Latin America", "Middle East & Africa", "Global"];
@@ -235,4 +286,5 @@ export const FUNCTION_COLORS: Record<FunctionKey, string> = {
   Marketing: "bg-chart-5/15 text-chart-5 border-chart-5/30",
   Legal: "bg-muted text-muted-foreground border-border",
   "Regulatory Affairs": "bg-brand/15 text-brand border-brand/30",
+  Finance: "bg-success/15 text-success border-success/30",
 };

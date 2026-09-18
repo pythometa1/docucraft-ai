@@ -45,6 +45,7 @@ UNEXECUTABLE_CONDITION = "unexecutable_condition"
 ORPHANED_FIELD = "orphaned_field"
 FIELD_WITHOUT_SLOT = "field_without_slot"
 SCAFFOLDING_CONFLICT = "scaffolding_conflict"
+UNGOVERNED_BLOCK = "ungoverned_block"
 TEST_FILL_FAILURE = "test_fill_failure"
 
 
@@ -83,21 +84,75 @@ def _claimed_literals(manifest: dict) -> set[tuple[int, str]]:
     return out
 
 
-def uncovered_placeholders(prescan, manifest: dict) -> list[Assertion]:
+def _claimed_by_conditions(manifest: dict) -> set[str]:
+    """Placeholder literals a *condition* accounts for, rather than a field.
+
+    Not every bracket token becomes a field. `<Work Location/City Location>` is
+    one placeholder offering a choice between two, and the right reading is two
+    conditions -- one keeping each branch -- with the token recorded in
+    `compiled_from`. No field ever claims it, and it is nonetheless fully
+    accounted for.
+
+    Without this the coverage check reports it as uncovered on a template that
+    was read correctly. That is the expensive kind of wrong: the writer cannot
+    satisfy it without inventing a field that should not exist, so the loop runs
+    to its ceiling and parks a good template as `llm_unconverged`. Three faults
+    of exactly this shape have been removed from this module before.
+    """
+    out: set[str] = set()
+    for group in ("conditions", "blocks", "delete_always"):
+        for item in manifest.get(group) or []:
+            if not isinstance(item, dict):
+                continue
+            token = (item.get("compiled_from") or "").strip()
+            if token:
+                out.add(token)
+    return out
+
+
+def uncovered_placeholders(prescan, manifest: dict) -> tuple[list[Assertion], list[dict]]:
     """Bracket tokens in the document that no field claims.
 
-    Read from the pre-scan's spans rather than the paragraph text, because a
-    token split across runs is one token to a reader and two to a naive scan.
+    Read from each paragraph's *joined* text, not from its spans one at a time.
+    The two are not the same document, and the difference is the whole point of
+    this check.
+
+    Word splits a run wherever formatting, spell-check state or a tracked change
+    says so, and it splits inside placeholders as readily as anywhere else. A
+    real client master writes
+
+        span 0: 'Your new base salary will be CNY<'
+        span 1: 'Pay Rate Monthly>'
+
+    which is one placeholder to anybody reading the letter and no placeholder at
+    all to a scan that looks at each span alone -- neither fragment holds a
+    complete `<...>`. So the check that exists to notice a missed placeholder
+    could not see the ones most likely to be missed, and the compile converged
+    with zero faults on a template it had read incompletely. It surfaced four
+    steps later as a QA block on every row of the batch: "Leftover placeholder
+    brackets: ['Pay Rate Monthly']".
+
+    Joining first costs nothing and finds both kinds. The paragraph index is the
+    same for every span in the paragraph, which is all the assertion needs to
+    name where it is.
     """
     claimed = _claimed_literals(manifest)
-    claimed_texts = {text for _i, text in claimed}
+    claimed_texts = {text for _i, text in claimed} | _claimed_by_conditions(manifest)
     seen: set[tuple[int, str]] = set()
     out: list[Assertion] = []
+    warnings: list[dict] = []
+
+    paragraphs: dict[int, list] = {}
     for span in prescan.spans:
-        for token, inner in extract_bracket_tokens(span.text or ""):
+        paragraphs.setdefault(span.paragraph_index, []).append(span)
+
+    for paragraph_index, spans in paragraphs.items():
+        ordered = sorted(spans, key=lambda s: s.span_index)
+        text = "".join(s.text or "" for s in ordered)
+        for token, inner in extract_bracket_tokens(text):
             if _NOT_A_PLACEHOLDER_RE.match(inner or ""):
                 continue
-            key = (span.paragraph_index, token)
+            key = (paragraph_index, token)
             if key in seen:
                 continue
             seen.add(key)
@@ -106,14 +161,51 @@ def uncovered_placeholders(prescan, manifest: dict) -> list[Assertion]:
             # `_locate` already searched a window around it.
             if key in claimed or token in claimed_texts:
                 continue
-            out.append(Assertion(
-                UNCOVERED_PLACEHOLDER,
-                f"Paragraph {span.paragraph_index} contains the placeholder {token!r}, "
-                f"which no field claims. Either add a field with an occurrence for it, or say "
-                f"why it is not a placeholder.",
-                paragraph_index=span.paragraph_index,
-            ))
-    return out
+
+            # Whole in one run, or split across several? The difference decides
+            # whether the writer can do anything about it, and therefore whether
+            # this is a fault or a warning.
+            #
+            # `_locate` finds a slot with `needle in span.text`, one span at a
+            # time, and the fill engine replaces with `run_text.replace(slot_text,
+            # value)` inside a single run. So a token Word has split -- and Word
+            # splits constantly, especially around CJK text -- can neither be
+            # located when the writer claims it nor filled if it were. Every
+            # claim is dropped as unlocatable, the fault comes back identical
+            # next round, and the compile runs to its ceiling and parks as
+            # `llm_unconverged` on a template it read correctly. Measured on the
+            # Chinese master: 9 fields merged, then three rounds each applying
+            # three corrections against the same two faults, ending with an
+            # empty manifest.
+            #
+            # `collect_with_warnings` states the rule this follows: "A warning is
+            # something a person must decide and no reviewer round can fix.
+            # Keeping the two apart is what stops the loop chasing a goal it
+            # cannot reach."
+            if any(token in (s.text or "") for s in ordered):
+                out.append(Assertion(
+                    UNCOVERED_PLACEHOLDER,
+                    f"Paragraph {paragraph_index} contains the placeholder {token!r}, "
+                    f"which no field claims. Either add a field with an occurrence for it, or say "
+                    f"why it is not a placeholder.",
+                    paragraph_index=paragraph_index,
+                ))
+            else:
+                warnings.append({
+                    "code": "W-SPLIT-PLACEHOLDER",
+                    "paragraph_index": paragraph_index,
+                    "evidence": token,
+                    "detail": "a placeholder is split across runs, so nothing can fill it",
+                    "message": (
+                        f"On paragraph {paragraph_index}, the placeholder {token} is split across "
+                        f"several runs in the Word file, so no field can be attached to it and "
+                        f"nothing will fill it -- every document would keep the literal text. "
+                        f"Word does this on its own, usually where formatting or a spell-check mark "
+                        f"changes mid-word. Open the paragraph in Word or the template studio, "
+                        f"retype the placeholder in one go, and re-compile."
+                    ),
+                })
+    return out, warnings
 
 
 def uncovered_mergefields(prescan, manifest: dict) -> tuple[list[Assertion], list[dict]]:
@@ -423,6 +515,46 @@ def structural_faults(manifest: dict) -> list[Assertion]:
             f"contain it. Either the deletion is wrong or the field is.",
             object_id=orphan.field_id,
         ))
+
+    # A block nothing governs is not a conditional section -- it is ordinary
+    # text with a condition's name on it.
+    #
+    # `docx_renderer` drops a block only when a condition that *keeps* it decides
+    # False. So a block no condition references is never dropped, whatever the
+    # data says. Both halves of an `[[IF]] … [[ELSE]] … [[ENDIF]]` then print:
+    #
+    #     This is a fixed-term contract commencing on 1 September 2026.
+    #     This is a permanent contract commencing on 1 September 2026.
+    #
+    # The rule compiler cannot produce this -- `register_condition` runs for
+    # every block it creates. The agentic path can, and did: eight blocks, three
+    # conditions, and the five ungoverned ones were the positive arms. Nothing
+    # downstream notices, because every existing gate asks what is left over or
+    # what is absent, and this section is neither -- it is present and should not
+    # be.
+    governed = {
+        block_id
+        for c in manifest.get("conditions") or []
+        for block_id in (c.get("keeps_blocks") or [])
+    }
+    for b in manifest.get("blocks") or []:
+        if b.get("id") in governed:
+            continue
+        if str(b.get("object_type") or "").upper() == "TABLE_ROW":
+            # Not a conditional section at all: a §6 TABLE_ROW is governed by
+            # its *collection* -- it renders once per record of `iterate_over`
+            # and disappears when the collection is empty -- so "kept by no
+            # condition" is its correct, permanent state.
+            continue
+        out.append(Assertion(
+            UNGOVERNED_BLOCK,
+            f"Block {b.get('id')!r} (paragraphs {b.get('start_paragraph')}-{b.get('end_paragraph')}) "
+            f"is kept by no condition, so it appears in every document regardless of the data. "
+            f"If it is conditional, add the condition that keeps it; if it is not, it should not "
+            f"be a block.",
+            paragraph_index=b.get("start_paragraph"),
+            object_id=b.get("id"),
+        ))
     return out
 
 
@@ -449,8 +581,10 @@ def collect_with_warnings(prescan, manifest: dict, *, test_fill_notes=None):
     Keeping the two apart is what stops the loop chasing a goal it cannot reach.
     """
     mergefield_faults, warnings = uncovered_mergefields(prescan, manifest)
+    placeholder_faults, placeholder_warnings = uncovered_placeholders(prescan, manifest)
+    warnings = [*warnings, *placeholder_warnings]
     faults = [
-        *uncovered_placeholders(prescan, manifest),
+        *placeholder_faults,
         *mergefield_faults,
         *surviving_instructions(prescan, manifest),
         *paragraph_scoped_switches(prescan, manifest),

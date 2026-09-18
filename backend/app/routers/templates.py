@@ -88,7 +88,8 @@ def _manifest_summary(db: Session, template_file_id: str) -> dict:
     ).first()
     if m is None:
         return {"manifest_id": None, "manifest_status": None, "field_count": 0,
-                "condition_count": 0, "compile_error": None}
+                "condition_count": 0, "compile_error": None,
+                "unfillable": [], "unfillable_count": 0}
     # A failed compile has to say why on the same payload that says it happened.
     # Without this the screen shows "Compiled -- 0 fields", which is what a
     # successful compile of a template with no placeholders looks like, and the
@@ -97,20 +98,68 @@ def _manifest_summary(db: Session, template_file_id: str) -> dict:
     if m.status == "failed":
         notes = (m.prescan_summary or {}).get("notes") or []
         compile_error = notes[0] if notes else "The compile did not produce a reading of this template."
+
+    # The placeholders nothing will fill, named on the template's own row.
+    #
+    # Every one of these is a document that will come back blocked with
+    # "Leftover placeholder brackets" -- the fill engine leaves the literal text
+    # where the value should be and QA refuses it. That was only discoverable by
+    # running a batch: three canary rows fail, the run stops, and the reader is
+    # four steps and one spreadsheet away from the template they would have to
+    # change. It is known the moment the template is read, so it belongs here.
+    #
+    # Read off the stored column rather than re-derived, so listing a project's
+    # templates does not re-parse every .docx on the row.
+    unfillable = [
+        {
+            "code": w.get("code"),
+            "paragraph_index": w.get("paragraph_index"),
+            # The placeholder itself, when the check recorded one. Newlines are
+            # flattened: Word splits these across lines and a raw token renders
+            # as a broken three-line chip.
+            "placeholder": " ".join((w.get("evidence") or "").split()) or None,
+            "message": w.get("message") or w.get("detail"),
+        }
+        for w in (m.warnings or [])
+        if w.get("code") in ("uncovered_placeholder", "W-SPLIT-PLACEHOLDER")
+    ]
     return {
         "manifest_id": m.id,
         "manifest_status": m.status,
         "compile_error": compile_error,
         "field_count": len(m.fields or []),
         "condition_count": len(m.conditions or []),
+        "unfillable": unfillable[:8],
+        "unfillable_count": len(unfillable),
     }
 
 
+def _blueprint_id_for(db: Session, tf: TemplateFile) -> str | None:
+    """The blueprint already open on this template, if any.
+
+    Sent with the row so the project can offer "continue editing" rather than
+    "edit", and so clicking it does not have to guess whether one exists. The
+    join key has been on `TemplateBlueprint` since it was written; nothing on the
+    template side had ever looked at it.
+    """
+    from app.models import TemplateBlueprint
+
+    return db.scalar(
+        select(TemplateBlueprint.id)
+        .where(TemplateBlueprint.org_id == tf.org_id,
+               TemplateBlueprint.template_file_id == tf.id,
+               TemplateBlueprint.deleted_at.is_(None))
+        .order_by(TemplateBlueprint.updated_at.desc())
+        .limit(1)
+    )
+
+
 def _template_file_out(tf: TemplateFile, tv: TemplateVersion | None, created_by_name: str | None = None,
-                       manifest: dict | None = None) -> dict:
+                       manifest: dict | None = None, blueprint_id: str | None = None) -> dict:
     return {
         "id": tf.id, "name": tf.name, "status": tf.status, "parse_error": tf.parse_error,
         "current_version_id": tf.current_version_id,
+        "blueprint_id": blueprint_id,
         "created_by_name": created_by_name,
         "section_count": tv.section_count if tv else None,
         "template_kind": tv.template_kind if tv else None,
@@ -127,7 +176,9 @@ def list_templates(project_id: str, db: Session = Depends(get_db), user: User = 
     out = []
     for tf in rows:
         tv = db.get(TemplateVersion, tf.current_version_id) if tf.current_version_id else None
-        out.append(_template_file_out(tf, tv, creator_name(db, tf.created_by), _manifest_summary(db, tf.id)))
+        out.append(_template_file_out(
+            tf, tv, creator_name(db, tf.created_by), _manifest_summary(db, tf.id),
+            blueprint_id=_blueprint_id_for(db, tf)))
     return {"items": out}
 
 
@@ -164,6 +215,62 @@ def get_template_sections(version_id: str, tree: bool = True, db: Session = Depe
     if tree:
         return {"items": _section_tree(sections)}
     return {"items": [{"id": s.id, "level": s.level, "title": s.title, "section_path": s.section_path} for s in sections]}
+
+
+class BulkTemplateDelete(BaseModel):
+    template_ids: list[str]
+
+
+MAX_BULK_TEMPLATES = 50
+
+
+@router.post("/templates:delete")
+def delete_templates(body: BulkTemplateDelete, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """Remove several template files, and say what happened to each.
+
+    The same `deleted_at` stamp `DELETE /templates/{id}` applies. The manifests
+    compiled from them are deliberately left in place: a manifest is the contract
+    a finished letter was produced against, and §17 wants that letter traceable
+    to it long after somebody tidied the template list.
+
+    Ownership is checked per template, for the reason every bulk endpoint here
+    checks it per item: a caller can put any id in a JSON array, and one that
+    trusts the array is how one tenant reaches another's.
+
+    **One commit for the whole request.** Unlike `documents:delete`, which unlinks
+    files from disk and so must commit per document, this is a timestamp on rows:
+    the request is atomic, and a failure leaves the workspace as it was.
+    """
+    from datetime import datetime, timezone
+
+    if not body.template_ids:
+        raise error("NO_TEMPLATES", "Select at least one template to delete.", 422)
+    ids = list(dict.fromkeys(body.template_ids))
+    if len(ids) > MAX_BULK_TEMPLATES:
+        raise error(
+            "TOO_MANY_TEMPLATES",
+            f"{len(ids)} templates were selected; this endpoint removes at most "
+            f"{MAX_BULK_TEMPLATES} at a time.",
+            422,
+        )
+
+    stamped = datetime.now(timezone.utc)
+    deleted, refused = [], []
+    for template_id in ids:
+        tf = db.get(TemplateFile, template_id)
+        if not tf or tf.org_id != user.org_id or tf.deleted_at is not None:
+            refused.append({"template_id": template_id, "code": "TEMPLATE_NOT_FOUND",
+                            "name": None, "reason": "This template no longer exists."})
+            continue
+        tf.deleted_at = stamped
+        log_audit(db, user, "Deleted template", "template_file", template_id,
+                  project_id=tf.project_id, severity="warning",
+                  target=f"{tf.name} (bulk of {len(ids)})")
+        deleted.append({"template_id": template_id, "name": tf.name})
+
+    db.commit()
+    return {"requested": len(ids), "deleted": deleted, "refused": refused}
 
 
 @router.delete("/templates/{template_id}")

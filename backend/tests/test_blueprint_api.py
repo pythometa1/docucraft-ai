@@ -318,7 +318,9 @@ def test_a_blueprint_with_no_project_cannot_be_written_out(app_client, org_a):
 def test_the_kits_are_documents_rather_than_field_lists(app_client, org_a):
     token, _project_id, _org_id, _user_id = org_a
     kits = app_client.get("/api/v1/template-blueprint-kits", headers=_auth(token)).json()["items"]
-    assert {k["id"] for k in kits} == {"blank", "offer", "contract", "clinical", "medaff"}
+    assert {k["id"] for k in kits} == {"blank", "offer", "contract", "clinical", "medaff",
+                                       "invoice", "invoice_gst", "invoice_intl",
+        "clinical_icf", "clinical_protocol"}
     assert all(k["paragraph_count"] > 0 for k in kits), "a kit with no prose is a form"
 
 
@@ -566,3 +568,451 @@ def test_operations_proposed_against_a_stale_version_are_refused(app_client, blu
                                 "expected_version_no": 1})
     assert res.status_code == 409
     assert res.json()["detail"]["error"]["code"] == "BLUEPRINT_VERSION_CONFLICT"
+
+
+# ---- opening an editor without paying for a compile ----
+#
+# A compile fails on roughly a third of templates here, and the fix is usually
+# the document rather than the reading. So the project needs an "edit this"
+# button -- and a button that costs one model call per chunk plus a reconcile
+# plus up to twelve review rounds, budgeted five minutes at p95 by §18, is not a
+# button. These pin the three ways in, cheapest first.
+
+def _manifest_for(db, *, org_id, template_file_id, template_version_id, user_id,
+                  fields, version_no=1, status="approved"):
+    from app.models import TemplateManifest
+
+    m = TemplateManifest(
+        org_id=org_id, template_file_id=template_file_id,
+        template_version_id=template_version_id, version_no=version_no, status=status,
+        fields=fields, conditions=[], blocks=[], delete_always=[], confidence=0.9,
+        compiled_by="llm:gpt-5", prescan_summary={}, created_by=user_id)
+    db.add(m)
+    db.flush()
+    return m
+
+
+def test_a_template_already_read_opens_with_no_model_call(app_client, org_a, monkeypatch):
+    """The path that makes an Edit button possible at all.
+
+    Reading and placing were always separate jobs: the compile decides what the
+    template means, `objects_from_compile` decides where those meanings sit. The
+    second needs no model, and `TemplateManifest` already stores everything the
+    first produced. Re-deriving the meaning to redo the placement was an accident
+    of the order this endpoint was written in.
+    """
+    from app.db import SessionLocal
+    from app.models import TemplateVersion
+    from app.routers import blueprints as mod
+
+    token, project_id, org_id, user_id = org_a
+    uploaded = _upload(app_client, token, project_id)
+
+    def explode(*a, **k):  # noqa: ANN001
+        raise AssertionError("a compile must not run when a reading already exists")
+
+    monkeypatch.setattr(mod, "compile_agentic_template", explode)
+
+    db = SessionLocal()
+    try:
+        version = db.get(TemplateVersion, uploaded["current_version_id"])
+        _manifest_for(db, org_id=org_id, template_file_id=uploaded["id"],
+                      template_version_id=version.id, user_id=user_id,
+                      fields=[{"id": "colleague_name", "type": "string",
+                               "slots": [{"kind": "text_match", "text": "<Colleague Name>",
+                                          "paragraph_index": 0}]}])
+        db.commit()
+    finally:
+        db.close()
+
+    response = app_client.post("/api/v1/template-blueprints:from-template",
+                               json={"template_file_id": uploaded["id"]},
+                               headers=_auth(token))
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["kind"] == "legacy"
+    assert created["version"]["body"]["blocks"], "the document must still be readable"
+    # And it says which of the three paths produced it.
+    assert created["version"]["provenance"]["read_from"].startswith("manifest:")
+
+
+def test_asking_twice_returns_the_same_blueprint(app_client, org_a, monkeypatch):
+    """`template_file_id` carries no unique constraint and nothing queried by it,
+    so every call minted a new blueprint and paid for its own compile. Two
+    clicks of an Edit button meant two blueprints able to emit onto one file."""
+    from app.db import SessionLocal
+    from app.models import TemplateVersion
+    from app.routers import blueprints as mod
+
+    token, project_id, org_id, user_id = org_a
+    uploaded = _upload(app_client, token, project_id)
+    monkeypatch.setattr(mod, "compile_agentic_template",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no compile")))
+
+    db = SessionLocal()
+    try:
+        version = db.get(TemplateVersion, uploaded["current_version_id"])
+        _manifest_for(db, org_id=org_id, template_file_id=uploaded["id"],
+                      template_version_id=version.id, user_id=user_id,
+                      fields=[{"id": "x", "type": "string",
+                               "slots": [{"kind": "text_match", "text": "<Colleague Name>",
+                                          "paragraph_index": 0}]}])
+        db.commit()
+    finally:
+        db.close()
+
+    body = {"template_file_id": uploaded["id"]}
+    first = app_client.post("/api/v1/template-blueprints:from-template", json=body,
+                            headers=_auth(token)).json()
+    second = app_client.post("/api/v1/template-blueprints:from-template", json=body,
+                             headers=_auth(token)).json()
+    assert first["id"] == second["id"]
+
+    listed = app_client.get(
+        f"/api/v1/template-blueprints?template_file_id={uploaded['id']}",
+        headers=_auth(token)).json()["items"]
+    assert [b["id"] for b in listed] == [first["id"]]
+
+
+def test_a_failed_reading_is_not_reused(app_client, org_a):
+    """A failed compile stores a manifest with nothing in it, and a blueprint
+    built from one could never be published -- `_lint_current` turns every
+    assertion fault into a blocker, so each unclaimed placeholder would block and
+    the author would have to hand-write the whole reading first. Better to spend
+    the compile, which is what the 503 here proves it tried to do."""
+    from app.db import SessionLocal
+    from app.models import TemplateVersion
+
+    token, project_id, org_id, user_id = org_a
+    uploaded = _upload(app_client, token, project_id)
+
+    db = SessionLocal()
+    try:
+        version = db.get(TemplateVersion, uploaded["current_version_id"])
+        _manifest_for(db, org_id=org_id, template_file_id=uploaded["id"],
+                      template_version_id=version.id, user_id=user_id,
+                      fields=[], status="failed")
+        db.commit()
+    finally:
+        db.close()
+
+    # No provider is configured in the suite, so reaching for the compiler is
+    # observable as the refusal it produces.
+    response = app_client.post("/api/v1/template-blueprints:from-template",
+                               json={"template_file_id": uploaded["id"]},
+                               headers=_auth(token))
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["code"] == "LLM_NOT_CONFIGURED"
+
+
+def test_the_project_row_says_whether_a_blueprint_is_open(app_client, org_a, blueprint):
+    """So the row can offer "continue editing" rather than "edit", and clicking
+    it does not have to guess. The join key has been on `TemplateBlueprint` since
+    it was written; nothing on the template side had looked at it."""
+    from app.db import SessionLocal
+    from app.models import TemplateBlueprint
+
+    token, project_id, blueprint_id, _body = blueprint
+    db = SessionLocal()
+    try:
+        template_file_id = db.get(TemplateBlueprint, blueprint_id).template_file_id
+    finally:
+        db.close()
+
+    items = app_client.get(f"/api/v1/projects/{project_id}/templates",
+                           headers=_auth(token)).json()["items"]
+    mine = next(t for t in items if t["id"] == template_file_id)
+    assert mine["blueprint_id"] == blueprint_id
+
+    # And a template nobody has opened reports None rather than omitting the key,
+    # so the row can branch on it without guessing.
+    fresh = _upload(app_client, token, project_id)
+    items = app_client.get(f"/api/v1/projects/{project_id}/templates",
+                           headers=_auth(token)).json()["items"]
+    assert next(t for t in items if t["id"] == fresh["id"])["blueprint_id"] is None
+
+
+def test_a_refused_publish_leaves_the_template_untouched(app_client, org_a, blueprint):
+    """`emit_blueprint` commits. Writing the real version before the lint had
+    decided meant a publish this endpoint then refused had already appended a
+    version to the customer's template and moved `current_version_id` onto it --
+    a rejected publish that silently changed which file the project fills from.
+    """
+    from app.db import SessionLocal
+    from app.models import TemplateBlueprint, TemplateBlueprintVersion, TemplateFile, TemplateVersion
+
+    token, _project_id, blueprint_id, body = blueprint
+
+    db = SessionLocal()
+    try:
+        row = db.get(TemplateBlueprint, blueprint_id)
+        template_file_id = row.template_file_id
+        before_versions = db.query(TemplateVersion).filter(
+            TemplateVersion.template_file_id == template_file_id).count()
+        before_current = db.get(TemplateFile, template_file_id).current_version_id
+
+        # Two objects claiming one id is a blocking lint finding no disposition
+        # in this request answers, so publish must refuse.
+        current = db.get(TemplateBlueprintVersion, row.current_version_id)
+        objects = list(current.objects or [])
+        assert objects, "the fixture must have produced at least one object"
+        clashing = {**objects[0], "object_id": objects[0]["object_id"]}
+        current.objects = objects + [clashing]
+        db.commit()
+    finally:
+        db.close()
+
+    response = app_client.post(f"/api/v1/template-blueprints/{blueprint_id}:publish",
+                               json={}, headers=_auth(token))
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["code"] == "BLUEPRINT_NOT_PUBLISHABLE"
+
+    db = SessionLocal()
+    try:
+        after_versions = db.query(TemplateVersion).filter(
+            TemplateVersion.template_file_id == template_file_id).count()
+        after_current = db.get(TemplateFile, template_file_id).current_version_id
+        assert after_versions == before_versions, "a refused publish wrote a template version"
+        assert after_current == before_current, "a refused publish moved current_version_id"
+    finally:
+        db.close()
+
+
+# ---- publishing a template whose reading has gone stale ----
+
+def test_publish_refuses_a_stale_reading_and_says_there_is_another_way(app_client, blueprint):
+    """The dead end, and the sign out of it.
+
+    A blueprint's objects and its document drift apart in exactly the case the
+    editor exists for: you open a template to repair a placeholder the compiler
+    could not claim, you repair it, and the objects still do not claim it. The
+    ordinary publish writes the manifest *from those objects*, so it is right to
+    refuse -- but a refusal with no alternative reads as "this template cannot be
+    published", which is false.
+    """
+    from app.db import SessionLocal
+    from app.models import TemplateBlueprint, TemplateBlueprintVersion
+
+    token, _project_id, blueprint_id, _body = blueprint
+    db = SessionLocal()
+    try:
+        row = db.get(TemplateBlueprint, blueprint_id)
+        current = db.get(TemplateBlueprintVersion, row.current_version_id)
+        # A reading that accounts for nothing: every placeholder is now unclaimed.
+        current.objects = []
+        db.commit()
+    finally:
+        db.close()
+
+    response = app_client.post(f"/api/v1/template-blueprints/{blueprint_id}:publish",
+                               json={}, headers=_auth(token))
+    assert response.status_code == 422
+    details = response.json()["detail"]["error"]["details"]
+    assert details["can_recompile"] is True, "the refusal must name the way out"
+
+
+def test_re_reading_does_not_gate_on_the_stale_objects(app_client, blueprint, monkeypatch):
+    """`recompile` publishes the document and lets the compiler read it.
+
+    The objects are not what ships on this path, so gating on them would refuse a
+    template that is now correct for a reading that is merely out of date. Here
+    the objects account for nothing at all and the publish still goes through,
+    because what ships is the compiler's reading of the bytes that shipped.
+    """
+    from app.compiler.rule_compiler import compile_manifest
+    from app.db import SessionLocal
+    from app.models import (
+        TemplateBlueprint, TemplateBlueprintVersion, TemplateFile, TemplateManifest,
+        TemplateVersion,
+    )
+    from app.routers import blueprints as mod
+    from app.templates.parsers.docx_prescan import prescan
+
+    token, _project_id, blueprint_id, _body = blueprint
+
+    class _Outcome:
+        ok = True
+        reason = None
+
+        def __init__(self, manifest):
+            self.manifest = manifest
+
+        def transcript_dicts(self):
+            return [{"stage": "stub"}]
+
+    def fake_compile(path, **kwargs):
+        compiled = compile_manifest(prescan(path))
+        compiled.compiled_by = "llm:stub"
+        return _Outcome(compiled)
+
+    monkeypatch.setattr(mod, "compile_agentic_template", fake_compile)
+
+    db = SessionLocal()
+    try:
+        row = db.get(TemplateBlueprint, blueprint_id)
+        template_file_id = row.template_file_id
+        before = db.query(TemplateVersion).filter(
+            TemplateVersion.template_file_id == template_file_id).count()
+        current = db.get(TemplateBlueprintVersion, row.current_version_id)
+        current.objects = []
+        db.commit()
+    finally:
+        db.close()
+
+    response = app_client.post(f"/api/v1/template-blueprints/{blueprint_id}:publish",
+                               json={"recompile": True}, headers=_auth(token))
+    assert response.status_code == 201, response.text
+    published = response.json()
+
+    db = SessionLocal()
+    try:
+        # The document was appended to the original template file, as an ordinary
+        # publish would, and the file now points at it.
+        after = db.query(TemplateVersion).filter(
+            TemplateVersion.template_file_id == template_file_id).count()
+        assert after == before + 1
+        tf = db.get(TemplateFile, template_file_id)
+        assert tf.current_version_id == published["template_version_id"]
+
+        # And the manifest is the compiler's reading of what was written, not the
+        # blueprint's empty one.
+        manifest = db.get(TemplateManifest, published["manifest_id"])
+        assert manifest.template_version_id == published["template_version_id"]
+        assert manifest.compiled_by == "llm:stub"
+        assert manifest.fields, "the compiler's reading must be what ships"
+        assert manifest.prescan_summary["read_again_after_publish"] is True
+        # Approved, by the person who published it, and this is a change.
+        #
+        # It used to assert "approval stays a person's act" and leave the
+        # manifest in `draft` -- which meant a republished template did not take
+        # effect: the project kept generating from whatever was approved *before*
+        # the edit, and nothing on the screen said so. The act is still a
+        # person's, and still theirs to be capable of: `try_auto_approve` refuses
+        # for a role without APPROVE_MANIFEST and for any legally-binding
+        # template, which is what the two tests below pin.
+        assert manifest.status == "approved"
+        assert manifest.approved_by
+        assert published["approval_blocked_reason"] is None
+    finally:
+        db.close()
+
+
+def test_publishing_does_not_confer_an_approval_the_role_withholds(app_client, blueprint, monkeypatch):
+    """A mapper may publish a template and still not sign one off.
+
+    Publishing writes a manifest and the manifest is approved on the way out, so
+    without a capability check publishing would be an approval button for a role
+    defined by not having one."""
+    from app.compiler.rule_compiler import compile_manifest
+    from app.db import SessionLocal
+    from app.models import TemplateBlueprint, TemplateManifest, User
+    from app.routers import blueprints as mod
+    from app.templates.parsers.docx_prescan import prescan
+    from sqlalchemy import select
+
+    token, _project_id, blueprint_id, _body = blueprint
+
+    class _Outcome:
+        ok = True
+        reason = None
+
+        def __init__(self, manifest):
+            self.manifest = manifest
+
+        def transcript_dicts(self):
+            return [{"stage": "stub"}]
+
+    def fake_compile(path, **kwargs):
+        compiled = compile_manifest(prescan(path))
+        compiled.compiled_by = "llm:stub"
+        return _Outcome(compiled)
+
+    monkeypatch.setattr(mod, "compile_agentic_template", fake_compile)
+
+    # Demoted for the length of this test and put back in the `finally`. The
+    # database lives for the whole session, so a role left changed here is a role
+    # changed for every test that runs afterwards -- which is a 403 out of nowhere
+    # in a file that never mentions roles. This is the shape `test_authz` uses
+    # for the same reason.
+    db = SessionLocal()
+    try:
+        user = db.scalar(select(User).where(User.email == "user-a@tenant.test"))
+        original = user.role_key
+        user.role_key = "mapper"  # may compile and publish, may not approve
+        db.commit()
+    finally:
+        db.close()
+
+    try:
+        response = app_client.post(f"/api/v1/template-blueprints/{blueprint_id}:publish",
+                                   json={"recompile": True}, headers=_auth(token))
+        assert response.status_code == 201, response.text
+        published = response.json()
+        assert published["manifest_status"] == "draft"
+        assert "cannot approve" in published["approval_blocked_reason"]
+
+        db = SessionLocal()
+        try:
+            assert db.get(TemplateManifest, published["manifest_id"]).status == "draft"
+        finally:
+            db.close()
+    finally:
+        db = SessionLocal()
+        try:
+            db.scalar(select(User).where(User.email == "user-a@tenant.test")).role_key = original
+            db.commit()
+        finally:
+            db.close()
+
+
+def test_a_re_read_that_cannot_be_read_publishes_nothing(app_client, blueprint, monkeypatch):
+    """The compile runs before anything is written, so a model that cannot read
+    the document leaves the customer's template exactly as it was rather than
+    appending a version whose manifest never arrived."""
+    from app.db import SessionLocal
+    from app.models import TemplateBlueprint, TemplateFile, TemplateVersion
+    from app.routers import blueprints as mod
+
+    token, _project_id, blueprint_id, _body = blueprint
+
+    class _Failed:
+        ok = False
+        reason = "the model returned nothing usable"
+
+        class manifest:  # noqa: N801
+            compiled_by = "llm_failed"
+            fields = []
+            conditions = []
+            blocks = []
+            delete_always = []
+            confidence = 0.0
+            prescan_summary = {}
+
+        def transcript_dicts(self):
+            return []
+
+    monkeypatch.setattr(mod, "compile_agentic_template", lambda path, **k: _Failed())
+
+    db = SessionLocal()
+    try:
+        row = db.get(TemplateBlueprint, blueprint_id)
+        template_file_id = row.template_file_id
+        before = db.query(TemplateVersion).filter(
+            TemplateVersion.template_file_id == template_file_id).count()
+        before_current = db.get(TemplateFile, template_file_id).current_version_id
+    finally:
+        db.close()
+
+    response = app_client.post(f"/api/v1/template-blueprints/{blueprint_id}:publish",
+                               json={"recompile": True}, headers=_auth(token))
+    assert response.status_code == 502
+    assert response.json()["detail"]["error"]["code"] == "TEMPLATE_NOT_READ"
+
+    db = SessionLocal()
+    try:
+        after = db.query(TemplateVersion).filter(
+            TemplateVersion.template_file_id == template_file_id).count()
+        assert after == before, "a failed re-read wrote a template version"
+        assert db.get(TemplateFile, template_file_id).current_version_id == before_current
+    finally:
+        db.close()

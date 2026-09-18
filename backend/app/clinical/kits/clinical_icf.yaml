@@ -1,0 +1,98 @@
+name: Informed consent form
+description: Plain-language study information, an optional visit schedule, and consent signatures.
+fields: [study_title, protocol_number, sponsor_name, investigator_name, document_number,
+         document_date, version_label, purpose_description, procedures_description,
+         risks_description, benefits_description, visit_name, visit_week,
+         visit_procedures, participant_name]
+field_types:
+  document_date: date
+  visit_week: number
+table_rows:
+  - id: visits
+    iterate_over: visits
+    empty_behaviour: REMOVE_TABLE
+    required: false
+    columns:
+      - {token: "<Visit Name>", source_key: visit_name, type: string}
+      - {token: "<Visit Week>", source_key: visit_week, type: number}
+      - {token: "<Visit Procedures>", source_key: visit_procedures, type: string}
+blocks:
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "Informed Consent Form"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Study: "}
+      - {role: placeholder, text: "<Study Title>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Protocol "}
+      - {role: placeholder, text: "<Protocol Number>"}
+      - {role: static, text: ", sponsored by "}
+      - {role: placeholder, text: "<Sponsor Name>"}
+      - {role: static, text: ". Principal investigator: "}
+      - {role: placeholder, text: "<Investigator Name>"}
+      - {role: static, text: "."}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Document "}
+      - {role: placeholder, text: "<Document Number>"}
+      - {role: static, text: ", version "}
+      - {role: placeholder, text: "<Version Label>"}
+      - {role: static, text: ", dated "}
+      - {role: placeholder, text: "<Document Date>"}
+      - {role: static, text: "."}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Why this study is being done"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Purpose Description>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "What taking part involves"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Procedures Description>"}
+  - kind: table
+    rows:
+      - - [{kind: paragraph, segments: [{role: static, text: "Visit"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Week"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "What happens"}]}]
+      - - [{kind: paragraph, segments: [{role: placeholder, text: "<Visit Name>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Visit Week>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Visit Procedures>"}]}]
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Risks"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Risks Description>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Benefits"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Benefits Description>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Your information, and your choice"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Your records will be kept confidential to the extent the law allows, and you may withdraw from the study at any time without giving a reason and without any effect on your care."}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Consent"}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "I have read this form, my questions have been answered, and I agree to take part in this study."}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Participant: "}
+      - {role: placeholder, text: "<Participant Name>"}
+      - {role: static, text: "   Date: "}
+      - {role: placeholder, text: "<Document Date>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Person obtaining consent: "}
+      - {role: placeholder, text: "<Investigator Name>"}

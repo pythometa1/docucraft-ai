@@ -150,6 +150,16 @@ def _section_objects(compiled, texts, findings, status):
     """SECTION objects, and the paragraph range each one ended up claiming."""
     objects, ranges = [], {}
     for block in getattr(compiled, "blocks", None) or ():
+        if str(block.get("object_type") or "").upper() == "TABLE_ROW":
+            # Not a region: a §6 TABLE_ROW is one template row located by its
+            # column tokens, and lifting it as a paragraph range would report a
+            # correct manifest as unanchorable. It rides through unchanged, the
+            # same way `reslot_against` passes every non-FIELD object through.
+            attributes = dict(block)
+            block_id = attributes.pop("id", None) or attributes.pop("object_id", None)
+            attributes.pop("object_type", None)
+            objects.append({"object_id": block_id, "object_type": "TABLE_ROW", **attributes})
+            continue
         attributes = dict(block)
         block_id = attributes.pop("id", None)
         start, end = attributes.get("start_paragraph"), attributes.get("end_paragraph")

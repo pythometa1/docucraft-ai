@@ -1,8 +1,39 @@
+import uuid
+from datetime import datetime, timezone
+
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import settings
 from app.tenancy import apply_scope_to_session, release_org_scope
+
+
+def uid() -> str:
+    """Primary-key default for every table. Lives HERE, in the leaf the model
+    modules already import `Base` from, so a service's models module
+    (app/finance/models.py, ...) never has to import back into the middle of
+    `app.models`'s own initialisation to get it."""
+    return str(uuid.uuid4())
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def delete_in_order(db, *levels) -> None:
+    """Delete rows level by level -- children first -- flushing after each.
+
+    The models declare foreign keys but no relationships, so SQLAlchemy's unit
+    of work does not know a draft must go before its section: inside a single
+    flush it may issue the parent's DELETE first. SQLite, which runs with
+    foreign keys off, never notices. PostgreSQL refuses, and the endpoint that
+    purges a project fails on the database it ships on. Flushing between levels
+    makes the order the one the caller wrote.
+    """
+    for rows in levels:
+        for row in rows:
+            db.delete(row)
+        db.flush()
 
 def _connect_args() -> dict:
     """Driver options that make the two backends agree about time.

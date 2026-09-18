@@ -1,0 +1,95 @@
+name: Invoice
+description: A services invoice with a repeating line-item table, subtotal, tax and total.
+fields: [business_name, business_address, business_email, invoice_number, invoice_date,
+         due_date, customer_name, customer_address, currency, item_description, quantity,
+         unit_price, amount, subtotal, tax_rate, tax_amount, grand_total, payment_terms]
+field_types:
+  invoice_date: date
+  due_date: date
+  quantity: number
+  unit_price: currency
+  amount: currency
+  subtotal: currency
+  tax_amount: currency
+  grand_total: currency
+  tax_rate: number
+table_rows:
+  - id: line_items
+    iterate_over: line_items
+    empty_behaviour: REMOVE_ROW
+    required: true
+    columns:
+      - {token: "<Item Description>", source_key: item_description, type: string}
+      - {token: "<Quantity>", source_key: quantity, type: number}
+      - {token: "<Unit Price>", source_key: unit_price, type: currency}
+      - {token: "<Amount>", source_key: amount, type: currency}
+blocks:
+  - kind: paragraph
+    style: Heading 1
+    segments: [{role: static, text: "INVOICE"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Business Name>"}
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Business Address>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Email: "}
+      - {role: placeholder, text: "<Business Email>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Invoice number: "}
+      - {role: placeholder, text: "<Invoice Number>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Invoice date: "}
+      - {role: placeholder, text: "<Invoice Date>"}
+      - {role: static, text: "   Due date: "}
+      - {role: placeholder, text: "<Due Date>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Bill to"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Customer Name>"}
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Customer Address>"}
+  - kind: table
+    rows:
+      - - [{kind: paragraph, segments: [{role: static, text: "Description"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Qty"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Unit price"}]}]
+        - [{kind: paragraph, segments: [{role: static, text: "Amount"}]}]
+      - - [{kind: paragraph, segments: [{role: placeholder, text: "<Item Description>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Quantity>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Unit Price>"}]}]
+        - [{kind: paragraph, segments: [{role: placeholder, text: "<Amount>"}]}]
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Subtotal: "}
+      - {role: placeholder, text: "<Currency>"}
+      - {role: static, text: " "}
+      - {role: placeholder, text: "<Subtotal>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Tax ("}
+      - {role: placeholder, text: "<Tax Rate>"}
+      - {role: static, text: "%): "}
+      - {role: placeholder, text: "<Tax Amount>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Total due: "}
+      - {role: placeholder, text: "<Currency>"}
+      - {role: static, text: " "}
+      - {role: placeholder, text: "<Grand Total>"}
+  - kind: paragraph
+    style: Heading 2
+    segments: [{role: static, text: "Payment terms"}]
+  - kind: paragraph
+    segments:
+      - {role: placeholder, text: "<Payment Terms>"}
+  - kind: paragraph
+    segments:
+      - {role: static, text: "Thank you for your business."}

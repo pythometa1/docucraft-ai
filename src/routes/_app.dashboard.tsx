@@ -52,16 +52,30 @@ import {
   Archive,
   ExternalLink,
   Loader2,
+  Sparkles,
+  FolderKanban,
+  CheckCircle2,
+  AlertTriangle,
+  type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { FadeIn, Stagger, StaggerItem, useCountUp } from "@/components/motion";
+import { SkeletonBar, TableSkeleton, PolishedEmpty } from "@/components/skeletons";
+import { ErrorBanner } from "@/components/error-banner";
+import { BulkSelectBar, SelectBox, useSelection } from "@/components/bulk-select";
+import { Checkbox } from "@/components/ui/checkbox";
+// JPEG, not PNG. The source artwork is a photographic render with no
+// transparency, and PNG stores that losslessly for 1.1 MB -- five times the
+// weight of the whole rest of this route, on the first screen after sign-in.
+import aiDocumentHero from "@/assets/ai-document-hero.jpg";
 
 export const Route = createFileRoute("/_app/dashboard")({
   head: () => ({
     meta: [
       { title: "Dashboard — DocuMind AI" },
-      { name: "description", content: "Manage your AI-assisted document generation projects." },
+      { name: "description", content: "Turn a Word template and a spreadsheet into finished documents." },
       { property: "og:title", content: "Dashboard — DocuMind AI" },
-      { property: "og:description", content: "Content studio for AI-generated documents." },
+      { property: "og:description", content: "One workspace for every document your templates produce." },
     ],
   }),
   component: Dashboard,
@@ -145,6 +159,11 @@ function Dashboard() {
   const [total, setTotal] = useState(0);
   const [hasNext, setHasNext] = useState(false);
   const [loading, setLoading] = useState(true);
+  /** The server's own words for why the last list request failed, kept in state
+   *  rather than thrown at a toast: a toast is gone in four seconds, and the
+   *  failure that left this table empty needs to stay next to the empty table
+   *  for as long as it is empty. Cleared only by a load that succeeds. */
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [renameTarget, setRenameTarget] = useState<Row | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Row | null>(null);
@@ -182,9 +201,10 @@ function Dashboard() {
       setRows(page.map(mapRow));
       setTotal(known);
       setHasNext(offset + page.length < known);
+      setLoadError(null);
     } catch (e: any) {
       if (seq !== reqRef.current) return;
-      toast.error("Could not load projects", { description: e?.message ?? String(e) });
+      setLoadError(e?.message ?? String(e));
     } finally {
       if (seq === reqRef.current) setLoading(false);
     }
@@ -198,6 +218,13 @@ function Dashboard() {
   }, [load, search]);
 
   const resetToFirstPage = () => setOffset(0);
+
+  // Selection is by project id, which matters more here than on the other lists:
+  // this table is paged, and `rows` is replaced wholesale on every search, filter
+  // and page change. `useSelection` intersects the ticked ids with what is
+  // currently on screen, so a project ticked on page 1 is not silently deleted
+  // from page 2 -- the count and the request only ever cover visible rows.
+  const sel = useSelection(rows, (r: Row) => String(r.id));
 
   const runRowAction = async (row: Row, action: () => Promise<unknown>, success: string, failure: string): Promise<boolean> => {
     // Returning undefined here read as failure to `confirmDelete`, which then
@@ -236,31 +263,178 @@ function Dashboard() {
   const shownCount = total;
   const activeStatus = STATUS_FILTERS.find((s) => s.value === status);
   const page = Math.floor(offset / PAGE_SIZE) + 1;
+  const narrowed = search !== "" || status !== "all";
+
+  // Only when there is nothing on screen yet. A refresh or a page step keeps the
+  // rows it already has and lets them be replaced in place -- swapping a full
+  // table for shimmer on every keystroke of the debounced search is more motion
+  // than the wait deserves.
+  const showSkeleton = loading && rows.length === 0;
+
+  // What we are allowed to print as a number.
+  //
+  // A request that failed tells us nothing about the workspace, so nothing
+  // derived from it may be rendered as a figure: a tile reading "0" says "we
+  // counted, and there were none" when the truth is "we asked, and never found
+  // out". Three states rather than two --
+  //
+  //   showSkeleton    the first request is still in flight and nothing has ever
+  //                   landed: the bars stand in, as before.
+  //   figuresUnknown  it failed and no earlier page survived. Every derived
+  //                   figure becomes a dash with the reason beside it.
+  //   figuresStale    it failed but an earlier page is still on screen, so the
+  //                   figures are real -- just not refreshed, and labelled so.
+  const figuresUnknown = loadError != null && rows.length === 0 && !showSkeleton;
+  const figuresStale = loadError != null && rows.length > 0;
+  /** Marks a caption whose figure is the last one that loaded, not the current one. */
+  const asOf = (caption: string) => (figuresStale ? `${caption} · not refreshed` : caption);
+
+  // Counted off the rows already on screen rather than fetched: this route asks
+  // the server for exactly one page, and a second count query would fire again
+  // on every keystroke and every page step. The captions say "on this page" so
+  // the figures cannot be read as a claim about the whole workspace.
+  const onPage = {
+    running: rows.filter((r) => r.rawStatus === "in_progress").length,
+    completed: rows.filter((r) => r.rawStatus === "completed" || r.rawStatus === "archived").length,
+    failed: rows.filter((r) => r.rawStatus === "failed").length,
+  };
+
+  // Under `figuresUnknown` the tiles keep their labels and their places -- the
+  // strip is the shape of the page and removing it would move everything below
+  // it -- but every value is null and every tone drops to idle: a "Needs a look"
+  // tile still glowing blocked, or a spinner still turning, would be claiming a
+  // state we no longer have any evidence for.
+  const unknownCaption = "couldn't be loaded";
+  const stats: StatTileProps[] = figuresUnknown
+    ? [
+        { label: "Projects", value: null, caption: unknownCaption, tone: "idle", icon: FolderKanban },
+        { label: "Running now", value: null, caption: unknownCaption, tone: "idle", icon: Loader2 },
+        { label: "Completed", value: null, caption: unknownCaption, tone: "idle", icon: CheckCircle2 },
+        { label: "Needs a look", value: null, caption: unknownCaption, tone: "idle", icon: AlertTriangle },
+      ]
+    : [
+        {
+          label: "Projects",
+          value: shownCount,
+          caption: asOf(narrowed ? "matching this view" : "in your workspace"),
+          tone: "brand",
+          icon: FolderKanban,
+        },
+        {
+          label: "Running now",
+          value: onPage.running,
+          caption: asOf("on this page"),
+          tone: onPage.running > 0 ? "active" : "idle",
+          icon: Loader2,
+          // Not while the figure is stale: a spinner is a claim that something is
+          // happening right now, and a failed refresh is the one moment we cannot
+          // make it.
+          spin: !figuresStale && onPage.running > 0,
+        },
+        {
+          label: "Completed",
+          value: onPage.completed,
+          caption: asOf("on this page"),
+          tone: onPage.completed > 0 ? "confident" : "idle",
+          icon: CheckCircle2,
+        },
+        {
+          label: "Needs a look",
+          value: onPage.failed,
+          caption: asOf("on this page"),
+          tone: onPage.failed > 0 ? "blocked" : "idle",
+          icon: AlertTriangle,
+        },
+      ];
+
+  const clearFilters = () => {
+    setSearch("");
+    setStatus("all");
+    setOffset(0);
+  };
 
   return (
     <div className="p-8 space-y-8">
-      {/* Welcome banner */}
-      <div className="relative overflow-hidden rounded-2xl border border-border bg-surface p-8 md:p-10">
-        <div className="absolute inset-0 bg-hero-orbs opacity-70 pointer-events-none" />
-        <div className="relative grid md:grid-cols-[1fr_auto] gap-8 items-center">
-          <div>
-            <h1 className="text-4xl md:text-5xl font-bold tracking-tight text-gradient">
+      {/* The hero.
+       *
+       *  The artwork is a real <img> rather than a CSS background: it is the one
+       *  thing on this page that explains what the product does at a glance, and
+       *  a background image is nothing at all to a screen reader.
+       *
+       *  The scrim over it is mixed from `surface`, not from black. This app ships
+       *  a light theme as well, and a black wash that makes copy legible on the
+       *  dark ground turns the light one into white text on charcoal inside an
+       *  otherwise white page. Reading the same token as the panel it sits in, the
+       *  artwork fades toward whatever the page ground happens to be and the copy
+       *  keeps a near-solid field behind it in both. */}
+      <FadeIn>
+        <section className="relative isolate flex min-h-[300px] items-center overflow-hidden rounded-2xl surface-raised md:min-h-[360px]">
+          <img
+            src={aiDocumentHero}
+            alt="Pages of a template streaming into a glowing network core and leaving the other side as finished documents"
+            className="pointer-events-none absolute inset-0 h-full w-full max-w-full object-cover object-[68%_50%]"
+          />
+          {/* Two scrims. The horizontal one carries the copy on a wide screen,
+              where the text occupies the left half and the artwork can keep the
+              right; on a narrow one the copy runs the full width, so the same
+              gradient holds far more of the surface and the picture becomes a
+              tint behind the words rather than something competing with them. */}
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-surface from-30% via-surface/95 to-surface/65 md:via-surface/85 md:to-surface/20" />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-surface via-surface/45 to-transparent md:via-transparent" />
+          <div className="pointer-events-none absolute inset-0 grid-noise opacity-40" />
+
+          <div className="relative max-w-2xl p-8 md:p-12">
+            <span className="inline-flex items-center gap-2 rounded-full border border-brand/30 bg-brand/10 px-3 py-1 text-xs font-medium text-brand">
+              <Sparkles className="h-3.5 w-3.5" />
+              Document workspace
+            </span>
+            <h1 className="mt-4 text-4xl md:text-5xl font-bold tracking-tight text-gradient">
               Welcome, {firstName}
             </h1>
-            <p className="mt-3 text-muted-foreground max-w-xl">
-              Create and manage AI-assisted document generation projects from a single workspace.
+            <p className="mt-3 max-w-xl text-[15px] leading-relaxed text-muted-foreground">
+              Turn a Word template and a spreadsheet into finished documents. The engine reads your
+              template, matches it against your columns and writes one document per row — you see
+              what it understood before anything is generated.
             </p>
+            <div className="mt-7">
+              <button
+                onClick={() => setCreateOpen(true)}
+                className="sheen h-10 inline-flex items-center gap-2 rounded-lg bg-gradient-brand px-5 text-sm font-medium text-white hover:opacity-90"
+              >
+                <span className="sheen-layer" />
+                <Plus className="relative h-4 w-4" />
+                <span className="relative">Create project</span>
+              </button>
+            </div>
           </div>
-          <WelcomeIllustration />
-        </div>
-      </div>
+        </section>
+      </FadeIn>
+
+      <Stagger className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {stats.map((s) => (
+          <StaggerItem key={s.label}>
+            <StatTile {...s} loading={showSkeleton} />
+          </StaggerItem>
+        ))}
+      </Stagger>
 
       {/* Content studio */}
       <div>
         <div className="flex items-end justify-between gap-4 flex-wrap">
           <div>
+            {/* The count is held back until the first page lands: a heading that
+                says "(0)" and then corrects itself to "(41)" has told the user
+                something untrue for as long as the request took. It is dropped
+                entirely -- not shown as "(0)" -- when the load failed and there
+                is nothing to count from, since the count is unknown rather than
+                nought; the banner below carries why. */}
             <h2 className="text-2xl font-semibold tracking-tight">
-              Content studio <span className="text-muted-foreground font-normal">({shownCount})</span>
+              Content studio{" "}
+              {showSkeleton ? (
+                <SkeletonBar className="inline-block h-4 w-10 align-middle" />
+              ) : figuresUnknown ? null : (
+                <span className="text-muted-foreground font-normal">({shownCount})</span>
+              )}
             </h2>
             <p className="text-sm text-muted-foreground mt-1">
               Start by creating a project. Everything you create will appear here for easy access and management.
@@ -282,7 +456,7 @@ function Dashboard() {
                 <button
                   title={activeStatus ? `Status: ${activeStatus.label}` : "Filter by status"}
                   className={cn(
-                    "h-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center gap-1.5 text-muted-foreground",
+                    "h-9 rounded-lg surface-raised hover:bg-accent flex items-center justify-center gap-1.5 text-muted-foreground",
                     activeStatus ? "px-3 border-brand/40 text-brand" : "w-9",
                   )}
                 >
@@ -311,7 +485,7 @@ function Dashboard() {
               onClick={() => void load()}
               disabled={loading}
               title="Refresh"
-              className="h-9 w-9 rounded-lg border border-border bg-surface hover:bg-accent flex items-center justify-center text-muted-foreground disabled:opacity-50"
+              className="h-9 w-9 rounded-lg surface-raised hover:bg-accent flex items-center justify-center text-muted-foreground disabled:opacity-50"
             >
               <RefreshCcw className={cn("h-4 w-4", loading && "animate-spin")} />
             </button>
@@ -324,12 +498,53 @@ function Dashboard() {
           </div>
         </div>
 
+        {/* Above the table rather than over it: the rows underneath may still be
+            the last good page, and hiding them behind a failure would throw away
+            the only data the user still has. */}
+        {loadError && (
+          <ErrorBanner
+            className="mt-6"
+            title={figuresStale ? "Could not refresh your projects" : "Could not load your projects"}
+            message={
+              figuresStale
+                ? "Nothing has been changed — the refresh failed, so the rows and figures below are the ones from the last load that succeeded and may be out of date."
+                : "Nothing has been changed — the list just could not be fetched, so the counts above are unknown rather than zero. Try again, or check that you are still signed in."
+            }
+            detail={loadError}
+            onRetry={() => { void load(); }}
+            retrying={loading}
+          />
+        )}
+
+        {/* Only once something is ticked. A destructive control sitting on the
+            dashboard permanently, with nothing selected, is one mis-click from a
+            dialog nobody meant to open. */}
+        {sel.chosen.length > 0 && (
+          <div className="mt-6 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-2">
+            <BulkSelectBar
+              selection={sel}
+              noun="project" pluralNoun="projects"
+              names={rows.filter((r) => sel.has(r.id)).map((r) => r.name)}
+              onDelete={(ids) => api.deleteProjects(ids)}
+              onDone={() => load()}
+            />
+          </div>
+        )}
+
         {/* Table */}
-        <div className="mt-6 rounded-xl border border-border bg-surface overflow-hidden">
+        <div className="mt-6 rounded-xl surface-raised overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr className="bg-gradient-brand text-white text-left text-[11px] uppercase tracking-wider">
+                  <th className="px-4 py-3 w-10">
+                    <Checkbox
+                      checked={sel.allChosen}
+                      onCheckedChange={(v) => sel.setAll(v === true)}
+                      aria-label="Select all projects on this page"
+                      className="border-white/70 data-[state=checked]:bg-white data-[state=checked]:text-brand"
+                    />
+                  </th>
                   <th className="px-4 py-3 font-semibold whitespace-nowrap">Project name</th>
                   <th className="px-4 py-3 font-semibold whitespace-nowrap">Project ID</th>
                   <th className="px-4 py-3 font-semibold whitespace-nowrap">Document type</th>
@@ -340,126 +555,177 @@ function Dashboard() {
                   <th className="px-4 py-3 font-semibold whitespace-nowrap text-right pr-6">Actions</th>
                 </tr>
               </thead>
-              <tbody>
-                {rows.map((p, idx) => (
-                  <tr
-                    key={p.id}
-                    className={cn(
-                      "border-t border-border hover:bg-accent/40 transition-colors group",
-                      idx % 2 === 1 && "bg-surface-elevated/30",
-                      busyId === p.id && "opacity-60",
-                    )}
-                  >
-                    <td className="px-4 py-3 max-w-[220px]">
-                      <Link
-                        to="/projects/$id"
-                        params={{ id: p.id }}
-                        className="block truncate font-medium hover:text-brand hover:underline"
-                        title={p.name}
-                      >
-                        {p.name}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-3 font-mono text-sm text-muted-foreground whitespace-nowrap">{p.displayId}</td>
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <span className="inline-flex items-center gap-2">
-                        <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-                        <span className="truncate">{p.documentType}</span>
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <span
-                        className={cn(
-                          "inline-flex items-center whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-medium leading-5",
-                          FUNCTION_COLORS[p.function],
-                        )}
-                      >
-                        {p.function}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-sm whitespace-nowrap">
-                      <DateCell v={p.createdAt} />
-                    </td>
-                    <td className="px-4 py-3 text-sm whitespace-nowrap">
-                      <DateCell v={p.modifiedAt} />
-                    </td>
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <StatusBadge status={p.status} />
-                    </td>
-                    <td className="px-4 py-3 pr-6">
-                      {/* Rename stays on the row because it is the everyday edit;
-                          Delete lives in the menu instead of beside it, so the one
-                          irreversible action is not a mis-click away from the one
-                          harmless one. */}
-                      <div className="flex items-center justify-end gap-1 opacity-70 group-hover:opacity-100">
-                        <button
-                          onClick={() => setRenameTarget(p)}
-                          disabled={busyId != null}
-                          title="Rename project"
-                          className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-50"
+              {/* The skeleton stands in only for the very first page, and it is
+                  nine columns wide on purpose: a placeholder narrower than the
+                  table it replaces makes the header jump sideways the moment the
+                  rows land. */}
+              {showSkeleton ? (
+                <TableSkeleton rows={6} cols={9} />
+              ) : (
+                <tbody>
+                  {rows.map((p, idx) => (
+                    <tr
+                      key={p.id}
+                      className={cn(
+                        "border-t border-border hover:bg-accent/40 transition-colors group",
+                        idx % 2 === 1 && "bg-surface-elevated/30",
+                        sel.has(p.id) && "bg-brand/5",
+                        busyId === p.id && "opacity-60",
+                      )}
+                    >
+                      <td className="px-4 py-3">
+                        <SelectBox id={p.id} selection={sel} label={p.name} />
+                      </td>
+                      <td className="px-4 py-3 max-w-[220px]">
+                        <Link
+                          to="/projects/$id"
+                          params={{ id: p.id }}
+                          className="block truncate font-medium hover:text-brand hover:underline"
+                          title={p.name}
                         >
-                          <Pencil className="h-4 w-4" />
-                        </button>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              disabled={busyId != null}
-                              title="More options"
-                              className="p-1.5 rounded hover:bg-accent text-muted-foreground disabled:opacity-50"
-                            >
-                              {busyId === p.id
-                                ? <Loader2 className="h-4 w-4 animate-spin" />
-                                : <MoreHorizontal className="h-4 w-4" />}
-                            </button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="w-44">
-                            <DropdownMenuItem
-                              onSelect={() => navigate({ to: "/projects/$id", params: { id: p.id } })}
-                            >
-                              <ExternalLink className="h-4 w-4" /> Open
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={() => setRenameTarget(p)}>
-                              <Pencil className="h-4 w-4" /> Rename
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              disabled={p.rawStatus === "archived"}
-                              onSelect={() => { void archive(p); }}
-                            >
-                              <Archive className="h-4 w-4" />
-                              {p.rawStatus === "archived" ? "Archived" : "Archive"}
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              className="text-destructive focus:text-destructive"
-                              onSelect={() => setDeleteTarget(p)}
-                            >
-                              <Trash2 className="h-4 w-4" /> Delete
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {rows.length === 0 && (
-                  <tr>
-                    <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground text-sm">
-                      {loading
-                        ? "Loading projects…"
-                        : search || status !== "all"
-                          ? "No projects match your search."
-                          : "No projects yet. Create one to get started."}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
+                          {p.name}
+                        </Link>
+                      </td>
+                      <td className="px-4 py-3 font-mono text-sm text-muted-foreground whitespace-nowrap">{p.displayId}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <span className="inline-flex items-center gap-2">
+                          <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                          <span className="truncate">{p.documentType}</span>
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <span
+                          className={cn(
+                            "inline-flex items-center whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-medium leading-5",
+                            FUNCTION_COLORS[p.function],
+                          )}
+                        >
+                          {p.function}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-sm whitespace-nowrap">
+                        <DateCell v={p.createdAt} />
+                      </td>
+                      <td className="px-4 py-3 text-sm whitespace-nowrap">
+                        <DateCell v={p.modifiedAt} />
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <StatusBadge status={p.status} />
+                      </td>
+                      <td className="px-4 py-3 pr-6">
+                        {/* Rename stays on the row because it is the everyday edit;
+                            Delete lives in the menu instead of beside it, so the one
+                            irreversible action is not a mis-click away from the one
+                            harmless one. */}
+                        <div className="flex items-center justify-end gap-1 opacity-70 group-hover:opacity-100">
+                          <button
+                            onClick={() => setRenameTarget(p)}
+                            disabled={busyId != null}
+                            title="Rename project"
+                            className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground disabled:opacity-50"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                disabled={busyId != null}
+                                title="More options"
+                                className="p-1.5 rounded hover:bg-accent text-muted-foreground disabled:opacity-50"
+                              >
+                                {busyId === p.id
+                                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                                  : <MoreHorizontal className="h-4 w-4" />}
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-44">
+                              <DropdownMenuItem
+                                onSelect={() => navigate({ to: "/projects/$id", params: { id: p.id } })}
+                              >
+                                <ExternalLink className="h-4 w-4" /> Open
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => setRenameTarget(p)}>
+                                <Pencil className="h-4 w-4" /> Rename
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                disabled={p.rawStatus === "archived"}
+                                onSelect={() => { void archive(p); }}
+                              >
+                                <Archive className="h-4 w-4" />
+                                {p.rawStatus === "archived" ? "Archived" : "Archive"}
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                className="text-destructive focus:text-destructive"
+                                onSelect={() => setDeleteTarget(p)}
+                              >
+                                <Trash2 className="h-4 w-4" /> Delete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {rows.length === 0 && (
+                    <tr>
+                      <td colSpan={9} className="p-0">
+                        {loadError ? (
+                          // The banner above already carries the server's words;
+                          // repeating them inside the table would say it twice, and
+                          // PolishedEmpty would say the opposite -- that there is
+                          // nothing here -- when the truth is that we do not know.
+                          <div className="px-4 py-14 text-center text-sm text-muted-foreground">
+                            Nothing to show while the list is unavailable.
+                          </div>
+                        ) : narrowed ? (
+                          <PolishedEmpty
+                            className="rounded-none border-0 bg-transparent py-16"
+                            icon={<Search className="h-6 w-6" />}
+                            title="No projects match that"
+                            subtitle="Nothing here matches your search or the status filter. Widen either one to see more of the workspace."
+                            action={
+                              <Button variant="outline" onClick={clearFilters}>
+                                Clear search and filters
+                              </Button>
+                            }
+                          />
+                        ) : (
+                          <PolishedEmpty
+                            className="rounded-none border-0 bg-transparent py-16"
+                            icon={<FileText className="h-6 w-6" />}
+                            title="No projects yet"
+                            subtitle="A project pairs one Word template with the spreadsheet that fills it. Create one and every document it produces lands here."
+                            action={
+                              <Button onClick={() => setCreateOpen(true)}>
+                                <Plus className="h-4 w-4" /> Create project
+                              </Button>
+                            }
+                          />
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              )}
             </table>
           </div>
           <div className="border-t border-border px-4 py-3 flex items-center justify-between text-xs text-muted-foreground">
             <div>
-              {rows.length === 0
-                ? "Showing 0 projects"
-                : `Showing ${offset + 1}-${offset + rows.length} of ${total}`}
+              {/* "Showing 0 projects" is a measurement, and after a failed
+                  request there is nothing to measure -- so the failure says so
+                  in its own words instead of borrowing the empty result's. */}
+              {showSkeleton ? (
+                <SkeletonBar className="h-3 w-36" />
+              ) : figuresUnknown ? (
+                "Count unavailable — the list could not be loaded"
+              ) : rows.length === 0 ? (
+                "Showing 0 projects"
+              ) : figuresStale ? (
+                `Showing ${offset + 1}-${offset + rows.length} of ${total} · not refreshed`
+              ) : (
+                `Showing ${offset + 1}-${offset + rows.length} of ${total}`
+              )}
             </div>
             <div className="flex items-center gap-1">
               <button
@@ -516,6 +782,78 @@ function Dashboard() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
+  );
+}
+
+type StatTone = "brand" | "active" | "confident" | "blocked" | "idle";
+
+/** The intelligence ramp rather than the raw palette. "Running" and "sure" have
+ *  to be the same colour on this page as they are in the processing banner and
+ *  the confidence bands, or every screen ends up telling its own story about
+ *  what amber means. `brand` is here for the one tile that is not a state at all
+ *  -- the workspace's own count. */
+const STAT_TONES: Record<StatTone, string> = {
+  brand: "text-brand border-brand/30 bg-brand/10",
+  active: "text-ai-active border-ai-active/30 bg-ai-active/10",
+  confident: "text-ai-confident border-ai-confident/30 bg-ai-confident/10",
+  blocked: "text-ai-blocked border-ai-blocked/30 bg-ai-blocked/10",
+  idle: "text-muted-foreground border-border bg-muted/60",
+};
+
+interface StatTileProps {
+  label: string;
+  /** null when there is no figure to show -- the load failed and no earlier page
+   *  survived. A dash, never a zero: the two mean opposite things. */
+  value: number | null;
+  caption: string;
+  tone: StatTone;
+  icon: LucideIcon;
+  spin?: boolean;
+  loading?: boolean;
+}
+
+function StatTile({ label, value, caption, tone, icon: Icon, spin = false, loading = false }: StatTileProps) {
+  // The count-up is decoration laid over a real figure, never a substitute for
+  // one: the target is whatever the API returned, and `useCountUp` hands that
+  // number straight back under prefers-reduced-motion. While the first page is
+  // still in flight the bar stands in for it, because a confident "0" is a claim
+  // about the workspace that we cannot yet make.
+  //
+  // It is switched off in both of the states that have no figure -- pending and
+  // unknown -- so an absent measurement can never be animated through zero on
+  // its way to a dash.
+  const unknown = value == null;
+  const counted = Math.round(useCountUp(value ?? 0, 700, !unknown && !loading));
+
+  return (
+    <div className="h-full rounded-xl surface-raised p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+          {loading ? (
+            <SkeletonBar className="mt-2.5 h-7 w-14" />
+          ) : (
+            <p
+              className={cn(
+                "mt-1 text-3xl font-semibold tabular-nums tracking-tight",
+                unknown && "text-muted-foreground/50",
+              )}
+            >
+              {unknown ? "—" : counted}
+            </p>
+          )}
+          <p className="mt-1 text-xs text-muted-foreground">{caption}</p>
+        </div>
+        <span
+          className={cn(
+            "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border",
+            STAT_TONES[tone],
+          )}
+        >
+          <Icon className={cn("h-4 w-4", spin && "animate-spin")} />
+        </span>
+      </div>
     </div>
   );
 }
@@ -602,30 +940,5 @@ function DateCell({ v }: { v: string }) {
       <div>{date}</div>
       {time && <div className="text-xs text-muted-foreground">{time}</div>}
     </div>
-  );
-}
-
-function WelcomeIllustration() {
-  return (
-    <svg viewBox="0 0 220 160" className="w-56 md:w-64 h-auto">
-      <defs>
-        <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="oklch(0.66 0.19 268)" />
-          <stop offset="1" stopColor="oklch(0.6 0.22 300)" />
-        </linearGradient>
-      </defs>
-      <rect x="20" y="30" width="80" height="100" rx="6" fill="oklch(0.22 0.02 270)" stroke="oklch(0.34 0.025 270)" />
-      <rect x="30" y="45" width="60" height="4" rx="2" fill="url(#g1)" />
-      <rect x="30" y="55" width="50" height="3" rx="1.5" fill="oklch(0.35 0.02 270)" />
-      <rect x="30" y="62" width="55" height="3" rx="1.5" fill="oklch(0.35 0.02 270)" />
-      <rect x="30" y="69" width="45" height="3" rx="1.5" fill="oklch(0.35 0.02 270)" />
-      <circle cx="140" cy="60" r="18" fill="url(#g1)" opacity="0.9" />
-      <path d="M105 70 L125 65" stroke="url(#g1)" strokeWidth="2" markerEnd="url(#arrow)" />
-      <rect x="130" y="90" width="80" height="50" rx="6" fill="oklch(0.28 0.04 275)" stroke="url(#g1)" />
-      <rect x="140" y="100" width="60" height="3" rx="1.5" fill="url(#g1)" />
-      <rect x="140" y="108" width="55" height="3" rx="1.5" fill="oklch(0.5 0.02 270)" />
-      <rect x="140" y="116" width="50" height="3" rx="1.5" fill="oklch(0.5 0.02 270)" />
-      <rect x="140" y="124" width="45" height="3" rx="1.5" fill="oklch(0.5 0.02 270)" />
-    </svg>
   );
 }

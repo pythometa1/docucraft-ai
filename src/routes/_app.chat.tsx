@@ -205,7 +205,7 @@ function ChatPage() {
         </div>
 
         <div className="border-t border-border p-4">
-          <div className="max-w-3xl mx-auto flex items-end gap-2 rounded-2xl border border-border bg-card p-2 shadow-sm">
+          <div className="max-w-3xl mx-auto flex items-end gap-2 rounded-2xl surface-raised p-2 shadow-sm">
             <Input
               value={input}
               onChange={(e) => setInput(e.target.value)}

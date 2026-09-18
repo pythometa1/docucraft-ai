@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import date as _d
+
 API = "/api/v1"
 
 # Routes with no tenant to leak. Each needs a one-line reason -- an entry here
@@ -50,8 +52,15 @@ def org_a_resources(app_client, two_orgs):
     """
     from app.db import SessionLocal
     from app.models import (
-        Conversation, DocumentReview, DocumentVersion, DraftDocument, GeneratedDocument,
-        GenerationJob, Mapping, Project, ReviewComment, ReviewTask, SourceFile, SourceVersion,
+        ClinicalDocument, CmcDeliverable, CmcDocument, CmcExport, CmcProject,
+        CmcResult, CmcSection, CmcSite,
+        Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
+        GeneratedDocument,
+        GenerationJob, Invoice, Mapping, Project, PvCase, PvCaseEvent, PvDeidItem,
+        PvDocument, PvDuplicateCandidate, PvExport, PvExposure, PvSignal, PvProduct, PvReportInstance,
+        PvSection,
+        PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
+        SourceVersion,
         TemplateBlueprint,
         TemplateBlueprintVersion, TemplateFile, TemplateLibrary, TemplateLibraryVersion,
         TemplateManifest, TemplateVersion, User,
@@ -121,6 +130,137 @@ def org_a_resources(app_client, two_orgs):
         db.add(comment)
         db.flush()
 
+        customer = Customer(org_id=org, name="Acme Traders", created_by=user.id)
+        db.add(customer)
+        db.flush()
+        invoice = Invoice(org_id=org, project_id=project_a, number="INV-9001",
+                          customer_id=customer.id, customer_snapshot={"name": "Acme Traders"},
+                          currency="USD", created_by=user.id)
+        db.add(invoice)
+        db.flush()
+
+        study = Study(org_id=org, protocol_number="PROTO-9001", title="A study",
+                      created_by=user.id)
+        db.add(study)
+        db.flush()
+        clinical_doc = ClinicalDocument(org_id=org, project_id=project_a,
+                                        number="CSR-9001", study_id=study.id,
+                                        study_snapshot={"protocol_number": "PROTO-9001"},
+                                        document_type="csr", created_by=user.id)
+        db.add(clinical_doc)
+        db.flush()
+
+        csr_project = CsrProject(org_id=org, project_id=project_a, study_id=study.id,
+                                 created_by=user.id)
+        db.add(csr_project)
+        db.flush()
+        csr_section = CsrSection(org_id=org, csr_project_id=csr_project.id,
+                                 section_number="10.1", title="Disposition of Patients",
+                                 sort_order=0)
+        db.add(csr_section)
+        db.flush()
+        csr_document = CsrDocument(org_id=org, csr_project_id=csr_project.id,
+                                   doc_type="protocol", original_filename="protocol.txt",
+                                   storage_path="csr/none/none.txt", uploaded_by=user.id)
+        db.add(csr_document)
+        db.flush()
+
+        cmc_project = CmcProject(org_id=org, project_id=project_a,
+                                 product_name="Drug X Tablets", created_by=user.id)
+        db.add(cmc_project)
+        db.flush()
+        cmc_site = CmcSite(org_id=org, cmc_project_id=cmc_project.id,
+                           name="Pune Plant")
+        cmc_deliverable = CmcDeliverable(org_id=org, cmc_project_id=cmc_project.id,
+                                         doc_type_key="ctd_32p")
+        db.add_all([cmc_site, cmc_deliverable])
+        db.flush()
+        cmc_section = CmcSection(org_id=org, cmc_deliverable_id=cmc_deliverable.id,
+                                 section_code="P.5.1", title="Specification",
+                                 sort_order=0)
+        db.add(cmc_section)
+        db.flush()
+        cmc_document = CmcDocument(org_id=org, cmc_project_id=cmc_project.id,
+                                   doc_type="coa", original_filename="coa.csv",
+                                   storage_path="cmc/none/none.csv", uploaded_by=user.id)
+        db.add(cmc_document)
+        db.flush()
+        from app.models import CmcBatch, CmcMaterial, CmcTest
+
+        cmc_material = CmcMaterial(org_id=org, cmc_project_id=cmc_project.id,
+                                   kind="drug_product", name="Drug product")
+        db.add(cmc_material)
+        db.flush()
+        cmc_batch = CmcBatch(org_id=org, cmc_project_id=cmc_project.id,
+                             material_id=cmc_material.id, batch_number="B-1")
+        cmc_test = CmcTest(org_id=org, cmc_project_id=cmc_project.id,
+                           material_id=cmc_material.id, test_name="Assay")
+        db.add_all([cmc_batch, cmc_test])
+        db.flush()
+        cmc_result = CmcResult(org_id=org, cmc_project_id=cmc_project.id,
+                               batch_id=cmc_batch.id, test_id=cmc_test.id,
+                               value_text="99.2 %")
+        db.add(cmc_result)
+        db.flush()
+        cmc_export = CmcExport(org_id=org, cmc_project_id=cmc_project.id,
+                               granularity="combined", created_by=user.id)
+        db.add(cmc_export)
+        db.flush()
+
+        # The Safety/PV module. One row of everything a route addresses --
+        # including a report instance, because half the module's surface hangs
+        # off an interval rather than off the product.
+        pv_product = PvProduct(org_id=org, project_id=project_a,
+                               product_name="Tenantazole", created_by=user.id)
+        db.add(pv_product)
+        db.flush()
+        pv_rsi = PvRsiVersion(org_id=org, pv_product_id=pv_product.id,
+                              rsi_type="ccds", version_label="1.0",
+                              created_by=user.id)
+        db.add(pv_rsi)
+        db.flush()
+        pv_report = PvReportInstance(
+            org_id=org, pv_product_id=pv_product.id, doc_type_key="dsur",
+            period_start=_d(2025, 1, 1), period_end=_d(2025, 12, 31),
+            data_lock_point=_d(2025, 12, 31), created_by=user.id)
+        db.add(pv_report)
+        db.flush()
+        pv_document = PvDocument(
+            org_id=org, pv_product_id=pv_product.id, doc_type="other",
+            input_type="line_listing", original_filename="listing.csv",
+            blob_path="pv/none/none.csv", uploaded_by=user.id)
+        db.add(pv_document)
+        db.flush()
+        pv_deid = PvDeidItem(
+            org_id=org, pv_product_id=pv_product.id, document_id=pv_document.id,
+            identifier_type="patient_name", detected_text="A Name")
+        db.add(pv_deid)
+        pv_case = PvCase(org_id=org, pv_product_id=pv_product.id,
+                         worldwide_case_id="TEN-1")
+        pv_other_case = PvCase(org_id=org, pv_product_id=pv_product.id,
+                               worldwide_case_id="TEN-2")
+        db.add_all([pv_case, pv_other_case])
+        db.flush()
+        pv_event = PvCaseEvent(org_id=org, pv_product_id=pv_product.id,
+                               case_id=pv_case.id, meddra_pt="Headache")
+        pv_duplicate = PvDuplicateCandidate(
+            org_id=org, pv_product_id=pv_product.id, case_id=pv_case.id,
+            other_case_id=pv_other_case.id, score=0.9)
+        pv_exposure = PvExposure(
+            org_id=org, pv_product_id=pv_product.id,
+            report_instance_id=pv_report.id, context="marketing",
+            measure="subjects", value_text="10")
+        pv_section = PvSection(org_id=org, report_instance_id=pv_report.id,
+                               section_code="1", title="Introduction")
+        pv_export = PvExport(org_id=org, pv_product_id=pv_product.id,
+                             report_instance_id=pv_report.id, created_by="u",
+                             options={"files": []})
+        pv_signal = PvSignal(org_id=org, pv_product_id=pv_product.id,
+                             meddra_terms=["Headache"])
+        db.add_all([pv_event, pv_duplicate, pv_exposure, pv_section, pv_export,
+                    pv_signal])
+        db.flush()
+
         ids = {
             "project_id": project_a, "template_id": tf.id, "template_file_id": tf.id,
             "source_id": sf.id, "draft_id": draft.id, "document_id": gd.id,
@@ -130,6 +270,23 @@ def org_a_resources(app_client, two_orgs):
             "source_version_id": sv.id, "template_version_id": tv.id,
             "blueprint_id": blueprint.id,
             "review_id": review.id, "comment_id": comment.id,
+            "customer_id": customer.id, "invoice_id": invoice.id,
+            "study_id": study.id, "clinical_document_id": clinical_doc.id,
+            "csr_project_id": csr_project.id, "csr_section_id": csr_section.id,
+            "csr_document_id": csr_document.id,
+            "cmc_project_id": cmc_project.id, "cmc_site_id": cmc_site.id,
+            "cmc_deliverable_id": cmc_deliverable.id, "cmc_section_id": cmc_section.id,
+            "cmc_document_id": cmc_document.id, "cmc_result_id": cmc_result.id,
+            "entity": "results", "table_key": "spec_table",
+            "cmc_export_id": cmc_export.id,
+            "pv_product_id": pv_product.id, "rsi_version_id": pv_rsi.id,
+            "report_instance_id": pv_report.id,
+            "pv_document_id": pv_document.id, "deid_item_id": pv_deid.id,
+            "case_event_id": pv_event.id, "duplicate_id": pv_duplicate.id,
+            "exposure_id": pv_exposure.id, "pv_table_key": "summary_tab_soc_pt",
+            "register": "studies", "pv_section_id": pv_section.id,
+            "pv_case_id": pv_case.id, "pv_export_id": pv_export.id,
+            "signal_id": pv_signal.id,
         }
         db.commit()
     finally:
@@ -180,6 +337,7 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/template-blueprints/{blueprint_id}/lint"},
     {"method": "GET", "path": "/template-blueprints/{blueprint_id}/docx"},
     {"method": "POST", "path": "/template-blueprints/{blueprint_id}:publish", "body": {}},
+    {"method": "POST", "path": "/template-blueprints/{blueprint_id}:archive"},
     {"method": "POST", "path": "/template-blueprints/{blueprint_id}/copilot",
      "body": {"message": "rename the salary field"}},
     {"method": "POST", "path": "/template-blueprints/{blueprint_id}/operations",
@@ -194,6 +352,8 @@ ROUTES: list[dict] = [
 
     {"method": "GET", "path": "/documents/{document_id}"},
     {"method": "DELETE", "path": "/documents/{document_id}"},
+    {"method": "PATCH", "path": "/documents/{document_id}/workflow",
+     "body": {"workflow_status": "completed"}},
     {"method": "GET", "path": "/documents/{document_id}/versions"},
     {"method": "GET", "path": "/document-versions/{version_id}"},
     {"method": "GET", "path": "/document-versions/{version_id}/citations"},
@@ -264,6 +424,232 @@ ROUTES: list[dict] = [
         "method": "POST", "path": "/template-manifests/{manifest_id}/warnings:resolve",
         "body": {"code": "W-HL-GAP", "note": "reviewed"},
     },
+
+    # The invoice service. The registry rows carry customer names, addresses,
+    # tax ids and money, so a wrong-tenant read here is a leak of exactly the
+    # data §16 is about.
+    {"method": "GET", "path": "/customers/{customer_id}"},
+    {"method": "PATCH", "path": "/customers/{customer_id}", "body": {"name": "x"}},
+    {"method": "DELETE", "path": "/customers/{customer_id}"},
+    {"method": "GET", "path": "/invoices/{invoice_id}"},
+    {"method": "POST", "path": "/invoices/{invoice_id}:void"},
+
+    # The clinical service. Study rows carry protocol numbers, sponsors and
+    # investigators; document rows carry the study snapshot -- the same class
+    # of tenant data as the invoice registry, with the same stakes.
+    {"method": "GET", "path": "/studies/{study_id}"},
+    {"method": "PATCH", "path": "/studies/{study_id}", "body": {"title": "x"}},
+    {"method": "DELETE", "path": "/studies/{study_id}"},
+    {"method": "GET", "path": "/clinical-documents/{clinical_document_id}"},
+    {"method": "POST", "path": "/clinical-documents/{clinical_document_id}:void"},
+
+    # The CSR module. Its rows name studies, compounds and (in later
+    # milestones) patient-bearing source documents -- the strictest data in
+    # the product, behind the same 404-never-403 rule as everything else.
+    {"method": "GET", "path": "/csr/projects/{csr_project_id}"},
+    {"method": "DELETE", "path": "/csr/projects/{csr_project_id}"},
+    {"method": "POST", "path": "/csr/projects/{csr_project_id}/template",
+     "body": {"source": "builtin_ich_e3"}},
+    {"method": "GET", "path": "/csr/projects/{csr_project_id}/sections"},
+    {"method": "PATCH", "path": "/csr/sections/{csr_section_id}", "body": {"enabled": False}},
+    # The CSR module's sources and drafts. These carry the study documents
+    # themselves -- protocols, safety narratives, patient-level listings --
+    # so a wrong-tenant read here is the leak the whole module is careful
+    # about, and a wrong-tenant WRITE would put one sponsor's protocol into
+    # another's report.
+    {"method": "GET", "path": "/csr/projects/{csr_project_id}/documents"},
+    {"method": "POST", "path": "/csr/projects/{csr_project_id}/documents",
+     "files": [("files", ("x.txt", b"x", "text/plain")), ("doc_types", (None, "protocol"))]},
+    {"method": "POST", "path": "/csr/projects/{csr_project_id}/process"},
+    {"method": "GET", "path": "/csr/projects/{csr_project_id}/processing-status"},
+    {"method": "PATCH", "path": "/csr/documents/{csr_document_id}", "body": {"doc_type": "sap"}},
+    {"method": "DELETE", "path": "/csr/documents/{csr_document_id}"},
+    {"method": "POST", "path": "/csr/documents/{csr_document_id}/retry"},
+    {"method": "POST", "path": "/csr/sections/{csr_section_id}/generate", "body": {}},
+    {"method": "GET", "path": "/csr/sections/{csr_section_id}/draft"},
+    {"method": "PUT", "path": "/csr/sections/{csr_section_id}/draft", "body": {"content": "x"}},
+    {"method": "PATCH", "path": "/csr/sections/{csr_section_id}/status", "body": {"status": "draft"}},
+
+    # The Quality/CMC module. Its rows carry manufacturing sites, specification
+    # limits and batch results -- trade secrets and confidential business
+    # information, which is the strictest data the product holds.
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}"},
+    {"method": "PATCH", "path": "/cmc/projects/{cmc_project_id}", "body": {"dosage_form": "x"}},
+    {"method": "DELETE", "path": "/cmc/projects/{cmc_project_id}"},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/sites"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/sites", "body": {"name": "x"}},
+    {"method": "PATCH", "path": "/cmc/sites/{cmc_site_id}", "body": {"name": "x"}},
+    {"method": "DELETE", "path": "/cmc/sites/{cmc_site_id}"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/deliverables",
+     "body": {"doc_type_key": "ctd_32p"}},
+    {"method": "GET", "path": "/cmc/deliverables/{cmc_deliverable_id}/sections"},
+    {"method": "DELETE", "path": "/cmc/deliverables/{cmc_deliverable_id}"},
+    {"method": "PATCH", "path": "/cmc/sections/{cmc_section_id}", "body": {"enabled": False}},
+    # The sources and the structured store. These carry specification limits,
+    # batch results and manufacturing detail -- confidential business
+    # information, and the reason the module's own copy says so on every screen.
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/documents"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/documents",
+     "files": [("files", ("x.csv", b"a,b", "text/csv")), ("doc_types", (None, "coa"))]},
+    {"method": "PATCH", "path": "/cmc/documents/{cmc_document_id}", "body": {"doc_type": "coa"}},
+    {"method": "DELETE", "path": "/cmc/documents/{cmc_document_id}"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/process"},
+    {"method": "POST", "path": "/cmc/documents/{cmc_document_id}/retry"},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/processing-status"},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/materials"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/materials",
+     "body": {"kind": "drug_product", "name": "x"}},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/data/{entity}"},
+    {"method": "PATCH", "path": "/cmc/results/{cmc_result_id}", "body": {"value_text": "1"}},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/results:verify",
+     "body": {"all_unverified": True}},
+    {"method": "POST", "path": "/cmc/results/{cmc_result_id}:resolve",
+     "body": {"keep_result_id": "x"}},
+    # Rendering, drafting and export. These reach the deepest into the store --
+    # a table renders every verified value a project holds, and an export
+    # writes them into a file somebody sends to a regulator.
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/tables/{table_key}"},
+    {"method": "POST", "path": "/cmc/sections/{cmc_section_id}/generate", "body": {}},
+    {"method": "GET", "path": "/cmc/sections/{cmc_section_id}/draft"},
+    {"method": "PUT", "path": "/cmc/sections/{cmc_section_id}/draft", "body": {"content": "x"}},
+    {"method": "PATCH", "path": "/cmc/sections/{cmc_section_id}/status",
+     "body": {"status": "draft"}},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/qc"},
+    {"method": "POST", "path": "/cmc/projects/{cmc_project_id}/export",
+     "body": {"granularity": "combined"}},
+    {"method": "GET", "path": "/cmc/projects/{cmc_project_id}/exports"},
+    {"method": "GET", "path": "/cmc/exports/{cmc_export_id}/download"},
+
+    # Safety / Pharmacovigilance.
+    {"method": "GET", "path": "/pv/products/{pv_product_id}"},
+    {"method": "PATCH", "path": "/pv/products/{pv_product_id}",
+     "body": {"inn": "x"}},
+    {"method": "DELETE", "path": "/pv/products/{pv_product_id}"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/members"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/members",
+     "body": {"user_id": "nobody", "pv_role": "writer"}},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/rsi-versions"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/rsi-versions",
+     "body": {"rsi_type": "ccds", "version_label": "9.9"}},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/reports"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/reports",
+     "body": {"doc_type_key": "dsur", "period_start": "2026-01-01",
+              "period_end": "2026-06-30", "data_lock_point": "2026-06-30"}},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/scope-preview",
+     "body": {"doc_type_key": "dsur", "period_start": "2026-01-01",
+              "period_end": "2026-06-30", "data_lock_point": "2026-06-30"}},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/calendar"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/approval-statuses"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/approval-statuses",
+     "body": {"country": "DE"}},
+    {"method": "GET", "path": "/pv/rsi-versions/{rsi_version_id}/listed-terms"},
+    {"method": "POST", "path": "/pv/rsi-versions/{rsi_version_id}/listed-terms",
+     "body": [{"meddra_pt": "Headache"}]},
+    {"method": "POST", "path": "/pv/rsi-versions/{rsi_version_id}/pin"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}"},
+    {"method": "PATCH", "path": "/pv/reports/{report_instance_id}",
+     "body": {"meddra_version": "27.0"}},
+    {"method": "DELETE", "path": "/pv/reports/{report_instance_id}"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/sections"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/preview-scope"},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/due-dates",
+     "body": {"region": "EU"}},
+
+    # Safety M2: sources and the case store.
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/documents"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/documents",
+     "files": [("files", ("listing.csv", b"a,b\n1,2\n", "text/csv")),
+               ("doc_types", (None, "other")),
+               ("input_types", (None, "document"))]},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/process",
+     "body": {"mappings": {}}},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/processing-status"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/cases"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/mapping-profiles"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/mapping-profiles",
+     "body": {"name": "p", "column_map": {"Case ID": "worldwide_case_id"}}},
+    {"method": "PATCH", "path": "/pv/documents/{pv_document_id}",
+     "body": {"doc_type": "other"}},
+    {"method": "DELETE", "path": "/pv/documents/{pv_document_id}"},
+    {"method": "POST", "path": "/pv/documents/{pv_document_id}/retry",
+     "body": {"mappings": {}}},
+    {"method": "GET", "path": "/pv/documents/{pv_document_id}/columns"},
+
+    # Safety M3: the de-identification gate.
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/deid-queue"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/deid-queue:override",
+     "body": {"reason": "x"}},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/leakage-scan"},
+    {"method": "POST", "path": "/pv/deid-items/{deid_item_id}/resolve",
+     "body": {"action": "mask"}},
+
+    # Safety M4: coding, expectedness, duplicates.
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/code"},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/suggest-expectedness"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/case-events"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/case-events:bulk-confirm",
+     "body": {"meddra_pt": "Headache", "expectedness": "listed"}},
+    {"method": "PATCH", "path": "/pv/case-events/{case_event_id}/confirm",
+     "body": {"is_aesi": True}},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/duplicates:detect"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/duplicates"},
+    {"method": "POST", "path": "/pv/duplicates/{duplicate_id}/resolve",
+     "body": {"action": "kept_both"}},
+
+    # Safety M5: tabulations, exposure, registers.
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/tabulations"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/tabulations/{table_key}",
+     "ids": {"table_key": "pv_table_key"}},
+    {"method": "GET",
+     "path": "/pv/reports/{report_instance_id}/tabulations/{table_key}/drilldown",
+     "ids": {"table_key": "pv_table_key"}, "query": {"cell": "r0c0"}},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/exposure"},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/exposure",
+     "body": {"context": "marketing", "measure": "subjects", "value_text": "1"}},
+    {"method": "PATCH", "path": "/pv/exposure/{exposure_id}",
+     "body": {"value_text": "2"}},
+    {"method": "POST", "path": "/pv/exposure/{exposure_id}/confirm"},
+    {"method": "DELETE", "path": "/pv/exposure/{exposure_id}"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/registers/{register}"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/registers/{register}",
+     "body": {"study_id": "S-1"}},
+
+    # Safety M6: drafting and the workspace.
+    {"method": "POST", "path": "/pv/sections/{section_id}/generate", "body": {},
+     "ids": {"section_id": "pv_section_id"}},
+    {"method": "GET", "path": "/pv/sections/{section_id}/draft",
+     "ids": {"section_id": "pv_section_id"}},
+    {"method": "PUT", "path": "/pv/sections/{section_id}/draft",
+     "body": {"content": "x"}, "ids": {"section_id": "pv_section_id"}},
+    {"method": "PATCH", "path": "/pv/sections/{section_id}/status",
+     "body": {"status": "draft"}, "ids": {"section_id": "pv_section_id"}},
+    {"method": "GET", "path": "/pv/sections/{section_id}/baseline-diff",
+     "ids": {"section_id": "pv_section_id"}},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/delta"},
+    {"method": "POST", "path": "/pv/cases/{case_id}/narrative",
+     "ids": {"case_id": "pv_case_id"}},
+
+    # Safety M7: QC.
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/qc"},
+
+    # Safety M8: sign-off, export and audit.
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/signoff", "body": {}},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/signoff:withdraw",
+     "body": {"reason": "x"}},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/qc/accept",
+     "body": {"key": "k", "reason": "x"}},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/export", "body": {}},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/exports"},
+    {"method": "GET", "path": "/pv/exports/{pv_export_id}/download"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/audit"},
+
+    # Safety M9: signals and screening.
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/signals"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/signals",
+     "body": {"meddra_terms": ["Headache"]}},
+    {"method": "PATCH", "path": "/pv/signals/{signal_id}", "body": {"priority": "low"}},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/disproportionality",
+     "body": {}},
 ]
 
 

@@ -60,6 +60,18 @@ RESOLVED_VALUE_ABSENT = "resolved_value_absent"
 VALUE_FORMAT_DOUBLED = "value_format_doubled"
 # An adjacent repeated word the template does not itself contain.
 DOUBLED_WORD = "doubled_word"
+# A slot marked with a *mask* rather than a bracket -- `xxxx年xx月xx日`, `xx个月`
+# -- that the fill never replaced.
+FILL_MASK_REMAINS = "fill_mask_remains"
+# A whole date written into a slot that holds one part of one: the year box of
+# `xxxx年xx月xx日` carrying `2026-09-01`.
+DATE_PART_MALFORMED = "date_part_malformed"
+# A §6 TABLE_ROW could not be repeated: the collection is not a list, a
+# required row value is absent, or the manifest promises a repeating row the
+# document does not carry. One name for every way "one row per record" fails,
+# because they are one failure mode -- the table the reader sees does not say
+# what the data says.
+ROW_REPEAT = "row_repeat"
 
 
 @dataclass(frozen=True)
@@ -96,6 +108,19 @@ REGISTRY: dict[str, QaCheck] = {
         # typo, and refusing to render somebody's letter over their punctuation
         # is how a gate gets switched off. It is reported so a person decides.
         QaCheck(DOUBLED_WORD, "A word is repeated adjacently in the output.", WARNING),
+        # Found by auditing a real run: every gate above looks for a bracket, a
+        # mergefield or an instruction, and these templates mark a slot with
+        # neither -- `本合同生效日期为xxxx年xx月xx日` is a date placeholder written
+        # as a mask. The engine had resolved the date and had nowhere to put it,
+        # so the mask survived and the document passed. 395 of them across one
+        # eleven-template set.
+        QaCheck(FILL_MASK_REMAINS, "A masked slot (xxxx年xx月xx日, xx个月) was never filled and is visible to the reader.", BLOCKING),
+        # The same audit, and the more expensive half. A mask is visibly unfilled
+        # and a reader catches it; this is filled, wrong, and reads as data:
+        # `2026-09-01年2026-09-01月2026-09-01`, produced when the year, month and
+        # day slots of one date mask were all bound to the same field.
+        QaCheck(DATE_PART_MALFORMED, "A date part slot (year/month/day) holds a whole date rather than its part.", BLOCKING),
+        QaCheck(ROW_REPEAT, "A repeating table row could not be rendered once per record of its collection.", BLOCKING),
         QaCheck(VALUE_EXCEEDS_MAX_LEN, "A value is longer than the manifest's declared max_len for that field.", BLOCKING),
         QaCheck(
             VALUE_OVERFLOWS_CELL,

@@ -101,14 +101,37 @@ def _unit_dependencies(manifest: dict) -> tuple[dict, dict]:
         else:
             deps[f["id"]] = set()
 
+    # An identifier inside a condition expression names a *value* -- a computed
+    # field, or a column of the source record. It never names a condition: a
+    # condition produces a keep-or-delete verdict for a block, and there is no
+    # syntax for reading one back into an expression. Only `depends_on` can point
+    # at another condition, which is what it is for.
+    #
+    # Conflating the two was a real defect, and the collision that exposed it is
+    # the ordinary case rather than a contrived one. A compiler reading
+    # `<Work Location/City Location>` names the two branches after the two
+    # identifiers that decide them, so the condition `city_location` has the
+    # expression `city_location != '' and city_location != work_location`. The
+    # identifier is the source column; the id is the branch. Treating the
+    # identifier as a unit reference made the condition depend on itself, and
+    # every row failed with "Circular dependency between manifest units:
+    # city_location -> city_location" -- a message about the engine's internals,
+    # for a manifest that was correct.
+    field_ids = {f["id"] for f in manifest.get("fields", [])}
+
     for cond in manifest.get("conditions", []):
         cid = cond["id"]
         units[cid] = {**cond, "kind": "conditional", "unit_type": "condition"}
-        referenced = set(_condition_identifiers(cond.get("expression", "")))
+        # Only keep dependencies that are themselves *fields*; a plain source
+        # column with no unit is satisfied by the record, not by ordering.
+        referenced = {
+            name for name in _condition_identifiers(cond.get("expression", ""))
+            if name in field_ids
+        }
         # A `context` condition may also depend on units resolved earlier.
         referenced.update(cond.get("depends_on", []) or [])
-        # Only keep dependencies that are themselves units; a plain source
-        # field with no unit is satisfied by the record, not by ordering.
+        # And never on itself, however it was named.
+        referenced.discard(cid)
         deps[cid] = referenced
 
     return units, deps

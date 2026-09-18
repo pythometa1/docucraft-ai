@@ -27,7 +27,7 @@
 | Review | **A real human-in-the-loop queue** (`/review`, `review_tasks`): calculations needing sign-off, ambiguous conditions, weak bindings, poorly-grounded narrative. Manifest approval has its own validation endpoint and warning-acknowledgement record | §13's section-anchored comments, e-signature, notifications |
 | Deletion & retention | `DELETE /projects/{id}` (soft, cascading the stamp), `DELETE /documents/{id}` (hard, blob cascade, `409` on an approved document), `DELETE /sources/{id}` and `DELETE /templates/{id}`; per-org data policy, retention sweep, tenant offboarding and deletion certificates | Customer-configurable per-artefact schedules beyond the current set |
 | Testing | 47 test modules under `backend/tests/`, including golden-DOCX fixtures per template family, RLS tests, LLM-boundary/residency tests and a production-config guard | The full §23 pyramid (k6 load, contract tests) |
-| **Template Compiler + Universal Fill Engine** (`docs/TEMPLATE_COMPILER_RESEARCH.md`) | **Fully implemented, and now fully driven from the UI.** Colour-run classification, rule-based *and* LLM compilers with an agentic compile→fill→read-QA→revise loop, plain-English rendering of conditions for approvers, a deterministic fill engine, QA gates, batch generation with a canary gate, template families and manifest inheritance. See `app/templates/parsers/`, `app/compiler/`, `app/manifests/`, `app/expressions/`, `app/generation/`, `app/qa/`, and `app/routers/{manifests,bindings}.py`. The reviewer UI is `src/components/document-mapping.tsx` and `src/routes/_app.projects.$id_.studio.$templateId.tsx` | Bulk onboarding, clustering, manifest inheritance and manifest diff are built but still API-only — no screen calls them |
+| **Template Compiler + Universal Fill Engine** (`docs/TEMPLATE_COMPILER_RESEARCH.md`) | **Fully implemented, and now fully driven from the UI.** Colour-run classification, rule-based *and* LLM compilers with an agentic compile→fill→read-QA→revise loop, plain-English rendering of conditions for approvers, a deterministic fill engine, QA gates, batch generation with a canary gate, template families and manifest inheritance. See `app/templates/parsers/`, `app/compiler/`, `app/manifests/`, `app/expressions/`, `app/generation/`, `app/qa/`, and `app/routers/{manifests,bindings}.py`. The reviewer UI is `src/components/document-mapping.tsx` | Bulk onboarding, clustering, manifest inheritance and manifest diff are built but still API-only — no screen calls them |
 | ~~Drafts, mappings, section-mapping RAG generation~~ | **Removed.** `POST /drafts/{id}/generate`, `POST /drafts/{id}/mappings`, `GET /drafts/{id}/mapping-suggestions`, `GET /drafts/{id}/coverage`, `GET /drafts/{id}/documents` and the wizard screen are all gone | — |
 
 See `README.md` at the repo root for how to actually run it, and `APPLICATION_FLOW.md` for what the code does today end to end.
@@ -157,10 +157,12 @@ The stage **keys** are leftovers and no longer mean what they say: `mapping2` is
 
 `has_generation_method` and `has_drafts` are still returned by the API and are no longer read by any screen: the Method stage was removed (it never changed generation behaviour) and there is no draft entity.
 
-- **Stage 1 (Template):** upload dialog accepts `.docx, .dotx`; each upload becomes a `template_files` row → §7. Each row carries an **"Open in Studio"** link to `/projects/$id/studio/$templateId` and a delete action (`DELETE /templates/{id}`).
+- **Stage 1 (Template):** upload dialog accepts `.docx, .dotx`; each upload becomes a `template_files` row → §7. Uploading compiles the template in the same act, and the manifest that comes out is approved on the way through unless the caller's role cannot approve or the template is flagged legally binding. Each row carries an **"Edit wording"** link to `/templates/$blueprintId` and a delete action (`DELETE /templates/{id}`).
 - **Stage 2 (Sources):** accepts `.csv, .xlsx, .pdf, .docx, .txt`; each upload becomes a `source_files` row → §9, and its column descriptions are indexed into the vector store. Delete cascades to embeddings and manifest bindings.
 - **Stage 3 (Document Mapping):** §2.4 below.
-- **Stage 4 (Documents):** lists `GET /projects/{id}/documents`; each row has download / edit / delete. There is deliberately no "regenerate" — a document record keeps no manifest, source version or row index.
+- **Stage 4 (Documents):** lists `GET /projects/{id}/documents`; each row has download / edit / send-to-review / delete, and a **workflow lane** (`PATCH /documents/{id}/workflow`). The running batch's progress, its per-row failures and its archive are shown here too, so they survive leaving the mapping stage. There is deliberately no "regenerate" — a document record keeps no manifest, source version or row index.
+  - **Two status axes, not one.** `status` is what the engine and the reviewers say (`draft | pending_review | changes_requested | blocked | approved`, derived worst-first by `app/generation/document_status.py`). `workflow_status` is where a person put it, and stores only the three they can assert: `work_in_progress | completed | cancelled`. `approved` and `blocked` are layered over it on read by `app/generation/workflow_status.effective` and are refused as labels — a signature is `:approve`'s to record and a QA verdict is the fill engine's. Each column has exactly one kind of writer, so the two cannot fight.
+  - **Only an approved document may be downloaded.** Enforced on all five egress paths — `GET /document-versions/{id}/download`, `POST /document-versions/{id}/download-url`, the unauthenticated `GET /downloads/{token}` (re-checked on the way out, since a grant carries no state), `POST /documents:download` and `GET /jobs/{id}/download`. The two bulk paths skip the unapproved and name them in `_FAILED.txt` rather than refusing whole; a selection with nothing approved still gets `NOTHING_TO_DOWNLOAD`, arrived at honestly. Reading a document (`GET /document-versions/{id}`, `GET …/text`) is deliberately *not* gated — the person deciding whether to approve has to be able to read it.
 
 ### 2.4 Document Mapping (`src/components/document-mapping.tsx`)
 
@@ -170,10 +172,41 @@ Rendered inline in stage 3, not on its own route. A template picker, a source pi
 
 1. **Compile the template** — `GET /templates/{id}/manifests` first, to pick up an existing manifest rather than paying for a fresh compile. Otherwise `POST /templates/{id}/compile-manifest`, or the same with `?agentic=true` ("Compile & self-verify": compile → test-fill real rows → read the QA failures → revise). The compiler prompt is given retrieval evidence drawn from this org's indexed **source column** descriptions only — feeding back previously-compiled manifest fields would close a loop and converge the estate on its own first guess.
 2. **Review and approve** — conditions are shown in **plain English** ("Keep when …"), rendered server-side from the same AST the evaluator runs and returned on manifest GETs as `plain_english` / `approval_sentence`; a condition that cannot be rendered is displayed as broken rather than omitted. `GET /template-manifests/{id}/validation` supplies `can_approve`, `failures[]`, `warnings[]` and `warning_dispositions` so the blockers are visible *while deciding*, not as a 409 afterwards. A warning is cleared by acknowledging it (`POST …/warnings:resolve` with a note recorded under the acknowledger's name) — a judgement, not a dismissal. Then `POST /template-manifests/{id}:approve`; approved manifests are immutable and subject to separation of duties.
+
+   **This step is no longer on the path to generating.** Approval used to gate
+   generation on both doors — `generate-batch` and the single-record `generate` —
+   and that gate could not be satisfied without a full review: `validate_manifest`
+   turns every undispositioned compiler warning into a failure, and a freshly
+   compiled manifest has warnings and no dispositions *by construction*. So it
+   did not mean "somebody has looked at this". It meant "acknowledge every
+   warning in writing, then sign, then generate", imposed on every template
+   whether or not anyone had asked for a review.
+
+   What both endpoints ask now is whether the reading is usable and current:
+
+   - `MANIFEST_NOT_READ` (409) — the compile did not converge, so there is
+     nothing to fill from and every row would fail the same way;
+   - `MANIFEST_RETIRED` (409) — this reading is `superseded` or `deprecated`, so
+     filling from it would produce letters built from a version of the template
+     the project has moved off. This is the one-approved-manifest-per-template
+     rule, and relaxing the gate did not remove it;
+   - `MANIFEST_NOT_APPROVED` (409) — **only** for a template flagged
+     `legally_binding`. §16 asks for four eyes on a contract going out under
+     somebody's name, and that is the one place a signature is still a
+     precondition. Nothing in the product sets the flag today.
+
+   `:approve`, `GET …/validation` and `POST …/warnings:resolve` are all still
+   served and unchanged. Compiling still *attempts* an approval via
+   `try_auto_approve` — sharing `_approval_blockers` and `_record_approval` with
+   the endpoint, so the two cannot drift — because that is what supersedes the
+   previous manifest and writes the audit row. It declines where it would
+   otherwise walk past a control (a caller without `APPROVE_MANIFEST`, a
+   legally-binding template, an outstanding validation failure), and a decline is
+   now just a manifest that stays in `draft` and generates anyway.
 3. **Map fields to columns** — `GET /template-manifests/{id}/binding-suggestions?source_version_id=&sheet=` returns ranked candidates per field with a `method`, a `confidence`, a `rationale`, a `sample_value` and a **band** (`AUTO_ACCEPT` / `CONFIRM` / `REVIEW` / `BLOCK`), plus `unmatched_fields`, `unused_columns` and `unmatched_condition_values` — source values that select *no* branch of the template, each of which is a letter that would generate with a conditional section silently missing. Reconciling those is the `value_map` half of the binding. Saved with `POST /template-manifests/{id}/bindings`.
 4. **Generate documents** — `POST /template-manifests/{id}/generate-batch` → `202 {job_id, status, poll}`, run on a background task. Three **canary** rows, spread evenly across the batch rather than taken from the front, render and are QA-checked before the rest is attempted. The client polls `GET /jobs/{id}` every 1.2 s, tolerating two failed polls before stopping *and saying so* with a "Check again" button. On completion, `GET /jobs/{id}/download` returns every document as one ZIP.
 
-**Template Studio** (`src/routes/_app.projects.$id_.studio.$templateId.tsx`) is the same four steps — Compile → Review → Bind → Generate — as a full-screen, per-template surface, and adds `GET /template-manifests/{id}/preview` (the template as the compiler saw it) and `POST /template-manifests/{id}/preview-row`.
+**Template Studio has been removed** (it was `src/routes/_app.projects.$id_.studio.$templateId.tsx`): a second full-screen copy of the same four steps, two of which are no longer user-facing work now that a template is read at upload. `GET /template-manifests/{id}/preview` and `POST /template-manifests/{id}/preview-row` are still served, and are now API-only.
 
 ### 2.5 Document editor (`src/routes/_app.projects.$id_.edit.$docId.tsx`)
 
@@ -872,7 +905,9 @@ The unit of generation intent is now a **manifest** (what the template means) pl
 | `PATCH /template-manifests/{id}` | Reviewer corrections. The rendered sentences are stripped before storing, so a display artefact can never become part of the hashed contract. `409` if approved. |
 | `GET /template-manifests/{id}/validation` | `{can_approve, status, failures[], warnings[], warning_dispositions}` — **why** it can or cannot be approved, without attempting it. |
 | `POST /template-manifests/{id}/warnings:resolve` | `{code, note}` — record that a human looked at one compiler warning and accepted it, under their name and timestamp. The warning is not deleted; it stops blocking approval. |
-| `POST /template-manifests/{id}:approve` | Locks the manifest. Immutable thereafter; separation of duties applies (`app/authz.py`). |
+| `POST /template-manifests/{id}:approve` | Locks the manifest. Immutable thereafter; separation of duties applies (`app/authz.py`). Also called automatically by `compile-manifest` and by blueprint `:publish` via `try_auto_approve`, which shares every check and declines rather than walking past one — see below. |
+| `PATCH /documents/{id}/workflow` | Move a document along its lane. Refuses `approved` (`APPROVAL_IS_NOT_A_LABEL`) and `blocked` (`BLOCK_IS_A_VERDICT`), refuses any move on an approved document, and refuses `completed` on a blocked one — cancelling a blocked document is allowed, because giving up on a letter that cannot be fixed is the ordinary answer to one. |
+| `POST /template-blueprints/{id}:archive` | Takes a published template off the list without claiming anything is gone. `:delete` refuses a template something was published from and has always said "archive it instead"; this is that route, which did not previously exist. |
 | `GET /template-manifests/{id}/diff?against=` | Object-by-object delta between two manifests (§11's "review changed objects only"). Both ids are tenancy-checked separately. |
 | `POST /templates/{id}/inherit-manifest` | Family workflow: fingerprint, find the nearest approved family, inherit its manifest (diffed) or its mappings (as evidence), or mint a new family. Never auto-approves. |
 | `POST /projects/{id}/templates:bulk-onboard` · `GET /projects/{id}/template-clusters` | Multi-file upload, clustering, optional auto-compile — one manifest per family, not per file. |
@@ -888,7 +923,7 @@ The unit of generation intent is now a **manifest** (what the template means) pl
 | `GET /field-dictionary` | The org's canonical field ids, labels, types, aliases and usage counts. |
 | `GET /template-manifests/{id}/preview` · `POST /template-manifests/{id}/preview-row` | The template as the compiler saw it (every paragraph, every coloured span, which span carries which field); and one filled row, persisting nothing. |
 | `POST /template-manifests/{id}/generate-batch` | `202 {job_id, status, poll}`. Canary rows first (three, spread across the batch); the rest only if they pass. |
-| `GET /jobs/{id}/download` | Every document from a batch as one ZIP. |
+| `GET /jobs/{id}/download` | Every **approved** document from a batch as one ZIP; the rest are named in `_FAILED.txt`. |
 
 **Confidence bands** (§13), which is what the UI renders rather than a raw score:
 
@@ -1765,7 +1800,7 @@ The direct answer to "which endpoints do I need to prepare" — every frontend f
 | … (project header) | — **live** | `PATCH /projects/{id}`, `POST /projects/{id}/archive`, `DELETE /projects/{id}` |
 | ~~`routes/_app.projects.$id.mapping.$draftId.tsx`~~ | — | **File deleted.** Every endpoint in its row (`/drafts/…`, `/mappings/…`) is gone; §6.5 lists the replacements |
 | ~~(Step 3 · generation method)~~ | `store.setGenerationMethod` | **Stage removed.** `generation_settings` is still a column; nothing writes it |
-| `routes/_app.projects.$id_.studio.$templateId.tsx` | — **live** (new) | the §6.5 manifest + binding set, plus `GET /template-manifests/{id}/preview` and `POST …/preview-row` |
+| ~~`routes/_app.projects.$id_.studio.$templateId.tsx`~~ | **removed** | its manifest and binding work is Document Mapping; `GET /template-manifests/{id}/preview` and `POST …/preview-row` are now API-only |
 | `routes/_app.review.tsx` | — **live** (new) | `GET /review-tasks`, `GET /review-tasks/summary`, `POST /review-tasks/{id}:resolve\|:dismiss` |
 | `routes/login.tsx` | — **live** (new) | `POST /auth/token` |
 | `routes/_app.projects.$id_.edit.$docId.tsx` | — **live** | `GET /documents/{id}`, `GET/PATCH /document-versions/{vid}` (honours `html_editable`), `POST /document-versions/{vid}:approve\|:revoke` |

@@ -130,3 +130,124 @@ def test_a_rate_stored_as_a_fraction_renders_as_a_percentage():
 
 def test_a_number_with_declared_decimals_keeps_locale_grouping():
     assert format_value("1234567", {"type": "number", "decimals": 2}, "en_IN") == "12,34,567.00"
+
+
+# ------------------------------------------------- a date is a date, whatever the field says
+
+def test_a_midnight_datetime_is_written_as_a_date():
+    """The `00:00:00` bug, and the reason it was invisible for so long.
+
+    The date branch of `format_value` only runs when the *compiler* typed the
+    field as a date, and it frequently does not. A column it read as a string
+    still arrives here as a real `datetime`, because openpyxl returns datetimes
+    for date-formatted cells -- so the fallthrough ran `str(value)` and put
+
+        变动将于2026-09-01 00:00:00生效
+
+    into a customer's letter. The field's declared type is the compiler's
+    opinion; the value's type is a fact, and the fact decides.
+    """
+    from datetime import datetime
+
+    assert format_value(datetime(2026, 9, 1)) == "Sep 1, 2026"
+    assert "00:00:00" not in format_value(datetime(2026, 9, 1))
+
+
+def test_a_date_object_is_written_as_a_date():
+    from datetime import date
+
+    assert format_value(date(2026, 9, 1)) == "Sep 1, 2026"
+
+
+def test_a_real_time_is_kept_rather_than_dropped():
+    """Silently discarding a time would be inventing a fact rather than
+    formatting one. What goes away is the midnight that was never meant; a
+    timestamp that carries an actual time keeps it, in the locale's short form
+    rather than as ISO seconds."""
+    from datetime import datetime
+
+    out = format_value(datetime(2026, 9, 1, 14, 30))
+    assert out.startswith("Sep 1, 2026")
+    assert "2:30" in out
+    assert ":00 " not in out and not out.endswith(":00")
+
+
+def test_the_date_follows_the_locale_like_every_other_value():
+    from datetime import datetime
+
+    assert format_value(datetime(2026, 9, 1), locale="zh_CN") == "2026年9月1日"
+    assert format_value(datetime(2026, 9, 1), locale="de_DE") == "01.09.2026"
+
+
+def test_an_author_pattern_still_wins_over_the_locale():
+    """A template that says YYYY-MM-DD means it, on an untyped field too."""
+    from datetime import datetime
+
+    assert format_value(datetime(2026, 9, 1), {"format": "YYYY-MM-DD"}) == "2026-09-01"
+
+
+def test_a_value_that_is_not_a_date_is_untouched():
+    """The guard is on the value's type, so nothing else changed shape."""
+    assert format_value("Promotion") == "Promotion"
+    assert format_value("2026-09-01") == "2026-09-01"
+    assert format_value(42) == "42"
+
+
+# ------------------------------------------- a spreadsheet date is read as a date
+
+def test_a_date_cell_is_read_without_the_midnight_it_never_had():
+    """Where the `00:00:00` actually came from.
+
+    openpyxl returns a real `datetime` for a date-formatted cell, and
+    `_clean_cell` ran `str()` over it -- so `2026-09-01 00:00:00` entered the
+    pipeline as *text* at read time and reached the letter unchanged:
+
+        变动将于2026-09-01 00:00:00生效
+
+    Fixing `format_value` alone was not enough, and this test is why: by the time
+    a formatter sees the value it is already a string with a time stuck to it, so
+    nothing downstream can tell a date from a timestamp. The normalisation has to
+    happen at the boundary where the cell is read."""
+    from datetime import datetime
+
+    from app.generation.source_ingestion import _clean_cell
+
+    assert _clean_cell(datetime(2026, 9, 1)) == "2026-09-01"
+    assert "00:00:00" not in _clean_cell(datetime(2026, 9, 1))
+
+
+def test_a_date_object_is_read_as_a_date():
+    from datetime import date
+
+    from app.generation.source_ingestion import _clean_cell
+
+    assert _clean_cell(date(2026, 9, 1)) == "2026-09-01"
+
+
+def test_a_cell_carrying_a_real_time_keeps_it():
+    """Dropping it would be inventing a fact. Only the midnight goes."""
+    from datetime import datetime
+
+    from app.generation.source_ingestion import _clean_cell
+
+    assert _clean_cell(datetime(2026, 9, 1, 14, 30)) == "2026-09-01 14:30"
+
+
+def test_the_normalised_date_still_formats_in_the_readers_locale():
+    """ISO on the way in, so a field the compiler typed as a date is still
+    rendered per locale on the way out -- the boundary fix must not cost the
+    formatting the other one buys."""
+    from app.generation.source_ingestion import _clean_cell
+    from datetime import datetime
+
+    cell = _clean_cell(datetime(2026, 9, 1))
+    assert format_value(cell, {"type": "date"}, "zh_CN") == "2026年9月1日"
+    assert format_value(cell, {"type": "date"}, "en_US") == "Sep 1, 2026"
+
+
+def test_the_other_cell_normalisations_are_untouched():
+    from app.generation.source_ingestion import _clean_cell
+
+    assert _clean_cell(38.0) == "38"          # openpyxl reads whole numbers as 38.0
+    assert _clean_cell(None) == ""
+    assert _clean_cell("  Shanghai  ") == "Shanghai"

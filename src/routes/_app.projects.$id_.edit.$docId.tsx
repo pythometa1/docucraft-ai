@@ -25,12 +25,10 @@ import {
   Undo2,
   Redo2,
   ChevronRight,
-  CheckCircle2,
   ArrowLeft,
   Save,
   Type,
   AlertTriangle,
-  FileText,
   Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -191,7 +189,7 @@ function DocEditorInner({
   const navigate = useNavigate();
   const id = projectId;
   const [dirty, setDirty] = useState(false);
-  const [approved, setApproved] = useState(initialApproved);
+  const [, setApproved] = useState(initialApproved);
 
   const editor = useEditor({
     extensions: [
@@ -280,7 +278,7 @@ function DocEditorInner({
 
       {/* Editor canvas */}
       <div className="flex-1 overflow-auto bg-background">
-        <div className="max-w-3xl mx-auto my-8 rounded-xl border border-border bg-surface shadow-sm">
+        <div className="max-w-3xl mx-auto my-8 rounded-xl surface-raised shadow-sm">
           <div className="px-10 py-12">
             <EditorContent editor={editor} />
           </div>

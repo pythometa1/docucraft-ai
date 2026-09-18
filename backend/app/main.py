@@ -4,7 +4,13 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.rate_limit import rate_limit_by_org
+from app.clinical.router import router as clinical_router
+from app.cmc.router import router as cmc_router
+from app.csr.router import router as csr_router
+from app.finance.router import router as finance_router
+from app.safety.router import router as safety_router
 from app.routers import admin, auth, bindings, blueprints, chat, downloads, generation, manifests, metrics, projects, review, reviews, sources, templates
+from app.docgen.markers import DraftingFailed
 from app.llm.provider import LLMNotConfiguredError
 
 app = FastAPI(title="DocuMind AI Backend", version="1.0.0")
@@ -29,6 +35,16 @@ async def llm_not_configured_handler(request: Request, exc: LLMNotConfiguredErro
     return JSONResponse(status_code=503, content={"error": {"code": "LLM_NOT_CONFIGURED", "message": str(exc), "details": {}}})
 
 
+@app.exception_handler(DraftingFailed)
+async def drafting_failed_handler(request: Request, exc: DraftingFailed):
+    """502, not 500: the model refused or returned nothing, and the server is
+    fine. Registered centrally for the same reason as the handler above -- every
+    drafting module (CSR, CMC, Safety) raises this, and each one answering its
+    own way is how one of them ends up reporting a model refusal as a crash."""
+    return JSONResponse(status_code=502, content={"detail": {"error": {
+        "code": "DRAFTING_FAILED", "message": str(exc), "details": {}}}})
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"error": {"code": "INTERNAL_ERROR", "message": str(exc), "details": {}}})
@@ -49,6 +65,11 @@ app.include_router(chat.router, prefix="/api/v1", dependencies=_rate_limited)
 app.include_router(manifests.router, prefix="/api/v1", dependencies=_rate_limited)
 app.include_router(blueprints.router, prefix="/api/v1", dependencies=_rate_limited)
 app.include_router(bindings.router, prefix="/api/v1", dependencies=_rate_limited)
+app.include_router(finance_router, prefix="/api/v1", dependencies=_rate_limited)  # the invoice service: client book, numbering, registry
+app.include_router(clinical_router, prefix="/api/v1", dependencies=_rate_limited)  # the clinical service: study book, numbering, registry
+app.include_router(csr_router, prefix="/api/v1", dependencies=_rate_limited)  # the CSR module: ICH E3 drafting for medical writers
+app.include_router(cmc_router, prefix="/api/v1", dependencies=_rate_limited)  # the Quality/CMC module: dossier sections and verified quality data
+app.include_router(safety_router, prefix="/api/v1", dependencies=_rate_limited)  # the Safety/PV module: reporting intervals, the case store and its locks
 app.include_router(review.router, prefix="/api/v1", dependencies=_rate_limited)
 app.include_router(reviews.router, prefix="/api/v1", dependencies=_rate_limited)  # document reviews: a person objecting, as opposed to the engine asking
 app.include_router(metrics.router, prefix="/api/v1", dependencies=_rate_limited)  # §22 metrics and §18 SLOs, READ_AUDIT-gated

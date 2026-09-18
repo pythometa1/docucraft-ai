@@ -5,6 +5,7 @@ happens here by design (R3): layout fidelity comes from mutating the
 original file in place, never regenerating it.
 """
 
+import copy
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -27,7 +28,7 @@ from app.qa.value_format_check import findings as value_format_findings
 from app.qa.layout_integrity import structural_failures as _structural_failures  # noqa: F401
 from app.qa.overflow_check import findings as overflow_findings
 from app.qa.placeholder_check import findings as placeholder_findings
-from app.qa.policy import BLOCKING, BRANCH_SELECTION, REQUIRED_VALUE_MISSING, resolve_policy, route
+from app.qa.policy import BLOCKING, BRANCH_SELECTION, REQUIRED_VALUE_MISSING, ROW_REPEAT, resolve_policy, route
 from app.qa.value_lineage_check import EQUALITY_CONDITION_RE, blocks_document  # noqa: F401
 from app.qa.value_lineage_check import branch_findings, missing_value_note
 
@@ -72,6 +73,11 @@ class ConditionLineage:
 class FillResult:
     field_lineage: list = field(default_factory=list)
     condition_lineage: list = field(default_factory=list)
+    # One entry per §6 TABLE_ROW the manifest declares: how many rows were
+    # rendered, and which row values were missing under which policy. Kept
+    # separate from `field_lineage` because a repeated field has no single
+    # value -- it has one per record of the collection.
+    repeat_lineage: list = field(default_factory=list)
     qa_passed: bool = True
     qa_notes: list = field(default_factory=list)
     # The same failures as `qa_notes`, structured. §22 asks for every QA failure
@@ -223,6 +229,209 @@ def _paragraph_row_ancestor(p_el):
     return None
 
 
+# ---- §6 TABLE_ROW: one template row, rendered once per record of a collection ----
+
+def _locate_prototype_row(spec: dict, paragraphs: list):
+    """`(row_el, paragraph_indices)` for the template row this spec repeats.
+
+    Located by the column *tokens* rather than by a stored paragraph index, for
+    the same reason the blueprint model stores no indices: a number goes stale
+    the moment a paragraph is inserted above it, silently, while the token
+    `<Item Description>` either is in the row or is not. Returns None when no
+    table row carries any of the tokens -- a manifest promising repetition the
+    document cannot honour, which the caller reports rather than ignores.
+
+    The `is` comparison below is safe because `row_el` is held alive for the
+    whole comprehension: lxml returns the same proxy for an element as long as
+    one reference to that proxy exists.
+    """
+    tokens = [c.get("token") for c in (spec.get("columns") or ()) if c.get("token")]
+    if not tokens:
+        return None
+    # Score every candidate row by how many of THIS spec's tokens it carries,
+    # and take the best. First-any-token binding was how two repeating tables
+    # sharing a column name ("Amount" on both services and expenses) both bound
+    # the first table's row -- the second then rendered nothing, quietly.
+    candidates: list = []   # (score, order, row_el)
+    seen_rows: list = []
+    for p_el in paragraphs:
+        row = _paragraph_row_ancestor(p_el)
+        if row is None or any(row is r for r in seen_rows):
+            continue
+        seen_rows.append(row)
+        text = "".join(t.text or "" for t in row.iter(_q("t")))
+        score = sum(1 for token in tokens if token in text)
+        if score:
+            candidates.append((score, len(candidates), row))
+    if not candidates:
+        return None
+    row_el = max(candidates, key=lambda c: (c[0], -c[1]))[2]
+    indices = {i for i, p in enumerate(paragraphs) if _paragraph_row_ancestor(p) is row_el}
+    return row_el, indices
+
+
+def _replace_in_row(row_el, token: str, value: str) -> bool:
+    """Replace the first occurrence of `token` across the row's text nodes.
+
+    Works on the concatenation of every `<w:t>` in the row rather than on any
+    single run, because Word fragments a placeholder across runs at every
+    formatting change. Same offset-walking technique as
+    `_apply_sentence_removal`, which exists for the same reason.
+    """
+    t_els = list(row_el.iter(_q("t")))
+    texts = [t.text or "" for t in t_els]
+    full = "".join(texts)
+    at = full.find(token)
+    if at < 0:
+        return False
+    lo, hi = at, at + len(token)
+    cursor = 0
+    for t_el, text in zip(t_els, texts):
+        start = cursor
+        cursor += len(text)
+        if cursor <= lo or start >= hi:
+            continue
+        head = text[: max(0, lo - start)]
+        tail = text[max(0, min(len(text), hi - start)):]
+        insert = value if start <= lo else ""
+        t_el.text = head + insert + tail
+        t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    return True
+
+
+def _clear_placeholder_colours(row_el) -> None:
+    """Strip the placeholder blue from a cloned row's runs.
+
+    The prototype row's tokens are written in the authoring blue so the
+    pre-scanner classifies them; a rendered line item is the reader's data and
+    must not arrive coloured like an unfilled slot.
+    """
+    from app.templates.parsers.docx_prescan import BLUE_RGBS
+
+    for r in row_el.iter(_q("r")):
+        rpr = r.find(_q("rPr"))
+        if rpr is None:
+            continue
+        color_el = rpr.find(_q("color"))
+        if color_el is not None and (color_el.get(_q("val")) or "").upper() in BLUE_RGBS:
+            rpr.remove(color_el)
+
+
+def _column_field(column: dict) -> dict:
+    """A field-shaped dict for `format_value`, from one TABLE_ROW column spec."""
+    return {
+        "id": column.get("source_key") or column.get("field_id") or "",
+        "type": column.get("type") or "string",
+        "format": column.get("format"),
+    }
+
+
+def _apply_row_repeats(repeat_rows: list, source_record: dict, locale: str,
+                       result: "FillResult", drop_paragraph_indices: set) -> None:
+    """Render each prototype row once per record, then remove the prototype.
+
+    Runs *last*, after every coordinate-driven pass, so the clones never enter
+    the span space at all -- the coordinate-shift problem is dissolved rather
+    than solved. Anything the scalar passes did to the rest of the document is
+    already in the tree; anything a clone carries came from the prototype.
+    """
+    for entry in repeat_rows:
+        spec, tr = entry["spec"], entry["row_el"]
+        object_id = spec.get("id") or spec.get("object_id") or "table_row"
+        iterate_over = str(spec.get("iterate_over") or "")
+        columns = list(spec.get("columns") or ())
+
+        if tr.getparent() is None:
+            if entry.get("paragraphs", set()) & drop_paragraph_indices:
+                # The condition machinery dropped the region holding this
+                # table. That is a decision the manifest already recorded.
+                result.repeat_lineage.append({
+                    "object_id": object_id, "iterate_over": iterate_over,
+                    "rows_rendered": 0, "skipped": "row removed by a condition",
+                })
+            else:
+                # Nothing legitimate removed it. Rendering zero rows quietly
+                # here is how a second collection disappears from a document
+                # with QA green.
+                result.block(
+                    f"The prototype row for '{object_id}' is no longer in the document, and "
+                    "no condition removed it. The template's repeating rows overlap; give "
+                    "each its own tokens.",
+                    check=ROW_REPEAT, object_id=object_id,
+                )
+            continue
+
+        items = source_record.get(iterate_over)
+        if items is None:
+            items = []
+        if not isinstance(items, (list, tuple)):
+            result.block(
+                f"'{iterate_over}' should be a list of rows for the repeating table row "
+                f"'{object_id}', but the source record carries {type(items).__name__} instead.",
+                check=ROW_REPEAT, object_id=object_id,
+            )
+            continue
+
+        rendered, misses = 0, []
+        broken = False
+        for row_index, item in enumerate(items):
+            if not isinstance(item, dict):
+                result.block(
+                    f"Row {row_index + 1} of '{iterate_over}' is {type(item).__name__}, "
+                    "not an object of column values, so nothing can be filled from it.",
+                    check=ROW_REPEAT, object_id=object_id,
+                )
+                broken = True
+                break
+            clone = copy.deepcopy(tr)
+            for column in columns:
+                token = column.get("token") or ""
+                key = column.get("source_key") or column.get("field_id") or ""
+                raw = item.get(key)
+                if raw in (None, ""):
+                    policy = str(column.get("on_missing") or BLANK).upper()
+                    if policy == "BLOCK":
+                        result.block(
+                            f"Row {row_index + 1} of '{iterate_over}' has no value for "
+                            f"'{key}', which this template requires.",
+                            check=ROW_REPEAT, object_id=object_id,
+                        )
+                        value = ""
+                    elif policy == DEFAULT and column.get("default") is not None:
+                        value = format_value(column.get("default"), _column_field(column), locale)
+                    else:
+                        value = ""
+                    misses.append({"row": row_index, "column": key, "policy": policy})
+                else:
+                    value = format_value(raw, _column_field(column), locale)
+                if token:
+                    _replace_in_row(clone, token, value)
+            _clear_placeholder_colours(clone)
+            tr.addprevious(clone)
+            rendered += 1
+
+        empty_behaviour = str(spec.get("empty_behaviour") or "REMOVE_ROW").upper()
+        parent = tr.getparent()
+        if parent is not None:
+            if rendered == 0 and not broken and empty_behaviour == "REMOVE_TABLE":
+                table = _paragraph_table_ancestor(tr)
+                if table is not None and table.getparent() is not None:
+                    table.getparent().remove(table)
+            else:
+                parent.remove(tr)
+
+        if rendered == 0 and not broken and spec.get("required"):
+            result.block(
+                f"'{iterate_over}' is empty, and this template requires at least one row "
+                f"in its '{object_id}' table.",
+                check=ROW_REPEAT, object_id=object_id,
+            )
+        result.repeat_lineage.append({
+            "object_id": object_id, "iterate_over": iterate_over,
+            "rows_rendered": rendered, "missing": misses,
+        })
+
+
 def fill_template(
     template_path: str,
     output_path: str,
@@ -321,6 +530,52 @@ def fill_template(
     # Collected while filling, applied once the paragraph is whole again.
     sentence_removals: list[tuple[int, str]] = []
 
+    # ---- 0. repeating table rows (§6 TABLE_ROW): locate prototypes now, fill last ----
+    # Located before anything is dropped, because the tokens are still where the
+    # template put them; *filled* after every other pass (step 5e), because a
+    # cloned row must never enter the (paragraph_index, span_index) space the
+    # passes in between address.
+    table_row_specs = [b for b in manifest["blocks"] if str(b.get("object_type") or "").upper() == "TABLE_ROW"]
+    repeat_rows: list[dict] = []
+    repeat_paragraph_indices: set[int] = set()
+    for spec in table_row_specs:
+        located = _locate_prototype_row(spec, paragraphs)
+        if located is None:
+            result.block(
+                f"The manifest declares a repeating table row "
+                f"'{spec.get('id') or spec.get('object_id')}', but no table row in this template "
+                "carries its column tokens. The template and its reading disagree; read the "
+                "template again.",
+                check=ROW_REPEAT, object_id=spec.get("id") or spec.get("object_id"),
+            )
+            continue
+        row_el, row_paragraphs = located
+        taken = next((entry for entry in repeat_rows if entry["row_el"] is row_el), None)
+        if taken is not None:
+            result.block(
+                f"Repeating rows '{spec.get('id') or spec.get('object_id')}' and "
+                f"'{taken['spec'].get('id') or taken['spec'].get('object_id')}' both resolve "
+                "to the same table row -- their column tokens overlap too much to tell the "
+                "rows apart. Give each table's columns distinct tokens.",
+                check=ROW_REPEAT, object_id=spec.get("id") or spec.get("object_id"),
+            )
+            continue
+        repeat_rows.append({"spec": spec, "row_el": row_el, "paragraphs": row_paragraphs})
+        repeat_paragraph_indices |= row_paragraphs
+
+    # A field whose every slot sits inside a prototype row has no single value:
+    # it is a column, resolved once per record of the collection in step 5e. It
+    # is excluded from the scalar passes below, or the default BLANK policy
+    # would blank the prototype's tokens before the repeat pass could read them.
+    scalar_fields = manifest["fields"]
+    if repeat_paragraph_indices:
+        scalar_fields = [
+            f for f in manifest["fields"]
+            if not (f.get("slots") and all(
+                slot.get("paragraph_index") in repeat_paragraph_indices
+                for slot in f["slots"]))
+        ]
+
     # ---- 1. evaluate conditions ----
     blocks_by_id = {b["id"]: b for b in manifest["blocks"]}
     drop_block_ids: set[str] = set()
@@ -366,6 +621,8 @@ def fill_template(
     drop_span_keys: set[tuple[int, int]] = set()
     touched_paragraphs: set[int] = set()
     for b in manifest["blocks"]:
+        if str(b.get("object_type") or "").upper() == "TABLE_ROW":
+            continue  # located by token and filled in step 5e; it has no paragraph range
         if b.get("start_span") is not None:
             p_idx = b["start_paragraph"]
             touched_paragraphs.add(p_idx)
@@ -510,10 +767,27 @@ def fill_template(
     # let the second field clobber the first. Instead: gather every
     # (bracket_token -> resolved_value) pair per span, then resolve the span's
     # final text in one pass.
+    # A field that is BOTH a repeating column and a scalar slot (the same
+    # <Amount> token inside the row and after "Total payable:") has no scalar
+    # value -- its values live per record inside the collection -- so BLANK
+    # would print an empty total with QA green. Missing + column-owned blocks.
+    repeat_column_field_ids = {
+        c.get("field_id")
+        for entry in repeat_rows
+        for c in (entry["spec"].get("columns") or ())
+        if c.get("field_id")
+    }
     field_values: dict[str, tuple[str | None, str]] = {}
     field_policies: dict[str, str] = {}
-    for f in manifest["fields"]:
+    for f in scalar_fields:
         value, source = _resolve_field_value(f, source_record, locale)
+        if source == "missing" and f["id"] in repeat_column_field_ids:
+            result.block(
+                f"Field '{f['id']}' is a repeating-row column but its token also appears "
+                "outside the row, where no single value exists for it. Give the outside "
+                "slot its own token (a total wants <Grand Total>, not the row's <Amount>).",
+                check=ROW_REPEAT, object_id=f["id"],
+            )
         policy = field_on_missing(f)
         field_policies[f["id"]] = policy
         if source == "missing" and policy == DEFAULT:
@@ -529,12 +803,14 @@ def fill_template(
         field_values[f["id"]] = (value, source)
 
     slots_by_span: dict[tuple, list[dict]] = {}
-    for f in manifest["fields"]:
+    for f in scalar_fields:
         for slot in f.get("slots", []):
             if slot.get("kind") == "mergefield":
                 continue
             if slot["paragraph_index"] in drop_paragraph_indices:
                 continue
+            if slot["paragraph_index"] in repeat_paragraph_indices:
+                continue  # a slot inside a prototype row belongs to the repeat pass
             key = (slot["paragraph_index"], slot["span_index"])
             if key in drop_span_keys:
                 continue  # losing branch of an inline switch, already blanked
@@ -575,11 +851,13 @@ def fill_template(
 
     # ---- 5. resolve mergefields (replace the complex-field run sequence with one literal run) ----
     mf_by_para_code: dict[tuple, MergeField] = {(mf.paragraph_index, mf.code): mf for mf in mergefields_live}
-    for f in manifest["fields"]:
+    for f in scalar_fields:
         for slot in f.get("slots", []):
             if slot.get("kind") != "mergefield":
                 continue
             if slot["paragraph_index"] in drop_paragraph_indices:
+                continue
+            if slot["paragraph_index"] in repeat_paragraph_indices:
                 continue
             mf = mf_by_para_code.get((slot["paragraph_index"], slot["code"]))
             if mf is None or not mf.field_elements:
@@ -663,9 +941,28 @@ def fill_template(
                     t_el.text = t_el.text.rstrip() + "."
                     break
 
-    # ---- 5b2. Korean postposition agreement ----
-    # Runs after filling, because the syllable that decides the form is the value
-    # that was just inserted. The decision is made on the whole paragraph's text
+    # ---- 5c. highlights are markup, not formatting ----
+    # Green/yellow annotation tells the assembler what to do with a run; it is
+    # not something the recipient of the letter should ever see. Only touched
+    # when the template actually used the highlight convention, so a red/blue
+    # template keeps whatever highlighting its author intended.
+    if uses_highlight_markup:
+        for hl in list(body_el.iter(_q("highlight"))):
+            if (hl.get(_q("val")) or "").lower() in HIGHLIGHT_ROLES and hl.getparent() is not None:
+                hl.getparent().remove(hl)
+
+    # ---- 5e. repeating table rows: clone the prototype once per record ----
+    # Dead last on purpose: every coordinate-driven pass above is finished, so
+    # the clones never shift an index anything still needs. See step 0.
+    if repeat_rows:
+        _apply_row_repeats(repeat_rows, source_record, locale, result, drop_paragraph_indices)
+
+    # ---- 5f. Korean postposition agreement ----
+    # Runs after filling AND after the repeat pass, because the syllable that
+    # decides the form is the value that was just inserted -- and for a
+    # particle beside a line-item token, that value only exists in the
+    # clones. Resolving earlier read the raw token's '>' and fixed the vowel
+    # form into every row. The decision is made on the whole paragraph's text
     # -- the deciding syllable and the alternation routinely sit in different runs
     # -- while the edit is applied to the single run that carries the alternation,
     # so no run's formatting is disturbed.
@@ -673,9 +970,9 @@ def fill_template(
         from app.generation.korean import ALTERNATION_RE, choose, has_batchim  # noqa: F401
         from app.generation.korean import _final_consonant
 
-        for p_el in paragraphs:
-            if p_el.getparent() is None:
-                continue
+        # body_el.iter yields only attached paragraphs -- the same set the
+        # old paragraphs-list walk visited, plus the clones.
+        for p_el in body_el.iter(_q("p")):
             t_els = [t for t in p_el.iter(_q("t"))]
             joined = "".join(t.text or "" for t in t_els)
             if not ALTERNATION_RE.search(joined):
@@ -714,16 +1011,6 @@ def fill_template(
                         f"value's script; the vowel form was used. Confirm with a native reader."
                     )
 
-    # ---- 5c. highlights are markup, not formatting ----
-    # Green/yellow annotation tells the assembler what to do with a run; it is
-    # not something the recipient of the letter should ever see. Only touched
-    # when the template actually used the highlight convention, so a red/blue
-    # template keeps whatever highlighting its author intended.
-    if uses_highlight_markup:
-        for hl in list(body_el.iter(_q("highlight"))):
-            if (hl.get(_q("val")) or "").lower() in HIGHLIGHT_ROLES and hl.getparent() is not None:
-                hl.getparent().remove(hl)
-
     document.save(output_path)
 
     # ---- 5d. archive normalisation ----
@@ -747,7 +1034,7 @@ def fill_template(
     qa_findings = placeholder_findings(check_body, policy)
     qa_findings += branch_findings(manifest, source_record, result.condition_lineage, drop_block_ids, policy)
     qa_findings += overflow_findings(
-        check_body, manifest["fields"], {fid: value for fid, (value, _source) in field_values.items()}, policy
+        check_body, scalar_fields, {fid: value for fid, (value, _source) in field_values.items()}, policy
     )
     qa_findings += layout_findings(template_path, output_path, policy)
     # Every check above this line asks "what is left over?" -- a placeholder, a
@@ -756,7 +1043,9 @@ def fill_template(
     # offer sentence, its date and its hours of work while reporting qa_passed.
     # This one asks the opposite question: the user supplied a value, so where
     # is it?
-    qa_findings += content_loss_findings(check_body, manifest, field_values, drop_block_ids, policy)
+    qa_findings += content_loss_findings(
+        check_body, {**manifest, "fields": scalar_fields}, field_values, drop_block_ids, policy
+    )
     # The template's body is passed so the doubled-word gate can tell the
     # engine's fault from the author's: this estate's own transfer letter
     # contains "offer to to the position" as a typo, and blaming the renderer

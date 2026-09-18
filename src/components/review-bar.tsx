@@ -24,25 +24,41 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
+import { ErrorBanner } from "@/components/error-banner";
+import { FadeIn, Stagger, StaggerItem } from "@/components/motion";
+import { plainly } from "@/components/processing-banner";
+import { SkeletonBar } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
 
 /** The five states a version can be in, and what each one means to a reader.
  *
  *  `pending_review` and `changes_requested` are two different objections -- the
  *  engine could not work something out, versus a person read it and said no --
- *  and collapsing them would send the reader to the wrong screen. */
+ *  and collapsing them would send the reader to the wrong screen.
+ *
+ *  The colours are the app's intelligence ramp, so a document's status, a
+ *  confidence band on the mapping screen and the processing banner all mean the
+ *  same thing by the same hue. `changes_requested` is the one that stays
+ *  purple: the ramp describes what the engine managed, and this state is the
+ *  only one on the list that is entirely a person -- painting it `uncertain`
+ *  would make it indistinguishable from `pending_review`, which is exactly the
+ *  confusion the two labels exist to prevent.
+ *
+ *  `draft` keeps `muted-foreground` for its text. `ai-idle` is a deliberately
+ *  low-chroma grey and at 12px it does not clear AA against the chip's own
+ *  tint; the tint and border carry the idle reading instead. */
 const STATUS: Record<string, { label: string; hint: string; icon: any; cls: string }> = {
   draft: {
     label: "Draft",
     hint: "Nothing outstanding. Ready for someone to sign off.",
     icon: Clock,
-    cls: "text-muted-foreground bg-muted border-border",
+    cls: "text-muted-foreground bg-ai-idle/10 border-ai-idle/25",
   },
   pending_review: {
     label: "Awaiting a decision",
     hint: "The engine could not work out every value on its own. Answer the open questions on the Review screen.",
     icon: Clock,
-    cls: "text-warning bg-warning/10 border-warning/30",
+    cls: "text-ai-uncertain bg-ai-uncertain/10 border-ai-uncertain/30",
   },
   changes_requested: {
     label: "Changes requested",
@@ -52,21 +68,21 @@ const STATUS: Record<string, { label: string; hint: string; icon: any; cls: stri
   },
   blocked: {
     label: "Failed QA",
-    hint: "This document failed its checks when it was generated and cannot be approved. Fix the manifest or the source row and generate again.",
+    hint: "This document failed its checks when it was generated and cannot be approved. Fix the template or the spreadsheet row it came from, then generate it again.",
     icon: ShieldAlert,
-    cls: "text-destructive bg-destructive/10 border-destructive/30",
+    cls: "text-ai-blocked bg-ai-blocked/10 border-ai-blocked/30",
   },
   approved: {
     label: "Approved",
     hint: "Signed off.",
     icon: CheckCircle2,
-    cls: "text-success bg-success/15 border-success/30",
+    cls: "text-ai-confident bg-ai-confident/12 border-ai-confident/30",
   },
   final: {
     label: "Final",
     hint: "Signed off and issued.",
     icon: CheckCircle2,
-    cls: "text-success bg-success/15 border-success/30",
+    cls: "text-ai-confident bg-ai-confident/12 border-ai-confident/30",
   },
 };
 
@@ -79,7 +95,10 @@ export function StatusChip({ status, reason, className }: {
   const Icon = meta.icon;
   return (
     <span
-      title={reason || meta.hint}
+      // The reason is the QA checker's own sentence and is written in the
+      // engine's vocabulary, so it is scrubbed on its way to the tooltip rather
+      // than at the source -- the stored text is what an auditor reads back.
+      title={reason ? plainly(reason) : meta.hint}
       className={cn(
         "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-medium leading-5",
         meta.cls, className,
@@ -110,6 +129,11 @@ export function ReviewBar({ versionId, onChanged, beforeApprove, className }: Pr
   const [reviews, setReviews] = useState<DocumentReview[]>([]);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Separate from `busy` on purpose: retrying a read is not a reason to disable
+  // Approve, and reusing the action flag here would grey out the controls every
+  // time somebody re-checked the status.
+  const [reloading, setReloading] = useState(false);
   const [objectOpen, setObjectOpen] = useState(false);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
@@ -126,12 +150,14 @@ export function ReviewBar({ versionId, onChanged, beforeApprove, className }: Pr
         setStatus(version.status);
         setStatusReason(version.status_reason);
         setReviews(list.items);
+        setLoadError(null);
         onChanged?.(version.status);
       })
+      // Held on screen rather than thrown as a toast. A failed read leaves the
+      // chip showing the last thing we knew, and a notice that has already faded
+      // is no help to somebody deciding whether to trust it.
       .catch((e: any) => {
-        toast.error("Could not load this document's status", {
-          description: e?.message ?? String(e),
-        });
+        setLoadError(e?.message ?? String(e));
       })
       .finally(() => setLoaded(true));
 
@@ -146,29 +172,53 @@ export function ReviewBar({ versionId, onChanged, beforeApprove, className }: Pr
     } catch (e: any) {
       // The server's own message, not a generic one: "somebody has asked for
       // changes to this document: the salary is wrong" is the whole reason the
-      // refusal is useful.
-      toast.error(e?.message ?? String(e));
+      // refusal is useful. Only the engine's internal words are taken out of it.
+      toast.error(plainly(e?.message ?? String(e)));
     } finally {
       setBusy(false);
     }
   };
 
+  // The chip and both buttons, at their real sizes: this bar sits directly above
+  // a document, and a one-line spinner that grows into a 32px row pushes the
+  // thing the reader is looking at down the page the moment the status lands.
   if (!loaded) {
     return (
-      <div className={cn("flex items-center gap-2 text-xs text-muted-foreground", className)}>
-        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking status…
+      <div
+        role="status"
+        aria-label="Checking this document's status"
+        className={cn("flex flex-wrap items-center gap-2", className)}
+      >
+        <SkeletonBar className="h-6 w-36 rounded-full" />
+        <div className="ml-auto flex items-center gap-2">
+          <SkeletonBar className="h-8 w-36 rounded-md" />
+          <SkeletonBar className="h-8 w-24 rounded-md" />
+        </div>
       </div>
     );
   }
 
   return (
     <div className={cn("space-y-3", className)}>
+      {loadError && (
+        <ErrorBanner
+          title="Could not check this document's status"
+          message="What you see below may be out of date. Nothing has been changed."
+          detail={plainly(loadError)}
+          onRetry={() => {
+            setReloading(true);
+            void refresh().finally(() => setReloading(false));
+          }}
+          retrying={reloading}
+        />
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <StatusChip status={status} reason={statusReason} />
 
         {statusReason && !signed && (
-          <span className="text-xs text-muted-foreground max-w-md truncate" title={statusReason}>
-            {statusReason}
+          <span className="text-xs text-muted-foreground max-w-md truncate" title={plainly(statusReason)}>
+            {plainly(statusReason)}
           </span>
         )}
 
@@ -303,14 +353,17 @@ function ReviewThread({
       setComments((c) => [...c, added]);
       setDraft("");
     } catch (e: any) {
-      toast.error("Could not add that comment", { description: e?.message ?? String(e) });
+      toast.error("Could not add that comment", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setSending(false);
     }
   };
 
   return (
-    <div className="rounded-lg border border-purple/30 bg-purple/5 p-4 space-y-3">
+    // Purple, like the status chip it belongs to: on this screen that colour
+    // means a person is in the loop, which is not one of the things the engine
+    // can be.
+    <FadeIn className="rounded-lg border border-purple/30 bg-purple/5 p-4 space-y-3">
       <div className="flex items-start gap-2">
         <AlertTriangle className="h-4 w-4 mt-0.5 text-purple shrink-0" />
         <div className="min-w-0 flex-1">
@@ -324,9 +377,9 @@ function ReviewThread({
       </div>
 
       {comments.length > 0 && (
-        <div className="space-y-2 pl-6">
-          {comments.map((c) => (
-            <div key={c.id} className="rounded-md border border-border bg-card px-3 py-2">
+        <Stagger className="space-y-2 pl-6">
+          {comments.map((c, i) => (
+            <StaggerItem key={c.id} index={i} className="rounded-md border border-border bg-card px-3 py-2">
               <div className="text-xs text-muted-foreground mb-0.5">{c.author_name ?? "Someone"}</div>
               {c.quoted_text && (
                 // What the run said when the remark was written. Without it,
@@ -340,9 +393,9 @@ function ReviewThread({
                 </blockquote>
               )}
               <div className="text-sm whitespace-pre-wrap">{c.body}</div>
-            </div>
+            </StaggerItem>
           ))}
-        </div>
+        </Stagger>
       )}
 
       <div className="pl-6 flex flex-col gap-2">
@@ -367,13 +420,13 @@ function ReviewThread({
               <>
                 <Button
                   variant="outline" size="sm" disabled={busy || blocker != null}
-                  title={blocker ?? undefined} onClick={onReject}
+                  title={blocker ? plainly(blocker) : undefined} onClick={onReject}
                 >
                   <XCircle className="h-4 w-4 mr-1.5" /> Changes still needed
                 </Button>
                 <Button
                   size="sm" disabled={busy || blocker != null}
-                  title={blocker ?? undefined} onClick={onApprove}
+                  title={blocker ? plainly(blocker) : undefined} onClick={onApprove}
                 >
                   <CheckCircle2 className="h-4 w-4 mr-1.5" /> Looks right
                 </Button>
@@ -381,9 +434,9 @@ function ReviewThread({
             )}
           </div>
         </div>
-        {blocker && <p className="text-xs text-muted-foreground">{blocker}</p>}
+        {blocker && <p className="text-xs text-muted-foreground">{plainly(blocker)}</p>}
       </div>
-    </div>
+    </FadeIn>
   );
 }
 

@@ -38,6 +38,15 @@ APPROVED = "approved"
 #: alone; only an explicit revoke moves a document out of one.
 SIGNED = frozenset({APPROVED})
 
+#: States whose bytes may leave the building.
+#:
+#: `"final"` is in here because `save_document_version` and the revoke endpoint
+#: have always tested for the pair, and a third and fourth hand-written copy of
+#: it is how the four drift apart. It lives in this module rather than in the
+#: router because the unauthenticated download-grant handler needs it too, and
+#: that module deliberately imports from no router.
+DOWNLOADABLE = frozenset({APPROVED, "final"})
+
 
 def derive_status(db, *, version, document) -> tuple:
     """`(status, reason)` this version should be in, from what is actually true.

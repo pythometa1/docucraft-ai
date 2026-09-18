@@ -77,3 +77,4 @@ backend/tests/fixtures/goldens/hospira_*/
 backend/tests/fixtures/records/icc_ct*.xlsx
 backend/tests/fixtures/canaries/icc_ct*.json
 backend/tests/fixtures/snapshots/*hospira*.json
+backend/*.db.bak*

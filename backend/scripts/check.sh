@@ -95,6 +95,99 @@ FLOORS = {
     # embeddings table, and nothing called the overlay renderer.
     "retrieval/indexing.py": 94,
     "generation/pdf_fill.py": 95,
+    # The invoice service. `invoicing` is the Decimal money math -- every branch
+    # is a figure on somebody's tax return; `numbering` hands out INV-#### and an
+    # untested branch there is a duplicate number in an audit; `single` is the
+    # shared single-record generation core both the manifest endpoint and the
+    # invoice endpoint execute; `blueprint_author` is the only place a model's
+    # output becomes a template, and its refusals are the whole safety story.
+    "finance/invoicing.py": 85,
+    # The clinical service's derived counts: a partial sum on a study report
+    # is a wrong number that looks deliberate, so every branch of the
+    # all-or-nothing rule is exercised.
+    "clinical/derivations.py": 95,
+    # The shared document engine. Every module's sources pass through these:
+    # a chunking bug does not produce a wrong sentence, it produces a right
+    # sentence citing the wrong page, which no reviewer can catch by reading.
+    "docgen/chunking.py": 90,
+    "docgen/extraction.py": 85,
+    "docgen/markers.py": 90,
+    "docgen/ranking.py": 88,
+    # The CMC module's numeric discipline. `values` is the only thing standing
+    # between a certificate of analysis reporting 0.050 and a dossier printing
+    # 0.05, and `limits` decides whether a batch conformed -- a wrong verdict
+    # there is a conformance claim nobody made. Both fail by looking right.
+    "cmc/values.py": 95,
+    "cmc/limits.py": 92,
+    # The one place a number is allowed to change on its way to a comparison.
+    # Every branch of it decides whether two quantities may be compared at all,
+    # and the failure mode of a wrong one is not an error -- it is a confident
+    # PASS on a batch that is out of specification, which is what this module
+    # was written to stop.
+    "cmc/units.py": 100,
+    # Flow B end to end. `tables` is the only thing that writes a laboratory
+    # value into a document, and it does so by copying a stored string -- an
+    # untested branch there is a number nobody typed. `qc` decides whether a
+    # dossier may leave the building, and `export` resolves every [TABLE:]
+    # marker at the moment of writing, which is what makes a correction in the
+    # grid reach a document nobody regenerated.
+    "cmc/tables.py": 90,
+    "cmc/qc.py": 88,
+    "cmc/export.py": 85,
+    "cmc/drafting.py": 88,
+    # The Safety module's count layer. Every figure in a periodic safety report
+    # is a count, and the way counts go wrong is that two code paths compute
+    # them slightly differently -- so there is one path, and every branch of it
+    # decides whether a case is inside a regulatory reporting window. An
+    # untested branch here is a tabulation that is right about the wrong
+    # interval, which reads exactly like a tabulation.
+    "safety/scope.py": 97,
+    "safety/roles.py": 97,
+    "safety/trees.py": 100,
+    "safety/registry.py": 100,
+    # Reading an ICSR and a line listing. Both fail by looking right: a date
+    # read the wrong way round moves a case between two reporting intervals,
+    # and a line listing read row-per-case multiplies every count in the
+    # document by however many reactions people happened to have.
+    "safety/e2b.py": 95,
+    "safety/line_listing.py": 97,
+    # The pipeline, and the gate it stops at. An untested branch here is a
+    # source recorded as read that was not, or -- much worse -- one that
+    # travelled past de-identification before de-identification exists.
+    "safety/ingest.py": 90,
+    # The one thing standing between a patient's name and a vector store.
+    # Every branch decides either to mask something or to ask a person about
+    # it, and both failures are silent: an unmasked name leaks, and an
+    # over-eager mask destroys the clinical fact the case exists to record.
+    "safety/deident.py": 97,
+    # The three things the machine proposes and a person decides. `meddra`
+    # refuses to guess a code, `expectedness` refuses to flatten a qualified
+    # listing, and `duplicates` refuses to merge -- every branch is one of
+    # those refusals, and a refusal that is not exercised is not there.
+    "safety/meddra.py": 98,
+    "safety/expectedness.py": 100,
+    "safety/duplicates.py": 98,
+    # Every figure a periodic safety report prints. A branch not exercised here
+    # is a cell counted in the wrong column -- serious as non-serious, a
+    # suggestion as a determination -- in a table that reads as complete.
+    "safety/tabulations.py": 90,
+    "docgen/grids.py": 95,
+    # The one place a periodic report's prose meets a model. Every branch is a
+    # refusal that keeps a name out of a provider's logs or a gap from becoming
+    # a plausible sentence.
+    "safety/drafting.py": 95,
+    # The export gate. A branch not exercised is a blocker that cannot fire.
+    "safety/qc.py": 94,
+    # What leaves the building. Every branch is a refusal: a table with nothing
+    # behind it, a revision mark on the wrong paragraph, a name in the file.
+    "safety/export.py": 95,
+    "docgen/assembly.py": 95,
+    # The screening statistic. Hand-checked arithmetic, and every undefined
+    # cell a refusal rather than a number that looks like evidence.
+    "safety/signals.py": 100,
+    "numbering.py": 88,
+    "generation/single.py": 90,
+    "compiler/blueprint_author.py": 90,
     # The contract: what production is allowed to execute, and whether a
     # document can still be reproduced from the pair it was generated against.
     "manifests/models.py": 90,

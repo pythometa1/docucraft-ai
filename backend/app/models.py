@@ -1,23 +1,15 @@
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import (
-    JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text,
+    JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db import Base
+# Re-exported on purpose: half the codebase writes `from app.models import now`.
+from app.db import Base, now, uid  # noqa: F401
 from app.retrieval.embeddings import VectorColumn
 from app.retrieval.vector import DEFAULT_DIMENSIONS
-
-
-def uid() -> str:
-    return str(uuid.uuid4())
-
-
-def now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 class Organization(Base):
@@ -297,6 +289,19 @@ class GeneratedDocument(Base):
     language: Mapped[str] = mapped_column(String, default="en")
     current_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="draft")
+    #: Where a person says this document is in *their* process, as opposed to
+    #: what the engine and the reviewers say about it.
+    #:
+    #: Only `work_in_progress`, `completed` and `cancelled` are ever stored --
+    #: they are the three a person can assert. `approved` and `blocked` are facts
+    #: about the document that this column must not be able to claim: `approved`
+    #: is a signature (the approve endpoint writes `status`, `approved_by`,
+    #: `approved_at` and an audit row), and `blocked` is the fill engine's QA
+    #: verdict. Both are layered over this on read by
+    #: `generation.workflow_status.effective`, so the two columns cannot
+    #: disagree: each has exactly one writer, and neither derives from the other.
+    workflow_status: Mapped[str] = mapped_column(
+        String, default="work_in_progress", server_default="work_in_progress")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
@@ -1290,3 +1295,62 @@ class ReviewerCorrection(Base):
     rejected_column: Mapped[str | None] = mapped_column(String, nullable=True)
     corrected_by: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Service verticals.
+#
+# A "service" in this codebase is a taxonomy entry, a kit family, a prompt
+# pack and a frontend flow -- plus, only where the vertical has domain records
+# of its own, a registry table. Those tables live in the service's own package
+# (app/finance/models.py, ...) and are imported at the tail of this file, so
+# the single `from app import models` in alembic/env.py registers every table
+# on Base.metadata exactly as before. NumberSequence stays HERE because it
+# belongs to the shared allocator (app/numbering.py), not to any one vertical.
+# ---------------------------------------------------------------------------
+
+
+class NumberSequence(Base):
+    """Org-scoped named counters: INV-0001, and whatever the next vertical needs.
+
+    Not the global `counters` table, deliberately -- that one is keyed by bare
+    name with no org_id, so it cannot sit behind row-level security and two
+    tenants would share one numbering. An invoice number sequence with a gap or
+    a duplicate is a finding in a tax audit, so allocation locks the row
+    (SELECT ... FOR UPDATE on PostgreSQL) for the length of the transaction.
+    """
+
+    __tablename__ = "number_sequences"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(String, index=True)
+    key: Mapped[str] = mapped_column(String)  # "invoice", later "quotation", ...
+    prefix: Mapped[str] = mapped_column(String, default="INV-")
+    padding: Mapped[int] = mapped_column(Integer, default=4)
+    next_value: Mapped[int] = mapped_column(Integer, default=1)
+    __table_args__ = (UniqueConstraint("org_id", "key", name="uq_number_sequences_org_key"),)
+
+
+# Service verticals' registry tables, imported last and re-exported so
+# `from app.models import Customer` keeps working everywhere it is written.
+# The service model modules import `uid`/`now` from `app.db` (the leaf), never
+# from here -- importing back into this module mid-initialisation is exactly
+# the partially-initialized-module crash that rule exists to prevent.
+from app.clinical.models import ClinicalDocument, Study  # noqa: E402,F401
+from app.cmc.models import (  # noqa: E402,F401
+    CmcBatch, CmcBatchFormula, CmcChange, CmcChunk, CmcCitation, CmcDeliverable,
+    CmcDocument, CmcExport, CmcMaterial, CmcProject, CmcResult, CmcSection,
+    CmcSectionDraft, CmcSite, CmcSpecification, CmcTest,
+)
+from app.csr.models import (  # noqa: E402,F401
+    CsrChunk, CsrCitation, CsrDocument, CsrProject, CsrSection, CsrSectionDraft,
+    CsrTemplate,
+)
+from app.finance.models import Customer, Invoice  # noqa: E402,F401
+from app.safety.models import (  # noqa: E402,F401
+    PvApprovalStatus, PvCase, PvCaseDrug, PvCaseEvent, PvCaseLab, PvCaseNarrative,
+    PvCaseOriginal, PvChunk, PvCitation, PvDeidItem, PvDocument,
+    PvDuplicateCandidate, PvDueDate, PvExport, PvExposure, PvLiteratureRef,
+    PvMappingProfile, PvMember, PvProduct, PvReportInstance, PvRsiListedTerm,
+    PvRsiVersion, PvSafetyAction, PvSafetyConcern, PvSection, PvSectionDraft,
+    PvSignal, PvStudy,
+)

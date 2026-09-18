@@ -9,9 +9,13 @@ export type FunctionKey =
   | "Medical Affairs"
   | "Marketing"
   | "Legal"
+  | "Finance"
   | "Regulatory Affairs";
 
 export interface TemplateFile {
+  /** Set when a blueprint is already open on this template, so the row can offer
+   *  "continue editing" and the click need not guess whether one exists. */
+  blueprintId?: string;
   id: string;
   name: string;
   size: string;
@@ -25,6 +29,25 @@ export interface TemplateFile {
   compileError?: string;
   fieldCount: number;
   conditionCount: number;
+  /** Placeholders in the document that the reading did not claim.
+   *
+   *  Each one is a document that will come back blocked with "Leftover
+   *  placeholder brackets": the fill engine leaves the literal text where the
+   *  value should go, and QA refuses it. Known the moment the template is read,
+   *  which is the moment somebody can still change the template. */
+  unfillable: UnfillablePlaceholder[];
+  unfillableCount: number;
+}
+
+export interface UnfillablePlaceholder {
+  /** `uncovered_placeholder` — nothing claims it, and a field could be added.
+   *  `W-SPLIT-PLACEHOLDER` — Word split it across runs, so no field *can* be
+   *  attached to it and the fix is to retype it in one go. The two need
+   *  different advice, so the code is carried rather than flattened away. */
+  code: string;
+  paragraph_index: number | null;
+  placeholder: string | null;
+  message: string | null;
 }
 
 export interface SourceFile {
@@ -39,6 +62,34 @@ export interface SourceFile {
   currentVersionId?: string;
 }
 
+/** Where a document sits, as a reader sees it.
+ *
+ *  Two axes are collapsed into this one list on read: `approved` comes from the
+ *  signature and `blocked` from the QA gate, and neither is a label anybody
+ *  applies. The other three are. */
+export type WorkflowStatus =
+  | "work_in_progress"
+  | "completed"
+  | "approved"
+  | "blocked"
+  | "cancelled";
+
+/** The three a person may actually set. The server refuses the other two with an
+ *  explanation, so the select offers three options rather than five that fail. */
+export type SettableWorkflowStatus = "work_in_progress" | "completed" | "cancelled";
+
+export const SETTABLE_WORKFLOW: SettableWorkflowStatus[] = [
+  "work_in_progress", "completed", "cancelled",
+];
+
+export const WORKFLOW_LABELS: Record<WorkflowStatus, string> = {
+  work_in_progress: "Work in progress",
+  completed: "Completed",
+  approved: "Approved",
+  blocked: "Blocked",
+  cancelled: "Cancelled",
+};
+
 export interface GeneratedDoc {
   id: string;
   filename: string;
@@ -48,6 +99,15 @@ export interface GeneratedDoc {
   currentVersionId?: string;
   status: string;
   statusReason?: string;
+  /** What to show. Layers the signature and the QA verdict over the lane. */
+  workflowStatus: WorkflowStatus;
+  /** What the person actually set, which is what the dropdown shows as selected.
+   *  Kept separate so a document somebody marked completed that then failed QA
+   *  reads "Blocked" without forgetting they had marked it completed. */
+  workflowStatusSet: SettableWorkflowStatus;
+  /** Whether the server would hand over the bytes. Sent so the control can be
+   *  disabled with a reason rather than discovered by pressing it. */
+  downloadable: boolean;
   /** Set when a person has an objection open against the current version. */
   openReviewId?: string;
   generatedAt: string;
@@ -306,3 +366,893 @@ export interface QualityReport {
     note: string;
   };
 }
+
+/* ---- The invoice service ---- */
+
+export type Customer = {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  tax_id: string | null;
+  default_currency: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InvoiceSummary = {
+  id: string;
+  number: string;
+  status: string; // issued | draft | void
+  project_id: string;
+  customer_id: string | null;
+  /** The customer as billed -- a snapshot, deliberately not a live join. */
+  customer: { name?: string | null; address?: string | null; tax_id?: string | null };
+  currency: string;
+  subtotal: string | null;
+  tax_amount: string | null;
+  total: string | null;
+  line_count: number;
+  manifest_id: string | null;
+  document_id: string | null;
+  document_version_id: string | null;
+  qa_passed: boolean;
+  issued_at: string | null;
+  due_at: string | null;
+  created_at: string;
+};
+
+export type InvoiceGenerated = InvoiceSummary & {
+  filename: string;
+  qa_notes: string[];
+  /** Why the invoice was NOT auto-approved (role cannot approve, or the
+   *  template is legally binding) -- null when it was. Downloads 409 until a
+   *  person with the capability signs it off. */
+  approval_note: string | null;
+  locale: string;
+  locale_source: string;
+};
+
+/* ---- The clinical service ---- */
+
+export type Study = {
+  id: string;
+  protocol_number: string;
+  title: string | null;
+  sponsor: string | null;
+  phase: string | null;
+  indication: string | null;
+  principal_investigator: string | null;
+  status: string; // active | closed
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ClinicalDocSummary = {
+  id: string;
+  number: string;
+  status: string; // final | draft | void
+  project_id: string;
+  study_id: string | null;
+  /** The study as reported -- a snapshot, deliberately not a live join. */
+  study: {
+    protocol_number?: string | null; title?: string | null; sponsor?: string | null;
+    phase?: string | null; indication?: string | null;
+    principal_investigator?: string | null;
+  };
+  document_type: string; // csr | protocol_amendment | icf | investigator_brochure
+  title: string | null;
+  version_label: string | null;
+  manifest_id: string | null;
+  document_id: string | null;
+  document_version_id: string | null;
+  document_date: string | null;
+  qa_passed: boolean;
+  created_at: string;
+};
+
+export type ClinicalDocGenerated = ClinicalDocSummary & {
+  filename: string;
+  qa_notes: string[];
+  /** Why the document was NOT auto-approved -- null when it was. */
+  approval_note: string | null;
+  locale: string;
+  locale_source: string;
+};
+
+/* ---- The Quality/CMC module ---- */
+
+export type CmcSite = {
+  id: string;
+  name: string;
+  address: string | null;
+  identifier: string | null;
+  activities: string[];
+  gmp_evidence_document_id: string | null;
+};
+
+export type CmcDeliverable = {
+  id: string;
+  doc_type_key: string;
+  name: string;
+  structure_basis: string | null;
+  template_source: string;
+  status: string;
+  section_count: number | null;
+};
+
+export type CmcDeliverableType = {
+  key: string;
+  name: string;
+  structure_basis: string;
+  section_count: number;
+  required: string[];
+  recommended: string[];
+  /** The milestone that will build it, when it is not built yet. */
+  unbuilt: string | null;
+};
+
+export type CmcSection = {
+  id: string;
+  section_code: string;
+  title: string;
+  sort_order: number;
+  enabled: boolean;
+  is_container: boolean;
+  applicability: string; // applicable | not_applicable | referenced_dmf
+  applicability_justification: string | null;
+  guidance_text: string | null;
+  /** Set when this section renders a table from verified data, not prose. */
+  table_key: string | null;
+  status: string;
+};
+
+export type CmcProject = {
+  id: string;
+  project_id: string;
+  project_name: string | null;
+  product_name: string;
+  inn_or_ds_name: string | null;
+  dosage_form: string | null;
+  strengths: string[];
+  route_of_administration: string | null;
+  submission_type: string | null;
+  target_regions: string[];
+  development_phase: string | null;
+  baseline_version: string | null;
+  status: string;
+  sites: CmcSite[];
+  deliverables: CmcDeliverable[];
+  required_doc_types: string[];
+  recommended_doc_types: string[];
+};
+
+export type CmcDocument = {
+  id: string;
+  doc_type: string;
+  material_id: string | null;
+  filename: string;
+  size_bytes: number;
+  page_count: number | null;
+  processing_status: string;
+  error_message: string | null;
+  chunk_count: number;
+  /** How many structured values this source yielded. Zero is a real answer. */
+  value_count: number;
+};
+
+export type CmcMaterial = {
+  id: string;
+  kind: string;
+  name: string;
+  grade: string | null;
+  compendial_ref: string | null;
+  supplier: string | null;
+  dmf_reference: string | null;
+};
+
+export type CmcBatchRow = {
+  id: string;
+  material_id: string;
+  batch_number: string;
+  batch_size: string | null;
+  batch_size_unit: string | null;
+  manufacture_date: string | null;
+  purpose: string | null;
+  scale: string | null;
+  site_id: string | null;
+  site_name: string | null;
+  source_document_id: string | null;
+};
+
+export type CmcTestRow = {
+  id: string;
+  material_id: string;
+  test_name: string;
+  method_id: string | null;
+  method_type: string | null;
+  unit: string | null;
+  acceptance_criterion_text: string | null;
+  limit_lower: string | null;
+  limit_upper: string | null;
+  limit_operator: string | null;
+  stage: string;
+  source_document_id: string | null;
+};
+
+export type CmcResultRow = {
+  id: string;
+  batch_id: string;
+  batch_number: string | null;
+  material_id: string | null;
+  material_name: string | null;
+  test_id: string;
+  test_name: string | null;
+  acceptance_criterion_text: string | null;
+  storage_condition: string | null;
+  timepoint_months: number | null;
+  orientation: string | null;
+  /** The source's own string. This is what a document prints. */
+  value_text: string;
+  operator: string | null;
+  unit: string | null;
+  extraction_confidence: number;
+  verified_by: string | null;
+  verified_at: string | null;
+  conflict_with_id: string | null;
+  source_document_id: string | null;
+  page: number | null;
+  table_ref: string | null;
+  /** pass | fail | unknown, decided server-side so the grid and QC agree. */
+  conformance: string;
+  conformance_reason: string;
+};
+
+export type CmcDataSummary = {
+  total: number;
+  verified: number;
+  unverified: number;
+  conflicts: number;
+  all_verified: boolean;
+};
+
+export type CmcReadiness = {
+  required: { doc_type: string; uploaded: boolean; indexed: boolean }[];
+  recommended: { doc_type: string; uploaded: boolean; indexed: boolean }[];
+  missing_required: string[];
+  ready_to_generate: boolean;
+};
+
+export type CmcDraft = {
+  id: string;
+  version: number;
+  content: string;
+  created_by: string;
+  model: string | null;
+  generation_params: Record<string, unknown>;
+  created_at: string;
+};
+
+export type CmcSource = {
+  marker: string;
+  chunk_id: string;
+  document_id: string;
+  filename: string | null;
+  doc_type: string;
+  page: number | null;
+  table_id: string | null;
+  is_table: boolean;
+  content: string;
+};
+
+export type CmcRenderedTable = {
+  key: string;
+  title: string;
+  /** The flattened union, for filtering and counting. */
+  columns: string[];
+  rows: string[][];
+  /** The document's own arrangement -- one entry per grid the export writes.
+   *  A stability summary is one grid per batch and condition here and one wide
+   *  union in `rows`, so a screen drawn from `rows` would preview a document
+   *  nobody produces. Render these. */
+  groups: { title: string; columns: string[]; rows: string[][] }[];
+  notes: string[];
+  unverified: number;
+  missing: string[];
+};
+
+export type CmcFinding = {
+  code: string;
+  severity: string; // blocker | warning | info
+  message: string;
+  section_code: string | null;
+  detail: Record<string, unknown>;
+};
+
+export type CmcExportFile = {
+  kind: string;
+  deliverable_id: string;
+  filename: string;
+  storage_path: string;
+};
+
+export type CmcExportRecord = {
+  id: string;
+  granularity: string;
+  files: CmcExportFile[];
+  overridden: boolean;
+  created_at: string;
+};
+
+/* ---- The Safety / Pharmacovigilance module ----
+ *
+ * The shape that matters here is the time model. A report instance carries
+ * three dates rather than one, and they are not interchangeable: the period
+ * bounds what counts as "this interval", and the data lock point bounds what
+ * may be counted at all. `PvScopePreview` is what the setup screen shows for a
+ * set of dates BEFORE anybody commits to them.
+ */
+
+export type PvRsiVersion = {
+  id: string;
+  rsi_type: string;
+  version_label: string;
+  effective_date: string | null;
+  source_document_id: string | null;
+  superseded_by: string | null;
+  is_current: boolean;
+  listed_term_count?: number;
+  created_at: string;
+};
+
+export type PvReportInstance = {
+  id: string;
+  pv_product_id: string;
+  doc_type_key: string;
+  doc_type_name: string;
+  structure_basis: string | null;
+  /** `ibd` or `dibd`: which birth date this report's cumulative figures count
+   *  from. A property of the report type, not of the product. */
+  cumulative_anchor: string | null;
+  sequence_number: number | null;
+  period_start: string;
+  period_end: string;
+  data_lock_point: string;
+  rsi_version_id: string | null;
+  meddra_version: string | null;
+  baseline_report_id: string | null;
+  regions: string[];
+  status: string;
+  qppv_signoff_by: string | null;
+  qppv_signoff_at: string | null;
+  /** What this report stated, frozen at sign-off. The next report's QC checks
+   *  its cumulative count against this. */
+  figures_at_signoff: Record<string, number> | null;
+  /** ICSR narrative reports only: the case, or batch of cases, narrated. */
+  case_ids: string[];
+  section_count?: number;
+  due_dates?: PvDueDate[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type PvDueDate = {
+  id: string;
+  region: string;
+  submission_due_date: string | null;
+  basis_note: string | null;
+  /** Always true. This system is not the reporting clock. */
+  is_informational: boolean;
+};
+
+export type PvProduct = {
+  id: string;
+  project_id: string;
+  product_name: string;
+  inn: string | null;
+  mah_name: string | null;
+  atc_code: string | null;
+  /** International birth date: first approval anywhere. */
+  ibd: string | null;
+  /** Development international birth date: first trial authorisation. */
+  dibd: string | null;
+  formulations: string[];
+  routes: string[];
+  approved_indications: string[];
+  development_indications: string[];
+  regions: string[];
+  status: string;
+  reports: PvReportInstance[];
+  rsi_versions: PvRsiVersion[];
+  my_role?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PvScopePreview = {
+  interval_cases: number;
+  interval_events: number;
+  cumulative_cases: number | null;
+  cumulative_events: number | null;
+  cumulative_from: string | null;
+  cumulative_anchor: string;
+  cumulative_unavailable?: string;
+  new_since_baseline: number;
+  /** In the store, excluded by the data lock point. Shown, never counted. */
+  excluded_after_lock: number;
+  /** In the store with no date at all. Counted nowhere. */
+  undated: number;
+  baseline_report_id?: string;
+};
+
+export type PvReportType = {
+  key: string;
+  name: string;
+  structure_basis: string;
+  cumulative_anchor: string;
+  periodic: boolean;
+  section_count: number;
+  required_sources: string[];
+  recommended_sources: string[];
+};
+
+export type PvSection = {
+  id: string;
+  section_code: string;
+  title: string;
+  sort_order: number;
+  level: number;
+  is_container: boolean;
+  enabled: boolean;
+  guidance_text: string | null;
+  table_key: string | null;
+  source_types: string[];
+  status: string;
+  /** carried_forward | changed | new_data | needs_rewrite | fresh */
+  delta_status: string;
+  baseline_section_id: string | null;
+};
+
+export type PvMember = {
+  id: string;
+  user_id: string;
+  user_name: string | null;
+  user_email: string | null;
+  pv_role: string;
+  granted_by: string;
+  created_at: string;
+};
+
+export type PvApprovalStatus = {
+  id: string;
+  country: string;
+  approval_date: string | null;
+  indication: string | null;
+  formulation: string | null;
+  status: string;
+  source_document_id: string | null;
+};
+
+export type PvSource = {
+  id: string;
+  doc_type: string;
+  /** e2b_r3_xml | line_listing | cioms_form | case_narrative_doc | document.
+   *  Which pipeline reads the file, as opposed to which sections may cite it. */
+  input_type: string;
+  report_instance_id: string | null;
+  filename: string;
+  mime_type: string | null;
+  size_bytes: number;
+  page_count: number | null;
+  /** queued | parsing | awaiting_deid | done | failed */
+  processing_status: string;
+  error_message: string | null;
+  chunk_count: number;
+  case_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PvReadiness = {
+  required: { doc_type: string; label: string; present: boolean }[];
+  recommended: { doc_type: string; label: string; present: boolean }[];
+  missing_required: string[];
+};
+
+/** Where M2 stops. Nothing downstream may use a source until masking has run,
+ *  and masking is M3 — so `cleared` is false by construction for now. */
+export type PvDeidGate = {
+  documents_waiting: number;
+  cases_pending: number;
+  cleared: boolean;
+  note: string;
+};
+
+/** One thing the masking pass found and would not settle alone. While any of
+ *  these is pending, the sources it came from are not indexed. */
+export type PvDeidItem = {
+  id: string;
+  identifier_type: string;
+  detected_text: string;
+  context_snippet: string | null;
+  proposed_mask: string | null;
+  status: string;
+  case_id: string | null;
+  document_id: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  created_at: string;
+};
+
+export type PvMappingProfile = {
+  id: string;
+  name: string;
+  source_system: string | null;
+  column_map: Record<string, string>;
+  shared: boolean;
+  created_at?: string;
+};
+
+export type PvCaseRow = {
+  id: string;
+  worldwide_case_id: string | null;
+  local_case_ids: string[];
+  case_version: number | null;
+  report_source: string | null;
+  country_of_occurrence: string | null;
+  initial_receipt_date: string | null;
+  latest_receipt_date: string | null;
+  is_serious: boolean;
+  seriousness_criteria: string[];
+  patient_age: number | null;
+  patient_sex: string | null;
+  deidentification_status: string;
+  confirmed_by: string | null;
+  source_document_id: string | null;
+  imported_from: string | null;
+  event_count: number;
+  coding_required: number;
+  /** interval | cumulative | after_lock | undated | outside, against a chosen
+   *  report. From the same scope layer the figures come from. */
+  scope: string | null;
+};
+
+/** One adverse event within a case. `expectedness` is the confirmed column and
+ *  `suggested` is what the system proposed — they are deliberately different
+ *  fields, and only a qualified person writes the first. */
+export type PvCaseEvent = {
+  id: string;
+  case_id: string;
+  worldwide_case_id: string | null;
+  verbatim_term: string | null;
+  meddra_llt: string | null;
+  meddra_pt: string | null;
+  meddra_soc: string | null;
+  meddra_version: string | null;
+  coding_required: boolean;
+  is_serious: boolean;
+  seriousness_criteria: string[];
+  expectedness: string;
+  expectedness_rsi_version_id: string | null;
+  causality_reporter: string | null;
+  causality_company: string | null;
+  onset_date: string | null;
+  outcome: string | null;
+  is_aesi: boolean;
+  suggested: {
+    expectedness?: { value: string | null; basis: string; rsi_label: string | null };
+  };
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+};
+
+export type PvEventSummary = {
+  events: number;
+  confirmed: number;
+  unconfirmed: number;
+  coding_required: number;
+  all_confirmed: boolean;
+};
+
+export type PvDuplicatePair = {
+  id: string;
+  score: number;
+  matched_on: string[];
+  status: string;
+  case: Record<string, unknown>;
+  other_case: Record<string, unknown>;
+  resolved_by: string | null;
+};
+
+/** A computed table. `cells` maps "r{row}c{col}" to the events and cases
+ *  that make up that number — the drill-down reads it, and nothing re-counts. */
+export type PvTabulation = {
+  key: string;
+  title: string;
+  columns: string[];
+  rows: string[][];
+  cells: Record<string, { events: string[]; cases: string[] }>;
+  totals: Record<string, number>;
+  scope: Record<string, string | null>;
+  notes: string[];
+  missing: string[];
+};
+
+export type PvTabulationStatus = {
+  key: string;
+  available: boolean;
+  reason: string | null;
+  rows: number;
+  missing: number;
+  title?: string;
+};
+
+export type PvExposure = {
+  id: string;
+  report_instance_id: string;
+  context: string;
+  region: string | null;
+  population_descriptor: string | null;
+  measure: string;
+  /** What the report prints. `value_numeric` exists for rates only. */
+  value_text: string | null;
+  value_numeric: number | null;
+  calculation_method_note: string | null;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+};
+
+export type PvDraft = {
+  id: string;
+  version: number;
+  content: string;
+  /** model | edited | carried_forward */
+  origin: string;
+  model: string | null;
+  prompt_version: string | null;
+  created_by: string;
+  created_at: string;
+  data_needed: string[];
+  /** Judgments the draft leaves for a qualified person. Each blocks approval. */
+  assessments_required: string[];
+  table_markers: string[];
+  source_map: { index: number; document_id?: string; filename?: string;
+                page?: number | null; doc_type?: string }[];
+};
+
+export type PvDelta = {
+  since_baseline_lock: string | null;
+  events_by_soc: Record<string, number>;
+  interval_cases: number;
+  signals_opened: string[];
+  signals_closed: string[];
+  rsi_changes: string[];
+  safety_actions: string[];
+  new_studies: string[];
+  section_badges: Record<string, number>;
+  note: string;
+};
+
+export type PvFinding = {
+  /** Stable while the finding says the same thing; an acceptance is keyed on it. */
+  key: string;
+  /** A heuristic blocker a qualified person may accept with a reason. */
+  acceptable: boolean;
+  code: string;
+  /** blocker | warning | info. Only a blocker stops export. */
+  severity: "blocker" | "warning" | "info";
+  message: string;
+  section_code: string | null;
+  detail: Record<string, unknown>;
+};
+
+export type PvQcReport = {
+  findings: PvFinding[];
+  blockers: PvFinding[];
+  warnings: PvFinding[];
+  info: PvFinding[];
+  /** Computed from exactly this list, by the same function the export calls. */
+  exportable: boolean;
+};
+
+export type PvExportRecord = {
+  id: string;
+  report_instance_id: string;
+  created_by: string;
+  created_at: string;
+  files: { index: number; kind: string; filename: string }[];
+  options: {
+    appendices: string[];
+    citations: string;
+    draft_watermark: boolean;
+    tracked_changes: boolean;
+    region: string | null;
+    pdf: boolean;
+    notes: string[];
+    warnings: { code: string; section_code: string | null; message: string }[];
+    signed_off_by: string | null;
+    signed_off_at: string | null;
+    leakage_scan: string;
+  };
+};
+
+export type PvExportOptions = {
+  appendices: string[];
+  citations: "strip" | "keep";
+  draft_watermark: boolean;
+  tracked_changes: boolean;
+  region: string | null;
+  pdf: boolean;
+};
+
+export type PvAuditEntry = {
+  id: number;
+  event: string;
+  severity: string;
+  entity_type: string;
+  entity_id: string | null;
+  actor_id: string | null;
+  actor_name: string | null;
+  target: string | null;
+  created_at: string;
+};
+
+export type PvSignal = {
+  id: string;
+  pv_product_id: string;
+  signal_reference: string | null;
+  description: string | null;
+  meddra_terms: string[];
+  detection_source: string | null;
+  detection_date: string | null;
+  /** candidate -> new -> ongoing -> closed, or candidate -> refuted. */
+  status: string;
+  priority: string | null;
+  evaluation_summary: string | null;
+  conclusion: string | null;
+  action_taken: string | null;
+  closure_date: string | null;
+  linked_case_ids: string[];
+  linked_report_instance_ids: string[];
+  /** The screening row a candidate was raised from, when one was. */
+  detection_basis: Record<string, unknown> | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PvScreenRow = {
+  term: string;
+  a: number; b: number; c: number; d: number;
+  prr: number | null; prr_ci: [number, number] | null;
+  ror: number | null; ror_ci: [number, number] | null;
+  chi2: number | null;
+  notes: string[];
+  meets_evans: boolean;
+  ror_lower_above_one: boolean;
+  screening_flag: boolean;
+};
+
+export type PvScreenResult = {
+  /** Printed wherever the figures are. */
+  disclaimer: string;
+  window: "interval" | "cumulative";
+  level: "pt" | "soc";
+  period: { from: string | null; to: string; data_lock_point: string };
+  product_cases: number;
+  background_cases: number;
+  background: string;
+  background_basis: string;
+  thresholds: { evans: string; ror: string };
+  rows: PvScreenRow[];
+};
+
+/* ---- The CSR module ---- */
+
+export type CsrSection = {
+  id: string;
+  section_number: string;
+  title: string;
+  sort_order: number;
+  enabled: boolean;
+  is_container: boolean;
+  status: string; // not_started | generating | draft | in_review | approved
+  guidance_text: string | null;
+};
+
+export type CsrProject = {
+  id: string;
+  project_id: string;
+  project_name: string | null;
+  study: {
+    id: string; protocol_number: string; title: string | null; sponsor: string | null;
+    phase: string | null; indication: string | null; principal_investigator: string | null;
+  } | null;
+  compound_name: string | null;
+  therapeutic_area: string | null;
+  blinding: string | null;
+  study_design_summary: string | null;
+  status: string; // setup | ready
+  template: { source: string; parsed_at: string | null } | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CsrDocument = {
+  id: string;
+  doc_type: string;
+  filename: string;
+  mime_type: string | null;
+  size_bytes: number;
+  page_count: number | null;
+  processing_status: string; // queued | parsing | chunking | indexing | done | failed
+  error_message: string | null;
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CsrReadiness = {
+  required: { doc_type: string; uploaded: boolean; indexed: boolean }[];
+  recommended: { doc_type: string; uploaded: boolean; indexed: boolean }[];
+  missing_required: string[];
+  ready_to_generate: boolean;
+};
+
+export type CsrCitation = {
+  id: string;
+  marker: string;
+  document_id: string | null;
+  chunk_id: string | null;
+  page: number | null;
+  table_ref: string | null;
+  cited_value: string | null;
+};
+
+export type CsrDraft = {
+  id: string;
+  version: number;
+  content: string;
+  created_by: string; // "ai" or a user id
+  model: string | null;
+  generation_params: Record<string, unknown>;
+  created_at: string;
+  citations: CsrCitation[];
+};
+
+/** One retrieved chunk as the Sources panel shows it. */
+export type CsrSource = {
+  marker: string;
+  chunk_id: string;
+  document_id: string;
+  filename: string | null;
+  doc_type: string;
+  page: number | null;
+  table_id: string | null;
+  is_table: boolean;
+  content: string;
+};
+
+/** One column of a §6 TABLE_ROW: the token in the prototype row, the key each
+ *  line-item record supplies, and how the value renders. */
+export type TableRowColumn = {
+  token: string;
+  field_id: string;
+  source_key: string;
+  type: string;
+  format: string | null;
+  on_missing: string;
+  default: unknown;
+};
+
+export type TableRowSpec = {
+  id: string;
+  object_type: "TABLE_ROW";
+  iterate_over: string;
+  columns: TableRowColumn[];
+  empty_behaviour: string;
+  required?: boolean;
+};
