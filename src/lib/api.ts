@@ -18,7 +18,7 @@ import type {
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
-  PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDelta, PvDraft, PvQcReport,
+  PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDelta, PvDraft, PvQcReport, PvExportRecord, PvExportOptions, PvAuditEntry,
   PvDuplicatePair,
   PvEventSummary, PvExposure, PvMappingProfile, PvReadiness,
   PvRsiVersion, PvScopePreview, PvSection, PvSource, PvTabulation,
@@ -886,6 +886,32 @@ export const api = {
   /** The §11 checks. `exportable` is the export gate itself, not a preview of it. */
   pvQc: (reportId: string) =>
     request<PvQcReport>("GET", `/pv/reports/${reportId}/qc`),
+  /** Accept one heuristic blocker (qualified person, with a reason). */
+  pvAcceptFinding: (reportId: string, key: string, reason: string) =>
+    request<{ accepted: string; code: string }>(
+      "POST", `/pv/reports/${reportId}/qc/accept`, { json: { key, reason } }),
+  /** Refused while any blocker other than the missing signature stands. */
+  pvSignOff: (reportId: string, statement?: string) =>
+    request<PvReportInstance>("POST", `/pv/reports/${reportId}/signoff`,
+                              { json: { statement: statement || null } }),
+  pvWithdrawSignOff: (reportId: string, reason: string) =>
+    request<PvReportInstance>("POST", `/pv/reports/${reportId}/signoff:withdraw`,
+                              { json: { reason } }),
+  /** Gated on the same `run_qc` the Checks screen shows. */
+  pvExport: (reportId: string, options: PvExportOptions) =>
+    request<PvExportRecord>("POST", `/pv/reports/${reportId}/export`, { json: options }),
+  pvExports: (reportId: string) =>
+    request<{ items: PvExportRecord[] }>("GET", `/pv/reports/${reportId}/exports`),
+  pvDownloadExport: async (exportId: string, index = 0) => {
+    const res = await fetch(`${API_URL}/pv/exports/${exportId}/download?index=${index}`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!res.ok) throw new ApiError(res.status, "DOWNLOAD_FAILED", "The export could not be downloaded.");
+    return URL.createObjectURL(await res.blob());
+  },
+  pvAudit: (reportId: string, params: { scope: "report" | "product"; limit: number; offset: number }) =>
+    request<{ items: PvAuditEntry[]; total: number; limit: number; offset: number; scope: string }>(
+      "GET", `/pv/reports/${reportId}/audit`, { query: params }),
 
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>

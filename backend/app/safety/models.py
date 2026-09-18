@@ -232,6 +232,10 @@ class PvReportInstance(Base):
     #: between reports" is a check that cannot fire unless the earlier figure
     #: was written down.
     figures_at_signoff: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    #: QC finding key -> {code, section_code, message, by, at, reason}: the
+    #: heuristic blockers a qualified person accepted rather than fixed. Keyed
+    #: on what the finding says, so a changed figure is a new finding.
+    accepted_findings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)

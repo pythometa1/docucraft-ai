@@ -313,7 +313,7 @@ function SafetyOverview({ product, onChanged }: {
         )}
         {tab === "tables" && <SafetyTables reports={product.reports} />}
         {tab === "write" && <SafetyEditor reports={product.reports} />}
-        {tab === "qc" && <SafetyQc reports={product.reports} />}
+        {tab === "qc" && <SafetyQc reports={product.reports} onChanged={onChanged} />}
         {tab === "calendar" && <CalendarTab product={product} />}
         {tab === "roles" && <RolesTab product={product} onChanged={onChanged} />}
       </SwapIn>

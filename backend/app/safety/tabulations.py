@@ -523,6 +523,32 @@ def literature_table(db, ctx):
                    scope=_scope_meta(scope))
 
 
+def rsi_listed_terms(db, ctx):
+    """The pinned reference safety information, as the terms it lists.
+
+    The export's RSI appendix. From the version pinned to THIS report -- the
+    one every expectedness determination in it was made against -- and never
+    from whichever version happens to be current.
+    """
+    from app.models import PvRsiListedTerm, PvRsiVersion
+
+    if not ctx.report.rsi_version_id:
+        raise TableUnavailable("no reference safety information is pinned to this report")
+    version = db.get(PvRsiVersion, ctx.report.rsi_version_id)
+    terms = db.scalars(select(PvRsiListedTerm).where(
+        PvRsiListedTerm.rsi_version_id == ctx.report.rsi_version_id
+    ).order_by(PvRsiListedTerm.meddra_soc, PvRsiListedTerm.meddra_pt)).all()
+    if not terms:
+        raise TableUnavailable("the pinned reference safety information lists no terms")
+    rows = [[grids.text(t.meddra_soc), grids.text(t.meddra_pt),
+             grids.text(t.condition_text)] for t in terms]
+    label = f"{version.rsi_type.upper()} version {version.version_label}" if version else ""
+    return _finish("rsi_listed_terms",
+                   f"Listed terms in the reference safety information ({label})",
+                   ["System organ class", "Preferred term", "Condition"], rows,
+                   totals={"terms": len(rows)}, scope=_scope_meta(ctx.scope))
+
+
 BUILDERS = {
     "summary_tab_soc_pt": summary_tab_soc_pt,
     "summary_tab_trials": summary_tab_trials,
@@ -534,6 +560,7 @@ BUILDERS = {
     "study_inventory": study_inventory,
     "approval_status_table": approval_status_table,
     "literature_table": literature_table,
+    "rsi_listed_terms": rsi_listed_terms,
 }
 
 

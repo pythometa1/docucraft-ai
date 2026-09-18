@@ -178,6 +178,10 @@ FLOORS = {
     "safety/drafting.py": 95,
     # The export gate. A branch not exercised is a blocker that cannot fire.
     "safety/qc.py": 94,
+    # What leaves the building. Every branch is a refusal: a table with nothing
+    # behind it, a revision mark on the wrong paragraph, a name in the file.
+    "safety/export.py": 95,
+    "docgen/assembly.py": 95,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

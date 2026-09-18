@@ -356,6 +356,35 @@ def scan(text: str, *, known: dict | None = None) -> list[Detection]:
     return [d for d in detect(text, known=known) if d.certain]
 
 
+def confirmed_in(text: str, identifiers) -> list:
+    """Which of the strings a person confirmed as identifiers appear in `text`.
+
+    The second net behind `scan`. "Mrs Okafor" is a name because somebody in
+    the review queue said so, not because it matches a pattern, and a leakage
+    check that only knew patterns would pass it on every draft and export.
+    Whole-word and case-insensitive: "Reed" is found in "Dr REED" and not in
+    "reeds".
+    """
+    lowered = (text or "").lower()
+    found = []
+    for value in dict.fromkeys(v.strip() for v in identifiers or () if v):
+        if len(value) >= 3 and re.search(
+                rf"(?<!\w){re.escape(value.lower())}(?!\w)", lowered):
+            found.append(value)
+    return found
+
+
+def confirmed_identifiers(db, pv_product_id: str) -> list:
+    """Every string the review queue confirmed as an identifier for a product."""
+    from sqlalchemy import select
+
+    from app.models import PvDeidItem
+
+    return [v for v in db.scalars(select(PvDeidItem.detected_text).where(
+        PvDeidItem.pv_product_id == pv_product_id,
+        PvDeidItem.status == "masked")).all() if v]
+
+
 def known_values(case, drugs=(), reporter_fields=()) -> dict:
     """The identifying values this case already carries, by type.
 

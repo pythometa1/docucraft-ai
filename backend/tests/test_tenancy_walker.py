@@ -57,7 +57,7 @@ def org_a_resources(app_client, two_orgs):
         Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
         GenerationJob, Invoice, Mapping, Project, PvCase, PvCaseEvent, PvDeidItem,
-        PvDocument, PvDuplicateCandidate, PvExposure, PvProduct, PvReportInstance,
+        PvDocument, PvDuplicateCandidate, PvExport, PvExposure, PvProduct, PvReportInstance,
         PvSection,
         PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
@@ -252,7 +252,10 @@ def org_a_resources(app_client, two_orgs):
             measure="subjects", value_text="10")
         pv_section = PvSection(org_id=org, report_instance_id=pv_report.id,
                                section_code="1", title="Introduction")
-        db.add_all([pv_event, pv_duplicate, pv_exposure, pv_section])
+        pv_export = PvExport(org_id=org, pv_product_id=pv_product.id,
+                             report_instance_id=pv_report.id, created_by="u",
+                             options={"files": []})
+        db.add_all([pv_event, pv_duplicate, pv_exposure, pv_section, pv_export])
         db.flush()
 
         ids = {
@@ -279,7 +282,7 @@ def org_a_resources(app_client, two_orgs):
             "case_event_id": pv_event.id, "duplicate_id": pv_duplicate.id,
             "exposure_id": pv_exposure.id, "pv_table_key": "summary_tab_soc_pt",
             "register": "studies", "pv_section_id": pv_section.id,
-            "pv_case_id": pv_case.id,
+            "pv_case_id": pv_case.id, "pv_export_id": pv_export.id,
         }
         db.commit()
     finally:
@@ -624,6 +627,17 @@ ROUTES: list[dict] = [
 
     # Safety M7: QC.
     {"method": "GET", "path": "/pv/reports/{report_instance_id}/qc"},
+
+    # Safety M8: sign-off, export and audit.
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/signoff", "body": {}},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/signoff:withdraw",
+     "body": {"reason": "x"}},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/qc/accept",
+     "body": {"key": "k", "reason": "x"}},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/export", "body": {}},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/exports"},
+    {"method": "GET", "path": "/pv/exports/{pv_export_id}/download"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/audit"},
 ]
 
 

@@ -1035,6 +1035,10 @@ export type PvDelta = {
 };
 
 export type PvFinding = {
+  /** Stable while the finding says the same thing; an acceptance is keyed on it. */
+  key: string;
+  /** A heuristic blocker a qualified person may accept with a reason. */
+  acceptable: boolean;
   code: string;
   /** blocker | warning | info. Only a blocker stops export. */
   severity: "blocker" | "warning" | "info";
@@ -1050,6 +1054,48 @@ export type PvQcReport = {
   info: PvFinding[];
   /** Computed from exactly this list, by the same function the export calls. */
   exportable: boolean;
+};
+
+export type PvExportRecord = {
+  id: string;
+  report_instance_id: string;
+  created_by: string;
+  created_at: string;
+  files: { index: number; kind: string; filename: string }[];
+  options: {
+    appendices: string[];
+    citations: string;
+    draft_watermark: boolean;
+    tracked_changes: boolean;
+    region: string | null;
+    pdf: boolean;
+    notes: string[];
+    warnings: { code: string; section_code: string | null; message: string }[];
+    signed_off_by: string | null;
+    signed_off_at: string | null;
+    leakage_scan: string;
+  };
+};
+
+export type PvExportOptions = {
+  appendices: string[];
+  citations: "strip" | "keep";
+  draft_watermark: boolean;
+  tracked_changes: boolean;
+  region: string | null;
+  pdf: boolean;
+};
+
+export type PvAuditEntry = {
+  id: number;
+  event: string;
+  severity: string;
+  entity_type: string;
+  entity_id: string | null;
+  actor_id: string | null;
+  actor_name: string | null;
+  target: string | null;
+  created_at: string;
 };
 
 /* ---- The CSR module ---- */

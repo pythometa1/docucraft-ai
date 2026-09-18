@@ -19,6 +19,7 @@ information are shown and recorded but do not. Every finding says what is
 wrong and where, because "QC failed" is not something anybody can act on.
 """
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 
@@ -34,6 +35,17 @@ WARNING = "warning"
 INFO = "info"
 
 
+#: Blockers a qualified person may accept, with a reason, rather than fix.
+#: Only the checks that read prose with a pattern, or compare against a figure
+#: that may legitimately have moved: "a published series of 12 patients" is a
+#: count the case store did not produce and is still correct. Nothing about
+#: identifiers, unconfirmed data, approval or the lock point is on this list --
+#: those are not judgments, they are states, and a state is fixed, not accepted.
+ACCEPTABLE = frozenset({
+    "PROSE_FIGURE_UNSOURCED", "RATE_WITHOUT_DENOMINATOR", "CUMULATIVE_DECREASED",
+})
+
+
 @dataclass
 class PvFinding:
     code: str
@@ -43,10 +55,22 @@ class PvFinding:
     #: Ids and evidence, so the dashboard can link to the section, the grid
     #: cell or the case. JSON-safe: this crosses the wire.
     detail: dict = field(default_factory=dict)
+    #: Stable for as long as the finding says the same thing. An acceptance is
+    #: recorded against this, so when the figure in the message changes the
+    #: finding is new and has to be accepted again.
+    key: str = ""
+
+    def __post_init__(self):
+        if not self.key:
+            self.key = hashlib.sha1(
+                f"{self.code}|{self.section_code or ''}|{self.message}".encode()
+            ).hexdigest()[:16]
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "severity": self.severity, "message": self.message,
-                "section_code": self.section_code, "detail": dict(self.detail)}
+        return {"key": self.key, "code": self.code, "severity": self.severity,
+                "message": self.message, "section_code": self.section_code,
+                "detail": dict(self.detail),
+                "acceptable": self.severity == BLOCKER and self.code in ACCEPTABLE}
 
 
 @dataclass
@@ -140,18 +164,23 @@ def _deid(ctx) -> list:
             f"{pending} de-identification detection(s) are unanswered and {waiting} "
             "source(s) are held behind them.",
             detail={"pending": pending, "documents_waiting": waiting}))
+    confirmed = deident.confirmed_identifiers(db, product_id)
     for section in ctx.sections:
         draft = ctx.drafts.get(section.id)
         if draft is None:
             continue
-        hits = deident.scan(draft.content)
+        hits = [(h.identifier_type, h.text) for h in deident.scan(draft.content)]
+        hits += [("confirmed identifier", value)
+                 for value in deident.confirmed_in(draft.content, confirmed)]
         if hits:
             out.append(PvFinding(
                 "PII_IN_DRAFT", BLOCKER,
-                f"{section.section_code} contains {len(hits)} likely identifier(s): "
-                + ", ".join(sorted({h.identifier_type.replace('_', ' ') for h in hits})),
+                f"{section.section_code} contains "
+                f"{len({text.lower() for _, text in hits})} likely identifier(s): "
+                + ", ".join(sorted({kind.replace('_', ' ') for kind, _ in hits})),
                 section.section_code,
-                {"section_id": section.id, "found": [h.text for h in hits][:10]}))
+                {"section_id": section.id,
+                 "found": list(dict.fromkeys(text for _, text in hits))[:10]}))
     leaked_chunks = 0
     for chunk in db.scalars(select(PvChunk).where(
             PvChunk.pv_product_id == product_id)).all():
@@ -449,7 +478,53 @@ def _approval(ctx) -> list:
         out.append(PvFinding(
             "NOT_SIGNED_OFF", BLOCKER,
             "The report has not been signed off by a qualified person."))
+    elif ctx.report.figures_at_signoff is not None:
+        # The export resolves every table from the store as it is at export
+        # time. If a confirmation, a correction or a late case moved a figure
+        # after the qualified person signed, the document would print numbers
+        # nobody signed for.
+        stated = ctx.report.figures_at_signoff
+        now_figures = figures(ctx)
+        changed = sorted(k for k in now_figures if k != "tables"
+                         and stated.get(k) != now_figures[k])
+        for key, totals in now_figures["tables"].items():
+            if (stated.get("tables") or {}).get(key) != totals:
+                changed.append(key)
+        if changed:
+            out.append(PvFinding(
+                "FIGURES_CHANGED_SINCE_SIGNOFF", BLOCKER,
+                "Figures have changed since the qualified person signed off ("
+                + ", ".join(changed) + "). The report is signed off again before "
+                "it is exported.", detail={"changed": changed}))
     return out
+
+
+def figures(ctx) -> dict:
+    """What the report states, as numbers: the scope's counts and every
+    total of every table the report prints.
+
+    Frozen at sign-off, compared at export, and read by the next report's
+    CUMULATIVE_DECREASED check. One function, so the three agree on what "the
+    figures" are.
+    """
+    counts = scope_mod.preview(ctx.db, ctx.scope)
+    out = {key: counts.get(key) for key in (
+        "interval_cases", "interval_events", "cumulative_cases", "cumulative_events")}
+    keys = {"summary_tab_soc_pt", "line_listing_sar"} | {
+        s.table_key for s in ctx.sections if s.enabled and s.table_key}
+    tables = {}
+    for key in sorted(keys):
+        built = ctx.tables.get(key)
+        if built is None or isinstance(built, Exception):
+            continue
+        tables[key] = {name: value for name, value in sorted(built.totals.items())
+                       if isinstance(value, (int, float, str)) or value is None}
+    out["tables"] = tables
+    return out
+
+
+def figures_for(db, *, report, product) -> dict:
+    return figures(_context(db, report, product))
 
 
 # ------------------------------------------------------------------ warnings
@@ -691,6 +766,17 @@ def run_qc(db, *, report, product) -> list:
                 "QC_CHECK_FAILED", BLOCKER,
                 f"The {check.__name__.strip('_').replace('_', ' ')} check could not "
                 f"run: {exc}", detail={"check": check.__name__}))
+    # An accepted finding stays on the list, as a warning that says who
+    # accepted it and why -- a blocker that vanished would leave the record
+    # agreeing with the person who waved it through.
+    accepted = report.accepted_findings or {}
+    for finding in findings:
+        record = accepted.get(finding.key)
+        if record and finding.severity == BLOCKER and finding.code in ACCEPTABLE:
+            finding.severity = WARNING
+            finding.detail = {**finding.detail, "accepted_by": record.get("by"),
+                              "accepted_at": record.get("at"),
+                              "accepted_reason": record.get("reason")}
     order = {BLOCKER: 0, WARNING: 1, INFO: 2}
     return sorted(findings, key=lambda f: order[f.severity])
 

@@ -124,6 +124,27 @@ def _report_out(report: PvReportInstance, *, section_count: int | None = None) -
     return out
 
 
+def _withdraw_signoff(db, report: PvReportInstance, user: User, why: str) -> bool:
+    """Undo a qualified person's sign-off because what they signed has changed.
+
+    Called from every path that changes a signed report's text or its terms.
+    A sign-off that survived an edit would be a signature on a document the
+    signatory never read. The frozen figures go with it: they described the
+    report that was signed.
+    """
+    if not report.qppv_signoff_by:
+        return False
+    signed_by = report.qppv_signoff_by
+    report.qppv_signoff_by = None
+    report.qppv_signoff_at = None
+    report.figures_at_signoff = None
+    report.status = "in_review"
+    report.updated_at = now()
+    log_audit(db, user, "Withdrew a qualified-person sign-off", "pv_report_instance",
+              report.id, None, "warning", f"signed by {signed_by}; {why}")
+    return True
+
+
 def _rsi_out(version: PvRsiVersion, *, term_count: int | None = None) -> dict:
     out = {
         "id": version.id, "rsi_type": version.rsi_type,
@@ -308,11 +329,16 @@ def delete_product(pv_product_id: str, db: Session = Depends(get_db),
 
     # Blobs are collected before the rows that name them are deleted.
     blobs = []
-    for model in (PvDocument, PvExport):
-        for row in db.scalars(select(model).where(
-                model.pv_product_id == product.id)).all():
-            if row.blob_path:
-                blobs.append(abs_path(row.blob_path))
+    for row in db.scalars(select(PvDocument).where(
+            PvDocument.pv_product_id == product.id)).all():
+        if row.blob_path:
+            blobs.append(abs_path(row.blob_path))
+    # An export is several files -- the report, a tracked-changes copy, a PDF
+    # -- and `blob_path` names only the first. CMC's purge read only that
+    # column and left the rest on disk after the product was "deleted".
+    for row in db.scalars(select(PvExport).where(
+            PvExport.pv_product_id == product.id)).all():
+        blobs.extend(_export_paths(row))
 
     # `PvMappingProfile` is last of the product-scoped models and is the one
     # that needs saying: its `pv_product_id` is nullable, because a column
@@ -882,6 +908,9 @@ def update_report(report_instance_id: str, body: ReportPatch,
         if version.pv_product_id != report.pv_product_id:
             raise error("PV_RSI_WRONG_PRODUCT",
                         "That RSI version belongs to a different product.", 422)
+    if changes:
+        _withdraw_signoff(db, report, user,
+                          "the report's " + ", ".join(sorted(changes)) + " changed")
     for key, value in changes.items():
         setattr(report, key, value)
     report.updated_at = now()
@@ -930,12 +959,21 @@ def delete_report(report_instance_id: str, db: Session = Depends(get_db),
     for exposure in db.scalars(select(PvExposure).where(
             PvExposure.report_instance_id == report.id)).all():
         db.delete(exposure)
+    from app.models import PvExport
+
+    export_files = []
+    for record in db.scalars(select(PvExport).where(
+            PvExport.report_instance_id == report.id)).all():
+        export_files.extend(_export_paths(record))
+        db.delete(record)
     db.flush()
     db.delete(report)
     log_audit(db, user, "Deleted a report instance", "pv_report_instance", report.id,
               None, "warning", f"{report.doc_type_key} {report.period_start}"
               f"..{report.period_end}, {len(sections)} sections")
     db.commit()
+    for path in export_files:
+        path.unlink(missing_ok=True)
     return {"deleted": True, "sections": len(sections)}
 
 
@@ -2844,6 +2882,7 @@ def generate_pv_section(section_id: str, body: PvGenerateRequest,
                           page=citation.get("page"),
                           quoted_number=citation.get("quoted_number")))
     section.status = "draft"
+    _withdraw_signoff(db, report, user, f"{section.section_code} was regenerated")
     if section.delta_status in ("changed", "fresh", "carried_forward"):
         # Regenerated against this interval's data: whatever the badge said
         # about the baseline no longer describes this text.
@@ -2925,6 +2964,7 @@ def edit_pv_draft(section_id: str, body: PvDraftEdit, db: Session = Depends(get_
     was = section.status
     section.status = "draft"
     section.updated_at = now()
+    _withdraw_signoff(db, report, user, f"{section.section_code} was edited")
     leaks = deident.scan(body.content)
     log_audit(db, user, "Edited a safety report section", "pv_section", section.id,
               None, "warning" if was == "approved" or open_after < open_before
@@ -2985,9 +3025,10 @@ def set_pv_section_status(section_id: str, body: PvStatusPatch,
             if unconfirmed:
                 problems.append(f"{unconfirmed} event(s) behind this section's figures "
                                 "are not confirmed")
-        leaks = deident.scan(draft.content)
+        leaks = len(deident.scan(draft.content)) + len(deident.confirmed_in(
+            draft.content, deident.confirmed_identifiers(db, product.id)))
         if leaks:
-            problems.append(f"{len(leaks)} likely identifier(s) are in the text")
+            problems.append(f"{leaks} likely identifier(s) are in the text")
         if problems:
             raise error("PV_CANNOT_APPROVE",
                         "This section cannot be approved: " + "; ".join(problems) + ".",
@@ -2996,6 +3037,9 @@ def set_pv_section_status(section_id: str, body: PvStatusPatch,
     was = section.status
     section.status = body.status
     section.updated_at = now()
+    if body.status != "approved":
+        _withdraw_signoff(db, report, user,
+                          f"{section.section_code} moved from {was} to {body.status}")
     log_audit(db, user, "Set a safety section status", "pv_section", section.id, None,
               "success" if body.status == "approved" else "info",
               f"{section.section_code}: {was} -> {body.status}")
@@ -3192,3 +3236,440 @@ def report_qc(report_instance_id: str, db: Session = Depends(get_db),
     return {"findings": [f.as_dict() for f in findings],
             "blockers": grouped[qc.BLOCKER], "warnings": grouped[qc.WARNING],
             "info": grouped[qc.INFO], "exportable": qc.exportable(findings)}
+
+
+# --------------------------------------------- M8: sign-off, export and audit
+
+def _export_paths(record) -> list:
+    """Every file an export wrote, as absolute paths.
+
+    `blob_path` names the first file only -- the column exists so the
+    org-offboarding sweep finds it -- and `options["files"]` names them all.
+    """
+    seen: list = []
+    for relative in [record.blob_path] + [
+            entry.get("blob_path") for entry in (record.options or {}).get("files", [])]:
+        if relative and relative not in seen:
+            seen.append(relative)
+    return [abs_path(relative) for relative in seen]
+
+
+def _export_out(record) -> dict:
+    options = dict(record.options or {})
+    files = options.pop("files", [])
+    return {"id": record.id, "report_instance_id": record.report_instance_id,
+            "created_by": record.created_by, "created_at": record.created_at,
+            "files": [{"index": i, "kind": f.get("kind"), "filename": f.get("filename")}
+                      for i, f in enumerate(files)],
+            "options": options}
+
+
+class PvSignoffRequest(BaseModel):
+    statement: str | None = None
+
+
+@router.post("/pv/reports/{report_instance_id}/signoff")
+def sign_off_report(report_instance_id: str, body: PvSignoffRequest,
+                    db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    """A qualified person signs the report as it stands.
+
+    Refused while any blocker other than the missing sign-off itself stands:
+    a signature over an open [ASSESSMENT REQUIRED], an unconfirmed event or an
+    identifier in the text is a signature on something unfinished. The figures
+    the report states are frozen here, so the export can refuse a document
+    whose numbers moved after the signature, and the next interval can check
+    its cumulative against what this one said.
+    """
+    from app.safety import qc
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    roles.require_pv_role(db, product.id, user, roles.QUALIFIED_PERSON,
+                          action="Signing off a periodic report")
+    if report.qppv_signoff_by:
+        raise error("PV_ALREADY_SIGNED_OFF", "This report is already signed off.", 409)
+    findings = qc.run_qc(db, report=report, product=product)
+    blocking = [f for f in findings
+                if f.severity == qc.BLOCKER and f.code != "NOT_SIGNED_OFF"]
+    if blocking:
+        raise error("PV_CANNOT_SIGN_OFF",
+                    f"{len(blocking)} blocker(s) stand between this report and "
+                    "sign-off. Resolve them on the Checks screen first.", 409,
+                    {"blockers": [f.as_dict() for f in blocking]})
+    figures = qc.figures_for(db, report=report, product=product)
+    report.qppv_signoff_by = user.id
+    report.qppv_signoff_at = now()
+    report.status = "approved"
+    report.figures_at_signoff = figures
+    report.updated_at = now()
+    statement = (body.statement or "").strip()
+    log_audit(db, user, "Signed off a periodic safety report", "pv_report_instance",
+              report.id, product.project_id, "success",
+              f"{report.doc_type_key} {report.period_start}..{report.period_end}; "
+              f"interval cases {figures.get('interval_cases')}, cumulative cases "
+              f"{figures.get('cumulative_cases')}"
+              + (f"; statement: {statement[:500]}" if statement else ""))
+    db.commit()
+    db.refresh(report)
+    return _report_out(report)
+
+
+class PvWithdrawRequest(BaseModel):
+    reason: str
+
+
+@router.post("/pv/reports/{report_instance_id}/signoff:withdraw")
+def withdraw_report_signoff(report_instance_id: str, body: PvWithdrawRequest,
+                           db: Session = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    """A qualified person takes a signature back, and says why."""
+    report, product = _tabulation_context(db, report_instance_id, user)
+    roles.require_pv_role(db, product.id, user, roles.QUALIFIED_PERSON,
+                          action="Withdrawing a sign-off")
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise error("PV_REASON_REQUIRED", "Say why the sign-off is withdrawn.", 422)
+    if not _withdraw_signoff(db, report, user, f"withdrawn: {reason[:500]}"):
+        raise error("PV_NOT_SIGNED_OFF", "This report is not signed off.", 409)
+    db.commit()
+    db.refresh(report)
+    return _report_out(report)
+
+
+class PvAcceptFinding(BaseModel):
+    key: str
+    reason: str
+
+
+@router.post("/pv/reports/{report_instance_id}/qc/accept")
+def accept_qc_finding(report_instance_id: str, body: PvAcceptFinding,
+                      db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """A qualified person accepts one heuristic blocker, with a reason.
+
+    Only the codes in `qc.ACCEPTABLE`: the checks that read prose with a
+    pattern. The acceptance is keyed on what the finding says, so if the
+    figure in it changes the finding is new and is accepted again or fixed.
+    It stays on the QC list as a warning naming who accepted it.
+    """
+    from app.safety import qc
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    roles.require_pv_role(db, product.id, user, roles.QUALIFIED_PERSON,
+                          action="Accepting a QC finding")
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise error("PV_REASON_REQUIRED",
+                    "An accepted finding needs the reason it is correct as written.", 422)
+    findings = qc.run_qc(db, report=report, product=product)
+    finding = next((f for f in findings if f.key == body.key), None)
+    if finding is None:
+        raise error("PV_FINDING_NOT_FOUND",
+                    "No current finding has that key. It may have changed since the "
+                    "checks were run; run them again.", 404)
+    if finding.code not in qc.ACCEPTABLE:
+        raise error("PV_FINDING_NOT_ACCEPTABLE",
+                    f"{finding.code} is fixed, not accepted.", 409)
+    if finding.severity != qc.BLOCKER:
+        raise error("PV_FINDING_ALREADY_ACCEPTED", "That finding is already accepted.", 409)
+    accepted = dict(report.accepted_findings or {})
+    accepted[finding.key] = {"code": finding.code, "section_code": finding.section_code,
+                             "message": finding.message, "by": user.id,
+                             "at": now().isoformat(), "reason": reason[:2000]}
+    # Reassigned rather than mutated: a JSON column does not notice an
+    # in-place change, and the acceptance would silently not be saved.
+    report.accepted_findings = accepted
+    log_audit(db, user, "Accepted a QC finding", "pv_report_instance", report.id,
+              product.project_id, "warning",
+              f"{finding.code}"
+              + (f" in {finding.section_code}" if finding.section_code else "")
+              + f": {reason[:500]}")
+    db.commit()
+    return {"accepted": finding.key, "code": finding.code}
+
+
+class PvExportRequest(BaseModel):
+    appendices: list[str] = []
+    citations: str = "strip"
+    draft_watermark: bool = False
+    tracked_changes: bool = False
+    region: str | None = None
+    pdf: bool = False
+
+
+def _cleanup(written: list) -> None:
+    for entry in written:
+        abs_path(entry["blob_path"]).unlink(missing_ok=True)
+
+
+@router.post("/pv/reports/{report_instance_id}/export")
+def export_report(report_instance_id: str, body: PvExportRequest,
+                  db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    """Write the signed report, and a tracked-changes copy if asked.
+
+    The gate is `run_qc` and nothing else, so the Checks screen's verdict and
+    this endpoint cannot disagree. Every table is resolved here from the
+    store. The finished files are scanned for identifiers -- deleted revision
+    text included -- and a hit deletes them and refuses the export.
+
+    Nothing here produces E2B XML, a CIOMS form or a gateway payload.
+    """
+    from app.docgen.grids import TableError
+    from app.models import PvExport, PvRsiVersion
+    from app.safety import export as export_mod
+    from app.safety import qc
+    from app.safety import tabulations as tab
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Exporting a report")
+    unknown = [a for a in body.appendices if a not in export_mod.APPENDICES]
+    if unknown:
+        raise error("PV_BAD_APPENDIX",
+                    f"Unknown appendix {', '.join(unknown)}; one of "
+                    f"{', '.join(export_mod.APPENDICES)}.", 422)
+    if body.citations not in export_mod.CITATION_MODES:
+        raise error("PV_BAD_CITATION_MODE",
+                    f"citations must be one of {', '.join(export_mod.CITATION_MODES)}.",
+                    422)
+    if body.region and body.region not in (report.regions or []):
+        raise error("PV_BAD_REGION",
+                    f"{body.region} is not one of this report's regions.", 422)
+    if body.tracked_changes and not report.baseline_report_id:
+        raise error("PV_NO_BASELINE",
+                    "Tracked changes compare against the previous report, and this "
+                    "report has none.", 422)
+
+    findings = qc.run_qc(db, report=report, product=product)
+    blockers = [f.as_dict() for f in findings if f.severity == qc.BLOCKER]
+    if blockers:
+        log_audit(db, user, "Refused a safety report export", "pv_report_instance",
+                  report.id, product.project_id, "warning",
+                  ", ".join(sorted({b["code"] for b in blockers})))
+        db.commit()
+        raise error("PV_EXPORT_BLOCKED",
+                    f"{len(blockers)} blocker(s) stand between this report and export.",
+                    409, {"blockers": blockers})
+
+    sections = db.scalars(select(PvSection).where(
+        PvSection.report_instance_id == report.id, PvSection.enabled.is_(True)
+    ).order_by(PvSection.sort_order)).all()
+    texts = []
+    for section in sections:
+        draft = _latest_draft(db, section.id)
+        texts.append(export_mod.SectionText(
+            code=section.section_code, title=section.title,
+            is_container=section.is_container,
+            content=draft.content if draft else "",
+            baseline=_baseline_text(db, section) if body.tracked_changes else None))
+
+    chosen = [export_mod.APPENDICES[a] for a in dict.fromkeys(body.appendices)]
+    keys: list = []
+    for text in texts:
+        keys.extend(value for kind, value in export_mod.items_of(
+            export_mod.body_of(text.content, text, citations=body.citations))
+            if kind == "table")
+    for _heading, appendix_keys in chosen:
+        keys.extend(appendix_keys)
+    tables: dict = {}
+    for key in dict.fromkeys(keys):
+        try:
+            tables[key] = tab.render(db, report=report, product=product,
+                                     table_key=key).blocks
+        except TableError as exc:
+            tables[key] = str(exc)
+
+    entry = registry.DELIVERABLES.get(report.doc_type_key) or {}
+    name = entry.get("name") or report.doc_type_key
+    rsi = db.get(PvRsiVersion, report.rsi_version_id) if report.rsi_version_id else None
+    front = [name, f"Reporting interval: {report.period_start} to {report.period_end}",
+             f"Data lock point: {report.data_lock_point}"]
+    if rsi is not None:
+        front.append(f"Reference safety information: {rsi.rsi_type.upper()} "
+                     f"version {rsi.version_label}")
+    if report.meddra_version:
+        front.append(f"MedDRA version {report.meddra_version}")
+    if body.region:
+        front.append(f"Regional copy: {body.region}")
+    front.append("Signed off by a qualified person on "
+                 f"{report.qppv_signoff_at:%Y-%m-%d}")
+    header = (f"{product.product_name} | {name} | {report.period_start} to "
+              f"{report.period_end} | CONFIDENTIAL")
+    stem = f"{report.doc_type_key}-{report.period_end}" + (
+        f"-{body.region}" if body.region else "")
+    base = f"pv-export/{product.id}"
+    stamp = now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    written: list = []
+    try:
+        variants = [("report", f"{stem}.docx", False)]
+        if body.tracked_changes:
+            variants.append(("tracked_changes", f"{stem}-tracked-changes.docx", True))
+        for kind, filename, tracked in variants:
+            assembled = export_mod.assemble(
+                texts, tables, front=front, title=product.product_name,
+                appendices=chosen, citations=body.citations, tracked=tracked)
+            relative = save_bytes(b"", base, ".docx")
+            written.append({"kind": kind, "filename": filename, "blob_path": relative})
+            export_mod.write(assembled, str(abs_path(relative)), header=header,
+                             draft=body.draft_watermark,
+                             revision_date=stamp if tracked else None)
+    except export_mod.ExportError as exc:
+        _cleanup(written)
+        raise error("PV_EXPORT_FAILED", str(exc), 409)
+    except Exception:
+        _cleanup(written)
+        raise
+
+    identifiers = deident.confirmed_identifiers(db, product.id)
+    found = []
+    for file_entry in written:
+        text = export_mod.document_text(str(abs_path(file_entry["blob_path"])))
+        found.extend({**hit, "file": file_entry["filename"]}
+                     for hit in export_mod.leaks(text, identifiers))
+    if found:
+        _cleanup(written)
+        # The audit entry names the kinds of identifier and never the text: the
+        # log is read by more people than the report.
+        log_audit(db, user, "Refused a safety report export: identifiers in the document",
+                  "pv_report_instance", report.id, product.project_id, "warning",
+                  ", ".join(sorted({h["identifier_type"] for h in found})))
+        db.commit()
+        raise error("PV_EXPORT_LEAK",
+                    f"{len(found)} likely identifier(s) were found in the finished "
+                    "document, which has been deleted rather than offered for download.",
+                    409, {"found": found[:50]})
+
+    notes: list = []
+    if body.pdf:
+        from app.generation.pdf_renderer import PreviewUnavailable, render_pdf
+
+        try:
+            result = render_pdf(abs_path(written[0]["blob_path"]), abs_path(base))
+            written.append({"kind": "pdf", "filename": f"{stem}.pdf",
+                            "blob_path": f"{base}/{Path(result.pdf_path).name}"})
+            notes.extend(result.notes)
+        except PreviewUnavailable as exc:
+            notes.append(f"No PDF was produced: {exc}")
+
+    warnings = [f for f in findings if f.severity == qc.WARNING]
+    record = PvExport(
+        org_id=user.org_id, pv_product_id=product.id, report_instance_id=report.id,
+        granularity="combined", blob_path=written[0]["blob_path"], created_by=user.id,
+        options={
+            "appendices": list(dict.fromkeys(body.appendices)),
+            "citations": body.citations, "draft_watermark": body.draft_watermark,
+            "tracked_changes": body.tracked_changes, "region": body.region,
+            "pdf": body.pdf, "files": written, "notes": notes,
+            "warnings": [{"code": w.code, "section_code": w.section_code,
+                          "message": w.message} for w in warnings],
+            "signed_off_by": report.qppv_signoff_by,
+            "signed_off_at": report.qppv_signoff_at.isoformat(),
+            "figures": report.figures_at_signoff,
+            "baseline_report_id": report.baseline_report_id
+            if body.tracked_changes else None,
+            "leakage_scan": "passed"})
+    db.add(record)
+    db.flush()
+    log_audit(db, user, "Exported a periodic safety report", "pv_export", record.id,
+              product.project_id, "success",
+              f"{report.doc_type_key} {report.period_start}..{report.period_end}: "
+              + ", ".join(f["filename"] for f in written)
+              + (f"; {len(warnings)} warning(s) recorded" if warnings else ""))
+    db.commit()
+    db.refresh(record)
+    return _export_out(record)
+
+
+@router.get("/pv/reports/{report_instance_id}/exports")
+def list_report_exports(report_instance_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    from app.models import PvExport
+
+    report = _owned_report(db, report_instance_id, user)
+    rows = db.scalars(select(PvExport).where(
+        PvExport.report_instance_id == report.id
+    ).order_by(PvExport.created_at.desc())).all()
+    return {"items": [_export_out(r) for r in rows]}
+
+
+_MEDIA_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pdf": "application/pdf",
+}
+
+
+@router.get("/pv/exports/{pv_export_id}/download")
+def download_pv_export(pv_export_id: str, index: int = Query(0, ge=0),
+                       db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """One file of an export, by its position in the export's file list."""
+    from fastapi.responses import FileResponse
+
+    from app.models import PvExport
+
+    record = db.get(PvExport, pv_export_id)
+    if not record or record.org_id != user.org_id:
+        raise error("PV_EXPORT_NOT_FOUND", "Export not found", 404)
+    files = (record.options or {}).get("files", [])
+    if index >= len(files):
+        raise error("PV_EXPORT_NO_SUCH_FILE",
+                    f"This export has {len(files)} file(s); there is no file {index + 1}.",
+                    404)
+    entry = files[index]
+    path = abs_path(entry["blob_path"])
+    if not path.exists():
+        raise error("PV_EXPORT_MISSING", "The exported file is no longer in storage.", 410)
+    log_audit(db, user, "Downloaded a safety report export", "pv_export", record.id,
+              None, "info", entry.get("filename"))
+    db.commit()
+    return FileResponse(str(path), filename=entry.get("filename") or path.name,
+                        media_type=_MEDIA_TYPES.get(path.suffix, "application/octet-stream"))
+
+
+@router.get("/pv/reports/{report_instance_id}/audit")
+def report_audit(report_instance_id: str, scope: str = Query("report"),
+                 limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                 db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """What happened to this report, or to the product data it is built from.
+
+    `scope=report`: the report, its sections, its exports. `scope=product`: the
+    product, its RSI versions, and every case and event decision -- what a
+    reviewer reads to know how the figures came to be what they are.
+    """
+    from sqlalchemy import and_
+
+    from app.models import AuditLog, PvCase, PvCaseEvent, PvExport, PvRsiVersion
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    if scope not in ("report", "product"):
+        raise error("PV_BAD_AUDIT_SCOPE", "scope must be report or product.", 422)
+    if scope == "report":
+        ids = [report.id]
+        ids += db.scalars(select(PvSection.id).where(
+            PvSection.report_instance_id == report.id)).all()
+        ids += db.scalars(select(PvExport.id).where(
+            PvExport.report_instance_id == report.id)).all()
+        condition = AuditLog.entity_id.in_(ids)
+    else:
+        condition = or_(
+            AuditLog.entity_id == product.id,
+            AuditLog.entity_id.in_(select(PvRsiVersion.id).where(
+                PvRsiVersion.pv_product_id == product.id)),
+            and_(AuditLog.entity_type == "pv_case",
+                 AuditLog.entity_id.in_(select(PvCase.id).where(
+                     PvCase.pv_product_id == product.id))),
+            and_(AuditLog.entity_type == "pv_case_event",
+                 AuditLog.entity_id.in_(select(PvCaseEvent.id).where(
+                     PvCaseEvent.pv_product_id == product.id))))
+    statement = select(AuditLog).where(AuditLog.org_id == user.org_id, condition)
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    rows = db.scalars(statement.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                      .limit(limit).offset(offset)).all()
+    return {"items": [{"id": r.id, "event": r.event, "severity": r.severity,
+                       "entity_type": r.entity_type, "entity_id": r.entity_id,
+                       "actor_id": r.actor_id, "actor_name": r.actor_name,
+                       "target": r.target, "created_at": r.created_at} for r in rows],
+            "total": total, "limit": limit, "offset": offset, "scope": scope}
