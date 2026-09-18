@@ -57,7 +57,7 @@ def org_a_resources(app_client, two_orgs):
         Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
         GenerationJob, Invoice, Mapping, Project, PvCase, PvCaseEvent, PvDeidItem,
-        PvDocument, PvDuplicateCandidate, PvProduct, PvReportInstance,
+        PvDocument, PvDuplicateCandidate, PvExposure, PvProduct, PvReportInstance,
         PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
         TemplateBlueprint,
@@ -245,7 +245,11 @@ def org_a_resources(app_client, two_orgs):
         pv_duplicate = PvDuplicateCandidate(
             org_id=org, pv_product_id=pv_product.id, case_id=pv_case.id,
             other_case_id=pv_other_case.id, score=0.9)
-        db.add_all([pv_event, pv_duplicate])
+        pv_exposure = PvExposure(
+            org_id=org, pv_product_id=pv_product.id,
+            report_instance_id=pv_report.id, context="marketing",
+            measure="subjects", value_text="10")
+        db.add_all([pv_event, pv_duplicate, pv_exposure])
         db.flush()
 
         ids = {
@@ -270,6 +274,8 @@ def org_a_resources(app_client, two_orgs):
             "report_instance_id": pv_report.id,
             "pv_document_id": pv_document.id, "deid_item_id": pv_deid.id,
             "case_event_id": pv_event.id, "duplicate_id": pv_duplicate.id,
+            "exposure_id": pv_exposure.id, "pv_table_key": "summary_tab_soc_pt",
+            "register": "studies",
         }
         db.commit()
     finally:
@@ -578,6 +584,24 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/pv/products/{pv_product_id}/duplicates"},
     {"method": "POST", "path": "/pv/duplicates/{duplicate_id}/resolve",
      "body": {"action": "kept_both"}},
+
+    # Safety M5: tabulations, exposure, registers.
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/tabulations"},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/tabulations/{table_key}",
+     "ids": {"table_key": "pv_table_key"}},
+    {"method": "GET",
+     "path": "/pv/reports/{report_instance_id}/tabulations/{table_key}/drilldown",
+     "ids": {"table_key": "pv_table_key"}, "query": {"cell": "r0c0"}},
+    {"method": "GET", "path": "/pv/reports/{report_instance_id}/exposure"},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/exposure",
+     "body": {"context": "marketing", "measure": "subjects", "value_text": "1"}},
+    {"method": "PATCH", "path": "/pv/exposure/{exposure_id}",
+     "body": {"value_text": "2"}},
+    {"method": "POST", "path": "/pv/exposure/{exposure_id}/confirm"},
+    {"method": "DELETE", "path": "/pv/exposure/{exposure_id}"},
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/registers/{register}"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/registers/{register}",
+     "body": {"study_id": "S-1"}},
 ]
 
 

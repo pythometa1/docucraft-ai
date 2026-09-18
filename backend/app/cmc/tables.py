@@ -41,26 +41,21 @@ filters on org_id and cmc_project_id before it sees a row.
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-import docx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.cmc.units import convert, normalise
-from app.generation.reproducibility import normalise_docx
+from app.docgen import grids
 from app.models import (
     CmcBatch, CmcBatchFormula, CmcMaterial, CmcResult, CmcSite, CmcTest,
 )
-from app.templates import blueprint as bp
-from app.templates.emit_docx import emit
 
-#: What an absent value prints as. One character, the same one in every table,
-#: so a reader scanning a column sees the gap -- and a matching `.missing`
-#: entry names the cell, because a dash in a printed document names nothing.
-HOLE = "-"
-
-#: The table style a rendered CTD table is given. `emit` writes no table style
-#: at all, and a specification with no ruling is a page of floating numbers.
-TABLE_STYLE = "Table Grid"
+#: What an absent value prints as, and the ruling a table is given. Both live
+#: in `app.docgen.grids` now that the Safety module renders tables too; they are
+#: re-exported here so every `tables.HOLE` written against this module still
+#: means what it meant.
+HOLE = grids.HOLE
+TABLE_STYLE = grids.TABLE_STYLE
 
 #: What makes a test an impurity, matched case-insensitively as a substring of
 #: `test_name`. `cmc_tests` carries no impurity flag, so the alternative to a
@@ -75,38 +70,13 @@ _IMPURITY_MARKERS = (
 )
 
 
-class TableError(Exception):
-    """A table cannot be rendered as asked."""
-
-
-class TableUnavailable(TableError):
-    """This project holds no data for this table.
-
-    Distinct from a table with holes in it. A hole is rendered, because the
-    reviewer needs to see which cell is empty; nothing at all is refused,
-    because a grid of dashes under a heading reads as a finding rather than as
-    an absence of data, and the caller can say "no data yet" far better than
-    this module can.
-    """
-
-
-class UnknownTable(TableError):
-    """No builder is registered under this key.
-
-    Kept apart from `TableUnavailable` on purpose. A section marked
-    `[TABLE: spec_tabel]` is a typo, and reporting it as "no data for this
-    project" sends somebody to look at the data review grid for a row that was
-    never the problem.
-    """
-
-
-class RaggedTable(TableError):
-    """A builder produced rows of unequal width.
-
-    `emit` refuses a ragged grid -- Word has no representation for one -- and
-    it refuses it after the whole document has been assembled. Catching it at
-    the builder names the table that is wrong.
-    """
+#: The error family, shared with every module that renders a table from data.
+#: Aliased rather than subclassed: `except TableError` in the CMC router has to
+#: catch exactly what the shared helpers raise.
+TableError = grids.TableError
+TableUnavailable = grids.TableUnavailable
+UnknownTable = grids.UnknownTable
+RaggedTable = grids.RaggedTable
 
 
 @dataclass
@@ -199,20 +169,10 @@ def _text(value) -> str:
     return value if value else HOLE
 
 
-def _cell(text: str, *, bold: bool = False) -> list:
-    """One table cell: a list of blocks, holding one paragraph, holding one
-    static segment. Static because a placeholder is a fill slot the compiler
-    would try to write into, and a rendered value is already the answer."""
-    return [bp.paragraph([bp.segment("static", text, bold=bold)])]
-
-
-def _heading(text: str) -> dict:
-    return bp.paragraph([bp.segment("static", text, bold=True)])
-
-
-def _grid(columns, rows) -> dict:
-    header = [_cell(_text(name), bold=True) for name in columns]
-    return bp.table([header] + [[_cell(value) for value in row] for row in rows])
+# The cell, heading and grid builders are the shared ones.
+_cell = grids.cell
+_heading = grids.heading
+_grid = grids.grid
 
 
 def _rendered(key, title, columns, rows, tally, blocks=None, groups=None) -> RenderedTable:
@@ -947,11 +907,4 @@ def render_to_docx(rendered: RenderedTable, output_path: str) -> str:
     normalised again on the way out, because emitting the same data twice has
     to give the same bytes.
     """
-    body = bp.normalise_body({"blocks": list(rendered.blocks), "sect_pr_from": None})
-    emit(body, output_path)
-
-    document = docx.Document(output_path)
-    for table in document.tables:
-        table.style = TABLE_STYLE
-    document.save(output_path)
-    return normalise_docx(output_path)
+    return grids.write_docx(rendered.blocks, output_path)

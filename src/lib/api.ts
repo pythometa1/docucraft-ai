@@ -19,8 +19,9 @@ import type {
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
   PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDuplicatePair,
-  PvEventSummary, PvMappingProfile, PvReadiness,
-  PvRsiVersion, PvScopePreview, PvSection, PvSource,
+  PvEventSummary, PvExposure, PvMappingProfile, PvReadiness,
+  PvRsiVersion, PvScopePreview, PvSection, PvSource, PvTabulation,
+  PvTabulationStatus,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
 } from "@/lib/types";
 
@@ -821,6 +822,44 @@ export const api = {
     action: string; keep_case_id?: string;
   }) => request<{ resolved: string }>(
     "POST", `/pv/duplicates/${pairId}/resolve`, { json: body }),
+
+  /* ---- Safety M5: computed tables, exposure and registers ---- */
+  pvTabulations: (reportId: string) =>
+    request<{ items: PvTabulationStatus[] }>(
+      "GET", `/pv/reports/${reportId}/tabulations`),
+  pvTabulation: (reportId: string, key: string) =>
+    request<PvTabulation>("GET", `/pv/reports/${reportId}/tabulations/${key}`),
+  /** Reads the provenance the builder recorded while counting — not a second
+   *  query that could come to disagree with the number. */
+  pvDrilldown: (reportId: string, key: string, cell: string) =>
+    request<{ cell: string; count: number;
+              cases: { id: string; worldwide_case_id: string | null;
+                       country_of_occurrence: string | null;
+                       initial_receipt_date: string | null;
+                       is_serious: boolean }[];
+              events: PvCaseEvent[] }>(
+      "GET", `/pv/reports/${reportId}/tabulations/${key}/drilldown`,
+      { query: { cell } }),
+  pvExposure: (reportId: string) =>
+    request<{ items: PvExposure[]; contexts: string[]; measures: string[] }>(
+      "GET", `/pv/reports/${reportId}/exposure`),
+  pvAddExposure: (reportId: string, body: {
+    context: string; measure: string; value_text: string; region?: string;
+    population_descriptor?: string; calculation_method_note?: string;
+  }) => request<PvExposure>("POST", `/pv/reports/${reportId}/exposure`, { json: body }),
+  pvUpdateExposure: (exposureId: string, body: Record<string, unknown>) =>
+    request<PvExposure>("PATCH", `/pv/exposure/${exposureId}`, { json: body }),
+  pvConfirmExposure: (exposureId: string) =>
+    request<PvExposure>("POST", `/pv/exposure/${exposureId}/confirm`),
+  pvDeleteExposure: (exposureId: string) =>
+    request<{ deleted: boolean }>("DELETE", `/pv/exposure/${exposureId}`),
+  pvRegister: (id: string, register: string) =>
+    request<{ items: Record<string, unknown>[]; fields: string[];
+              choices: Record<string, string[]> }>(
+      "GET", `/pv/products/${id}/registers/${register}`),
+  pvAddToRegister: (id: string, register: string, body: Record<string, unknown>) =>
+    request<Record<string, unknown>>(
+      "POST", `/pv/products/${id}/registers/${register}`, { json: body }),
 
   /* ---- CSR module: ICH E3 drafting for medical writers ---- */
   csrListProjects: () =>

@@ -962,6 +962,44 @@ export type PvDuplicatePair = {
   resolved_by: string | null;
 };
 
+/** A computed table. `cells` maps "r{row}c{col}" to the events and cases
+ *  that make up that number — the drill-down reads it, and nothing re-counts. */
+export type PvTabulation = {
+  key: string;
+  title: string;
+  columns: string[];
+  rows: string[][];
+  cells: Record<string, { events: string[]; cases: string[] }>;
+  totals: Record<string, number>;
+  scope: Record<string, string | null>;
+  notes: string[];
+  missing: string[];
+};
+
+export type PvTabulationStatus = {
+  key: string;
+  available: boolean;
+  reason: string | null;
+  rows: number;
+  missing: number;
+  title?: string;
+};
+
+export type PvExposure = {
+  id: string;
+  report_instance_id: string;
+  context: string;
+  region: string | null;
+  population_descriptor: string | null;
+  measure: string;
+  /** What the report prints. `value_numeric` exists for rates only. */
+  value_text: string | null;
+  value_numeric: number | null;
+  calculation_method_note: string | null;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+};
+
 /* ---- The CSR module ---- */
 
 export type CsrSection = {

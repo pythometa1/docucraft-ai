@@ -514,3 +514,69 @@ def test_the_status_of_a_report_is_not_how_it_gets_approved(app_client, product)
                                headers=_auth(token), json={"status": "approved"})
     assert refused.status_code == 409
     assert refused.json()["detail"]["error"]["code"] == "PV_SIGNOFF_REQUIRED"
+
+
+# ---------------------------------------------- granting, without the bootstrap
+
+@pytest.fixture
+def plain_writer(app_client, product):
+    """A second user in the same organisation who does NOT hold MANAGE_USERS,
+    made a writer on the product by the admin."""
+    import uuid
+
+    from app.db import SessionLocal
+    from app.models import PvProduct, User
+    from app.security import create_access_token, hash_password
+
+    token, created = product
+    db = SessionLocal()
+    org_id = db.get(PvProduct, created["id"]).org_id
+    person = User(org_id=org_id, email=f"writer-{uuid.uuid4().hex[:8]}@tenant.test",
+                  full_name="Plain Writer", role_key="generator",
+                  password_hash=hash_password("pw"))
+    db.add(person)
+    db.commit()
+    person_id = person.id
+    db.close()
+    app_client.post(f"/api/v1/pv/products/{created['id']}/members",
+                    headers=_auth(token),
+                    json={"user_id": person_id, "pv_role": "writer"})
+    return create_access_token(person_id, org_id), person_id, created
+
+
+def test_a_writer_cannot_hand_out_a_role_above_their_own(app_client, plain_writer):
+    """Nobody can grant an authority they do not have. The org admin's
+    MANAGE_USERS is the only way past this, and a writer does not hold it."""
+    writer_token, writer_id, created = plain_writer
+    refused = app_client.post(f"/api/v1/pv/products/{created['id']}/members",
+                              headers=_auth(writer_token),
+                              json={"user_id": writer_id, "pv_role": "reviewer"})
+    assert refused.status_code == 403
+    assert refused.json()["detail"]["error"]["details"]["required_role"] == "reviewer"
+
+    refused_qp = app_client.post(f"/api/v1/pv/products/{created['id']}/members",
+                                 headers=_auth(writer_token),
+                                 json={"user_id": writer_id,
+                                       "pv_role": "qualified_person"})
+    assert refused_qp.status_code == 403
+
+
+def test_a_writer_can_bring_in_another_writer(app_client, plain_writer, product):
+    token, _created = product
+    writer_token, writer_id, created = plain_writer
+    ok = app_client.post(f"/api/v1/pv/products/{created['id']}/members",
+                         headers=_auth(writer_token),
+                         json={"user_id": writer_id, "pv_role": "writer"})
+    assert ok.status_code == 201
+
+
+def test_an_unknown_role_is_refused_before_anything_else(app_client, product):
+    token, created = product
+    members = app_client.get(f"/api/v1/pv/products/{created['id']}/members",
+                             headers=_auth(token)).json()
+    res = app_client.post(f"/api/v1/pv/products/{created['id']}/members",
+                          headers=_auth(token),
+                          json={"user_id": members["items"][0]["user_id"],
+                                "pv_role": "qppv"})
+    assert res.status_code == 422
+    assert res.json()["detail"]["error"]["code"] == "PV_BAD_ROLE"

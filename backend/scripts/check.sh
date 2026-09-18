@@ -167,6 +167,11 @@ FLOORS = {
     "safety/meddra.py": 98,
     "safety/expectedness.py": 100,
     "safety/duplicates.py": 98,
+    # Every figure a periodic safety report prints. A branch not exercised here
+    # is a cell counted in the wrong column -- serious as non-serious, a
+    # suggestion as a determination -- in a table that reads as complete.
+    "safety/tabulations.py": 90,
+    "docgen/grids.py": 95,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

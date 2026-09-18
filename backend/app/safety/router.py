@@ -405,36 +405,35 @@ def add_member(pv_product_id: str, body: MemberIn, db: Session = Depends(get_db)
                user: User = Depends(get_current_user)):
     """Grant a role.
 
-    Granting the qualified-person role needs either an existing qualified
-    person on this product, or `MANAGE_USERS` at the organisation. The second
-    is not a back door -- it is the bootstrap. Requiring only the first would
-    deadlock every new product: the role could never be given to anyone,
-    because nobody would hold it yet.
+    One rule for every role: you may grant up to the role you hold yourself,
+    or any role if you hold `MANAGE_USERS` in the organisation. So a reviewer
+    can bring in a writer, a qualified person can name another, and nobody can
+    hand out an authority they do not have.
 
-    `MANAGE_USERS` is the right capability to carry it. Appointing the person
-    who takes regulatory responsibility for a product's safety IS an
-    organisational act, and that capability already means "may change what this
-    organisation is". Note what this does NOT do: holding it does not make
-    anybody a qualified person. It lets them name one, explicitly, in an
-    entry that records who named whom.
+    `MANAGE_USERS` is the bootstrap rather than a back door. Without it every
+    new product would deadlock -- its creator is a writer, and nobody would yet
+    hold the role needed to grant anything above that. Appointing the people who
+    carry regulatory responsibility for a product IS an organisational act, and
+    that capability already means "may change what this organisation is". It
+    does not make its holder anything on the product: it lets them name
+    somebody, in an entry recording who named whom.
     """
     from app.authz import MANAGE_USERS, has_capability
 
     product = _owned_product(db, pv_product_id, user)
-    if body.pv_role == roles.QUALIFIED_PERSON:
-        if not (has_capability(user, MANAGE_USERS)
-                or roles.has_pv_role(db, product.id, user, roles.QUALIFIED_PERSON)):
-            raise error(
-                "PV_ROLE_REQUIRED",
-                "Naming a qualified person requires either an existing qualified "
-                "person on this product or the ability to manage users in this "
-                "organisation.", 403,
-                {"required_role": roles.QUALIFIED_PERSON,
-                 "actual_role": roles.role_of(db, product.id, user),
-                 "or_capability": MANAGE_USERS})
-    else:
-        roles.require_pv_role(db, product.id, user, roles.REVIEWER,
-                              action="Granting a role")
+    if body.pv_role not in registry.PV_ROLES:
+        raise error("PV_BAD_ROLE",
+                    f"pv_role must be one of {', '.join(registry.PV_ROLES)}.", 422)
+    if not (has_capability(user, MANAGE_USERS)
+            or roles.has_pv_role(db, product.id, user, body.pv_role)):
+        raise error(
+            "PV_ROLE_REQUIRED",
+            f"Granting the {body.pv_role.replace('_', ' ')} role requires holding it "
+            "on this product, or the ability to manage users in this organisation.",
+            403,
+            {"required_role": body.pv_role,
+             "actual_role": roles.role_of(db, product.id, user),
+             "or_capability": MANAGE_USERS})
     target = db.get(User, body.user_id)
     if not target or target.org_id != user.org_id:
         raise error("PV_USER_NOT_FOUND", "User not found in this organisation", 404)
@@ -2182,3 +2181,397 @@ def resolve_duplicate(duplicate_id: str, body: DuplicateResolution,
     candidate.resolved_at = now()
     db.commit()
     return {"resolved": candidate.status}
+
+
+# ================================== M5: tabulations, exposure and the registers
+
+def _tabulation_context(db, report_instance_id: str, user: User):
+    report = _owned_report(db, report_instance_id, user)
+    product = _owned_product(db, report.pv_product_id, user)
+    return report, product
+
+
+@router.get("/pv/reports/{report_instance_id}/tabulations")
+def list_tabulations(report_instance_id: str, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """Which computed tables this report's sections call for, and whether each
+    one can be built yet.
+
+    Asked of the builders rather than guessed: "no data yet" and "rendered with
+    holes" are different states, and the screen needs to say which.
+    """
+    from app.safety import tabulations as tab
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    wanted = sorted(set(trees.TABLE_KEYS.get(report.doc_type_key, {}).values()))
+    items = []
+    for key in wanted:
+        entry = {"key": key, "available": True, "reason": None,
+                 "rows": 0, "missing": 0}
+        try:
+            built = tab.render(db, report=report, product=product, table_key=key)
+            entry.update(rows=len(built.rows), missing=len(built.missing),
+                         title=built.title)
+        except tab.TableUnavailable as exc:
+            entry.update(available=False, reason=str(exc))
+        items.append(entry)
+    return {"items": items}
+
+
+@router.get("/pv/reports/{report_instance_id}/tabulations/{table_key}")
+def get_tabulation(report_instance_id: str, table_key: str,
+                   db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """One computed table, with the provenance of every cell and the scope the
+    figures describe."""
+    from app.safety import tabulations as tab
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    try:
+        built = tab.render(db, report=report, product=product, table_key=table_key)
+    except tab.UnknownTable as exc:
+        raise error("PV_UNKNOWN_TABLE", str(exc), 404)
+    except tab.TableUnavailable as exc:
+        raise error("PV_TABLE_UNAVAILABLE", str(exc), 409)
+    return built.as_dict()
+
+
+@router.get("/pv/reports/{report_instance_id}/tabulations/{table_key}/drilldown")
+def drilldown(report_instance_id: str, table_key: str, cell: str,
+              db: Session = Depends(get_db),
+              user: User = Depends(get_current_user)):
+    """The cases behind one cell.
+
+    Read from the provenance the builder recorded while counting, not by
+    re-running a filter: a second query that reconstructed "serious unlisted
+    headaches in the interval" is a second code path, and the day it disagrees
+    with the first the drill-down shows cases the number does not include.
+    """
+    from app.models import PvCase, PvCaseEvent
+    from app.safety import tabulations as tab
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    try:
+        built = tab.render(db, report=report, product=product, table_key=table_key)
+    except tab.UnknownTable as exc:
+        raise error("PV_UNKNOWN_TABLE", str(exc), 404)
+    except tab.TableUnavailable as exc:
+        raise error("PV_TABLE_UNAVAILABLE", str(exc), 409)
+    contributors = tab.cases_for_cell(built, cell)
+    cases = db.scalars(select(PvCase).where(
+        PvCase.id.in_(contributors["cases"] or [""]))).all()
+    events = db.scalars(select(PvCaseEvent).where(
+        PvCaseEvent.id.in_(contributors["events"] or [""]))).all()
+    return {
+        "cell": cell, "count": len(contributors["events"]),
+        "cases": [{"id": c.id, "worldwide_case_id": c.worldwide_case_id,
+                   "country_of_occurrence": c.country_of_occurrence,
+                   "initial_receipt_date": c.initial_receipt_date,
+                   "is_serious": c.is_serious} for c in cases],
+        "events": [_event_out(e) for e in events],
+    }
+
+
+class ExposureIn(BaseModel):
+    context: str
+    measure: str
+    value_text: str
+    region: str | None = None
+    population_descriptor: str | None = None
+    calculation_method_note: str | None = None
+    source_document_id: str | None = None
+
+
+class ExposurePatch(BaseModel):
+    context: str | None = None
+    measure: str | None = None
+    value_text: str | None = None
+    region: str | None = None
+    population_descriptor: str | None = None
+    calculation_method_note: str | None = None
+
+
+EXPOSURE_CONTEXTS = ("clinical_trial", "marketing")
+EXPOSURE_MEASURES = ("subjects", "patient_years", "treatment_days", "units_sold",
+                     "prescriptions")
+
+
+def _exposure_numeric(value_text: str) -> float | None:
+    """The figure as a number, for arithmetic only -- never rendered.
+
+    A comma is a thousands separator only when it groups exactly three digits;
+    anything else is refused rather than guessed, for the reason the CMC module
+    refuses a bare "1,5": a guess that is wrong by a factor of a thousand is a
+    reporting rate wrong by the same factor.
+    """
+    import re as _re
+
+    text = (value_text or "").strip().replace(" ", "")
+    if _re.fullmatch(r"\d{1,3}(,\d{3})+(\.\d+)?", text):
+        text = text.replace(",", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _exposure_out(e) -> dict:
+    return {"id": e.id, "report_instance_id": e.report_instance_id,
+            "context": e.context, "region": e.region,
+            "population_descriptor": e.population_descriptor,
+            "measure": e.measure, "value_text": e.value_text,
+            "value_numeric": e.value_numeric,
+            "calculation_method_note": e.calculation_method_note,
+            "source_document_id": e.source_document_id,
+            "confirmed_by": e.confirmed_by, "confirmed_at": e.confirmed_at}
+
+
+def _validate_exposure(body) -> None:
+    if body.get("context") is not None and body["context"] not in EXPOSURE_CONTEXTS:
+        raise error("PV_BAD_EXPOSURE_CONTEXT",
+                    f"context must be one of {', '.join(EXPOSURE_CONTEXTS)}.", 422)
+    if body.get("measure") is not None and body["measure"] not in EXPOSURE_MEASURES:
+        raise error("PV_BAD_EXPOSURE_MEASURE",
+                    f"measure must be one of {', '.join(EXPOSURE_MEASURES)}.", 422)
+
+
+@router.get("/pv/reports/{report_instance_id}/exposure")
+def list_exposure(report_instance_id: str, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    from app.models import PvExposure
+
+    report = _owned_report(db, report_instance_id, user)
+    rows = db.scalars(select(PvExposure).where(
+        PvExposure.report_instance_id == report.id)).all()
+    return {"items": [_exposure_out(e) for e in rows],
+            "contexts": list(EXPOSURE_CONTEXTS), "measures": list(EXPOSURE_MEASURES)}
+
+
+@router.post("/pv/reports/{report_instance_id}/exposure", status_code=201)
+def add_exposure(report_instance_id: str, body: ExposureIn,
+                 db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """One exposure figure, kept as stated.
+
+    `value_text` is what the document prints; the number beside it exists for
+    rates only. "1,240,000" and "1.24 million" are different claims about
+    precision, and the report should make the one its source made.
+    """
+    from app.models import PvExposure
+
+    report = _owned_report(db, report_instance_id, user)
+    roles.require_pv_role(db, report.pv_product_id, user, roles.WRITER,
+                          action="Entering exposure")
+    fields = body.model_dump()
+    _validate_exposure(fields)
+    if not body.value_text.strip():
+        raise error("PV_EXPOSURE_NEEDS_VALUE", "An exposure figure needs a value.", 422)
+    row = PvExposure(org_id=user.org_id, pv_product_id=report.pv_product_id,
+                     report_instance_id=report.id,
+                     value_numeric=_exposure_numeric(body.value_text), **fields)
+    db.add(row)
+    db.flush()
+    log_audit(db, user, "Entered exposure", "pv_report_instance", report.id, None,
+              "info", f"{body.context} {body.measure}: {body.value_text}")
+    db.commit()
+    db.refresh(row)
+    return _exposure_out(row)
+
+
+@router.patch("/pv/exposure/{exposure_id}")
+def update_exposure(exposure_id: str, body: ExposurePatch,
+                    db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    """Change a figure. A changed figure is an unconfirmed figure: whatever the
+    reviewer confirmed was the old number, not this one."""
+    from app.models import PvExposure
+
+    row = db.get(PvExposure, exposure_id)
+    if not row or row.org_id != user.org_id:
+        raise error("PV_EXPOSURE_NOT_FOUND", "Exposure not found", 404)
+    roles.require_pv_role(db, row.pv_product_id, user, roles.WRITER,
+                          action="Changing exposure")
+    changes = body.model_dump(exclude_unset=True)
+    _validate_exposure(changes)
+    before = row.value_text
+    for key, value in changes.items():
+        setattr(row, key, value)
+    if "value_text" in changes:
+        row.value_numeric = _exposure_numeric(row.value_text)
+    row.confirmed_by = None
+    row.confirmed_at = None
+    log_audit(db, user, "Changed exposure", "pv_report_instance",
+              row.report_instance_id, None, "warning",
+              f"{row.measure}: {before!r} -> {row.value_text!r}; confirmation withdrawn")
+    db.commit()
+    db.refresh(row)
+    return _exposure_out(row)
+
+
+@router.post("/pv/exposure/{exposure_id}/confirm")
+def confirm_exposure(exposure_id: str, db: Session = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """A second person's check on a denominator. Exposure is what every rate in
+    the report is divided by, so it is confirmed by a reviewer, not the writer
+    alone."""
+    from app.models import PvExposure
+
+    row = db.get(PvExposure, exposure_id)
+    if not row or row.org_id != user.org_id:
+        raise error("PV_EXPOSURE_NOT_FOUND", "Exposure not found", 404)
+    roles.require_pv_role(db, row.pv_product_id, user, roles.REVIEWER,
+                          action="Confirming exposure")
+    if not (row.calculation_method_note or "").strip():
+        raise error("PV_EXPOSURE_NEEDS_METHOD",
+                    "An exposure figure is confirmed with its method. Two reports "
+                    "quoting different numbers for one interval are usually two "
+                    "methods, and the note is how a reader tells.", 409)
+    row.confirmed_by = user.id
+    row.confirmed_at = now()
+    log_audit(db, user, "Confirmed exposure", "pv_report_instance",
+              row.report_instance_id, None, "info",
+              f"{row.measure}: {row.value_text}")
+    db.commit()
+    db.refresh(row)
+    return _exposure_out(row)
+
+
+@router.delete("/pv/exposure/{exposure_id}")
+def delete_exposure(exposure_id: str, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    from app.models import PvExposure
+
+    row = db.get(PvExposure, exposure_id)
+    if not row or row.org_id != user.org_id:
+        raise error("PV_EXPOSURE_NOT_FOUND", "Exposure not found", 404)
+    roles.require_pv_role(db, row.pv_product_id, user, roles.WRITER,
+                          action="Deleting exposure")
+    db.delete(row)
+    log_audit(db, user, "Deleted exposure", "pv_report_instance",
+              row.report_instance_id, None, "warning",
+              f"{row.measure}: {row.value_text}")
+    db.commit()
+    return {"deleted": True}
+
+
+# ------------------------------------------- the registers the tables read from
+#
+# Safety concerns, actions, studies and literature are small registers, each
+# the source of one computed table. One generic pair of endpoints per register
+# rather than four near-identical handlers: the only things that differ are the
+# model, the fields and the vocabulary checks, and those are data.
+
+_REGISTERS = {
+    "safety-concerns": {
+        "model": "PvSafetyConcern",
+        "fields": ("concern_type", "title", "meddra_terms", "status",
+                   "rmp_part_reference", "first_added_report_id"),
+        "required": ("concern_type", "title"),
+        "choices": {"concern_type": ("important_identified_risk",
+                                     "important_potential_risk",
+                                     "missing_information"),
+                    "status": ("current", "removed")},
+        "order": "title",
+    },
+    "safety-actions": {
+        "model": "PvSafetyAction",
+        "fields": ("action_type", "description", "region", "action_date", "reason",
+                   "source_document_id"),
+        "required": ("action_type",),
+        "choices": {"action_type": ("label_change", "dhpc", "suspension",
+                                    "withdrawal", "restriction", "protocol_amendment",
+                                    "clinical_hold", "other")},
+        "order": "action_date",
+    },
+    "studies": {
+        "model": "PvStudy",
+        "fields": ("study_id", "title", "phase", "status", "population",
+                   "planned_enrolment", "actual_enrolment", "start_date",
+                   "completion_date", "source_document_id"),
+        "required": ("study_id",),
+        "choices": {},
+        "order": "study_id",
+    },
+    "literature": {
+        "model": "PvLiteratureRef",
+        "fields": ("citation", "database", "search_date", "search_strategy_ref",
+                   "relevance", "linked_case_ids", "source_document_id"),
+        "required": ("citation",),
+        "choices": {},
+        "order": "search_date",
+    },
+}
+
+_DATE_FIELDS = {"action_date", "start_date", "completion_date", "search_date"}
+
+
+def _register(name: str) -> dict:
+    spec = _REGISTERS.get(name)
+    if spec is None:
+        raise error("PV_UNKNOWN_REGISTER",
+                    f"{name!r} is not a register; one of {', '.join(_REGISTERS)}.",
+                    404)
+    return spec
+
+
+def _register_row_out(row, spec) -> dict:
+    out = {"id": row.id}
+    for name in spec["fields"]:
+        out[name] = getattr(row, name)
+    return out
+
+
+@router.get("/pv/products/{pv_product_id}/registers/{register}")
+def list_register(pv_product_id: str, register: str,
+                  db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    import app.models as models
+
+    product = _owned_product(db, pv_product_id, user)
+    spec = _register(register)
+    model = getattr(models, spec["model"])
+    rows = db.scalars(select(model).where(
+        model.pv_product_id == product.id
+    ).order_by(getattr(model, spec["order"]))).all()
+    return {"items": [_register_row_out(r, spec) for r in rows],
+            "fields": list(spec["fields"]),
+            "choices": {k: list(v) for k, v in spec["choices"].items()}}
+
+
+@router.post("/pv/products/{pv_product_id}/registers/{register}", status_code=201)
+def add_to_register(pv_product_id: str, register: str, body: dict,
+                    db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    import app.models as models
+
+    product = _owned_product(db, pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action=f"Adding to the {register.replace('-', ' ')} register")
+    spec = _register(register)
+    values = {k: v for k, v in (body or {}).items() if k in spec["fields"]}
+    for name in spec["required"]:
+        if not str(values.get(name) or "").strip():
+            raise error("PV_REGISTER_FIELD_REQUIRED", f"{name} is required.", 422)
+    for name, allowed in spec["choices"].items():
+        if values.get(name) is not None and values[name] not in allowed:
+            raise error("PV_REGISTER_BAD_CHOICE",
+                        f"{name} must be one of {', '.join(allowed)}.", 422)
+    for name in _DATE_FIELDS & set(values):
+        if values[name]:
+            try:
+                values[name] = date.fromisoformat(str(values[name]))
+            except ValueError:
+                raise error("PV_REGISTER_BAD_DATE",
+                            f"{name} must be an ISO date (YYYY-MM-DD).", 422)
+        else:
+            values[name] = None
+    model = getattr(models, spec["model"])
+    row = model(org_id=user.org_id, pv_product_id=product.id, **values)
+    db.add(row)
+    db.flush()
+    log_audit(db, user, f"Added to the {register.replace('-', ' ')} register",
+              "pv_product", product.id, product.project_id, "info",
+              str(values.get(spec["required"][0]))[:120])
+    db.commit()
+    db.refresh(row)
+    return _register_row_out(row, spec)
