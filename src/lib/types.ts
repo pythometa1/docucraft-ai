@@ -731,6 +731,8 @@ export type PvReportInstance = {
   /** What this report stated, frozen at sign-off. The next report's QC checks
    *  its cumulative count against this. */
   figures_at_signoff: Record<string, number> | null;
+  /** ICSR narrative reports only: the case, or batch of cases, narrated. */
+  case_ids: string[];
   section_count?: number;
   due_dates?: PvDueDate[];
   created_at: string;
@@ -1096,6 +1098,56 @@ export type PvAuditEntry = {
   actor_name: string | null;
   target: string | null;
   created_at: string;
+};
+
+export type PvSignal = {
+  id: string;
+  pv_product_id: string;
+  signal_reference: string | null;
+  description: string | null;
+  meddra_terms: string[];
+  detection_source: string | null;
+  detection_date: string | null;
+  /** candidate -> new -> ongoing -> closed, or candidate -> refuted. */
+  status: string;
+  priority: string | null;
+  evaluation_summary: string | null;
+  conclusion: string | null;
+  action_taken: string | null;
+  closure_date: string | null;
+  linked_case_ids: string[];
+  linked_report_instance_ids: string[];
+  /** The screening row a candidate was raised from, when one was. */
+  detection_basis: Record<string, unknown> | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PvScreenRow = {
+  term: string;
+  a: number; b: number; c: number; d: number;
+  prr: number | null; prr_ci: [number, number] | null;
+  ror: number | null; ror_ci: [number, number] | null;
+  chi2: number | null;
+  notes: string[];
+  meets_evans: boolean;
+  ror_lower_above_one: boolean;
+  screening_flag: boolean;
+};
+
+export type PvScreenResult = {
+  /** Printed wherever the figures are. */
+  disclaimer: string;
+  window: "interval" | "cumulative";
+  level: "pt" | "soc";
+  period: { from: string | null; to: string; data_lock_point: string };
+  product_cases: number;
+  background_cases: number;
+  background: string;
+  background_basis: string;
+  thresholds: { evans: string; ror: string };
+  rows: PvScreenRow[];
 };
 
 /* ---- The CSR module ---- */

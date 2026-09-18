@@ -376,18 +376,37 @@ def exposure_table(db, ctx):
                    scope=_scope_meta(ctx.scope), missing=missing)
 
 
-def signal_overview(db, ctx):
-    """New and ongoing signals, and those closed during the interval."""
+def signals_in_report(db, report, scope) -> list:
+    """The signals a report's overview shows, in detection order.
+
+    Open signals, and those closed or refuted during the interval. A candidate
+    is not shown: until somebody validates it, it is a statistic, not a signal.
+    Nothing detected after the lock is shown, for the reason nothing received
+    after it is counted.
+    """
     from app.models import PvSignal
 
-    scope = ctx.scope
     signals = db.scalars(select(PvSignal).where(
-        PvSignal.pv_product_id == ctx.report.pv_product_id
-    ).order_by(PvSignal.detection_date)).all()
-    shown = [s for s in signals
-             if s.status != "closed"
-             or (s.closure_date and scope.period_start <= s.closure_date
-                 <= scope.data_lock_point)]
+        PvSignal.pv_product_id == report.pv_product_id
+    ).order_by(PvSignal.detection_date, PvSignal.created_at)).all()
+    shown = []
+    for s in signals:
+        if s.status == "candidate":
+            continue
+        if s.detection_date and s.detection_date > scope.data_lock_point:
+            continue
+        if s.status in ("closed", "refuted") and not (
+                s.closure_date
+                and scope.period_start <= s.closure_date <= scope.data_lock_point):
+            continue
+        shown.append(s)
+    return shown
+
+
+def signal_overview(db, ctx):
+    """New and ongoing signals, and those closed during the interval."""
+    scope = ctx.scope
+    shown = signals_in_report(db, ctx.report, scope)
     if not shown:
         raise TableUnavailable("no signal is open or was closed in the interval")
     rows, missing = [], []
@@ -401,6 +420,9 @@ def signal_overview(db, ctx):
                                          and (s.action_taken or "").strip()):
             missing.append(f"closed signal {s.signal_reference or s.id} has no "
                            "conclusion or no action recorded")
+        elif s.status == "refuted" and not (s.conclusion or "").strip():
+            missing.append(f"refuted signal {s.signal_reference or s.id} has no "
+                           "conclusion saying why")
     return _finish("signal_overview", "Overview of signals: new, ongoing or closed",
                    ["Signal", "Terms", "Source", "Detected", "Status", "Action"],
                    rows, totals={"signals_shown": len(rows)},

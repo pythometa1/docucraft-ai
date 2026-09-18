@@ -182,6 +182,9 @@ FLOORS = {
     # behind it, a revision mark on the wrong paragraph, a name in the file.
     "safety/export.py": 95,
     "docgen/assembly.py": 95,
+    # The screening statistic. Hand-checked arithmetic, and every undefined
+    # cell a refusal rather than a number that looks like evidence.
+    "safety/signals.py": 100,
     "numbering.py": 88,
     "generation/single.py": 90,
     "compiler/blueprint_author.py": 90,

@@ -57,7 +57,7 @@ def org_a_resources(app_client, two_orgs):
         Conversation, CsrDocument, CsrProject, CsrSection, Customer, DocumentReview, DocumentVersion, DraftDocument,
         GeneratedDocument,
         GenerationJob, Invoice, Mapping, Project, PvCase, PvCaseEvent, PvDeidItem,
-        PvDocument, PvDuplicateCandidate, PvExport, PvExposure, PvProduct, PvReportInstance,
+        PvDocument, PvDuplicateCandidate, PvExport, PvExposure, PvSignal, PvProduct, PvReportInstance,
         PvSection,
         PvRsiVersion, ReviewComment, ReviewTask, SourceFile, Study,
         SourceVersion,
@@ -255,7 +255,10 @@ def org_a_resources(app_client, two_orgs):
         pv_export = PvExport(org_id=org, pv_product_id=pv_product.id,
                              report_instance_id=pv_report.id, created_by="u",
                              options={"files": []})
-        db.add_all([pv_event, pv_duplicate, pv_exposure, pv_section, pv_export])
+        pv_signal = PvSignal(org_id=org, pv_product_id=pv_product.id,
+                             meddra_terms=["Headache"])
+        db.add_all([pv_event, pv_duplicate, pv_exposure, pv_section, pv_export,
+                    pv_signal])
         db.flush()
 
         ids = {
@@ -283,6 +286,7 @@ def org_a_resources(app_client, two_orgs):
             "exposure_id": pv_exposure.id, "pv_table_key": "summary_tab_soc_pt",
             "register": "studies", "pv_section_id": pv_section.id,
             "pv_case_id": pv_case.id, "pv_export_id": pv_export.id,
+            "signal_id": pv_signal.id,
         }
         db.commit()
     finally:
@@ -638,6 +642,14 @@ ROUTES: list[dict] = [
     {"method": "GET", "path": "/pv/reports/{report_instance_id}/exports"},
     {"method": "GET", "path": "/pv/exports/{pv_export_id}/download"},
     {"method": "GET", "path": "/pv/reports/{report_instance_id}/audit"},
+
+    # Safety M9: signals and screening.
+    {"method": "GET", "path": "/pv/products/{pv_product_id}/signals"},
+    {"method": "POST", "path": "/pv/products/{pv_product_id}/signals",
+     "body": {"meddra_terms": ["Headache"]}},
+    {"method": "PATCH", "path": "/pv/signals/{signal_id}", "body": {"priority": "low"}},
+    {"method": "POST", "path": "/pv/reports/{report_instance_id}/disproportionality",
+     "body": {}},
 ]
 
 

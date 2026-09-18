@@ -457,6 +457,43 @@ def _denominator(ctx) -> list:
     return out
 
 
+def _bound_cases(ctx) -> list:
+    """An ICSR narrative is about its cases: it names at least one, each still
+    in the store, each known before the lock, each with its events confirmed."""
+    from app.models import PvCase, PvCaseEvent
+
+    if ctx.report.doc_type_key != "icsr_narrative":
+        return []
+    ids = list(ctx.report.case_ids or [])
+    if not ids:
+        return [PvFinding("NO_CASES_BOUND", BLOCKER,
+                          "This ICSR narrative report names no case to narrate.")]
+    out = []
+    cases = ctx.db.scalars(select(PvCase).where(PvCase.id.in_(ids))).all()
+    gone = sorted(set(ids) - {c.id for c in cases})
+    if gone:
+        out.append(PvFinding(
+            "BOUND_CASE_MISSING", BLOCKER,
+            f"{len(gone)} bound case(s) are no longer in the case store -- merged "
+            "or deleted since the report was set up.", detail={"case_ids": gone}))
+    late = [c.worldwide_case_id or c.id for c in cases
+            if scope_mod.scope_of_case(ctx.scope, c) in ("after_lock", "undated")]
+    if late:
+        out.append(PvFinding(
+            "BOUND_CASE_OUTSIDE_LOCK", BLOCKER,
+            f"{len(late)} bound case(s) were received after the data lock point or "
+            "carry no receipt date: " + ", ".join(sorted(late)[:10]),
+            detail={"cases": sorted(late)}))
+    unconfirmed = ctx.db.scalar(select(func.count(PvCaseEvent.id)).where(
+        PvCaseEvent.case_id.in_(ids), PvCaseEvent.confirmed_by.is_(None))) or 0
+    if unconfirmed:
+        out.append(PvFinding(
+            "UNCONFIRMED_DATA", BLOCKER,
+            f"{unconfirmed} event(s) in the bound case(s) are not confirmed.",
+            detail={"unconfirmed_events": unconfirmed}))
+    return out
+
+
 def _approval(ctx) -> list:
     """Approval and sign-off, as findings -- so the dashboard's "exportable" and
     the export endpoint's gate are one question."""
@@ -595,6 +632,19 @@ def _signals(ctx) -> list:
                 "SIGNAL_CLOSED_INCOMPLETE", WARNING,
                 f"Signal {label} is closed with no recorded conclusion or action.",
                 detail={"signal_id": signal.id}))
+    candidates = [s for s in ctx.db.scalars(select(PvSignal).where(
+        PvSignal.pv_product_id == ctx.product.id,
+        PvSignal.status == "candidate")).all()
+        if s.detection_date is None or s.detection_date <= ctx.scope.data_lock_point]
+    if candidates:
+        # A candidate is not in the report's signal overview until somebody
+        # validates it -- which is right, and is also how a real signal would
+        # go missing from a report if nobody ever looked.
+        out.append(PvFinding(
+            "SIGNAL_CANDIDATES_UNTRIAGED", WARNING,
+            f"{len(candidates)} signal candidate(s) detected before the lock have not "
+            "been validated or refuted, so none of them is in this report.",
+            detail={"signal_ids": [s.id for s in candidates][:20]}))
     return out
 
 
@@ -713,7 +763,7 @@ def _info(ctx) -> list:
 
 
 BLOCKER_CHECKS = (_deid, _unconfirmed, _reconciliation, _windows, _rsi, _meddra,
-                  _markers, _denominator, _approval)
+                  _markers, _denominator, _bound_cases, _approval)
 WARNING_CHECKS = (_duplicates, _coding, _narratives, _signals, _continuity,
                   _baseline_drift, _citations, _regions)
 INFO_CHECKS = (_info,)

@@ -25,7 +25,7 @@ import { toast } from "sonner";
 
 import { api } from "@/lib/api";
 import type {
-  PvDelta, PvDraft, PvReportInstance, PvSection, PvTabulation,
+  PvCaseRow, PvDelta, PvDraft, PvReportInstance, PvSection, PvTabulation,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -108,6 +108,11 @@ export function SafetyEditor({ reports }: { reports: PvReportInstance[] }) {
         </select>
         {delta && <DeltaStrip delta={delta} />}
       </div>
+      {(() => {
+        const report = reports.find((r) => r.id === reportId);
+        return report?.doc_type_key === "icsr_narrative"
+          ? <CaseBinding report={report} key={report.id} /> : null;
+      })()}
 
       <div className="grid gap-4 lg:grid-cols-[16rem_1fr_20rem]">
         <nav className="max-h-[72vh] overflow-y-auto rounded-xl border border-border p-2">
@@ -601,5 +606,81 @@ function BaselineTab({ section, version }: { section: PvSection; version?: numbe
         </div>
       ))}
     </pre>
+  );
+}
+
+
+/**
+ * The cases an ICSR narrative report narrates — one, or a batch. Each section
+ * is drafted from these cases' structured, confirmed data; QC refuses a
+ * narrative report with no case, a case received after the lock, or a case
+ * whose events are unconfirmed.
+ */
+function CaseBinding({ report }: { report: PvReportInstance }) {
+  const [bound, setBound] = useState<string[]>(report.case_ids ?? []);
+  const [labels, setLabels] = useState<Record<string, string>>({});
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<PvCaseRow[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  async function search() {
+    try {
+      const res = await api.pvCases(report.pv_product_id, { q: q.trim(), limit: 10 });
+      setResults(res.items);
+      setLabels((l) => ({
+        ...l, ...Object.fromEntries(res.items.map((c) => [c.id, c.worldwide_case_id ?? c.id])),
+      }));
+    } catch (e: any) {
+      toast.error("Search failed", { description: e?.message ?? String(e) });
+    }
+  }
+
+  async function save(next: string[]) {
+    setBusy(true);
+    try {
+      const res = await api.pvUpdateReport(report.id, { case_ids: next });
+      setBound(res.case_ids ?? []);
+    } catch (e: any) {
+      toast.error("Cases not saved", { description: e?.message ?? String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-xl border border-border p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="font-medium">Cases narrated:</span>
+        {bound.length === 0 && <span className="text-muted-foreground">none yet</span>}
+        {bound.map((id) => (
+          <span key={id} className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 font-mono">
+            {labels[id] ?? id.slice(0, 8)}
+            <button type="button" aria-label="Remove case" disabled={busy}
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={() => save(bound.filter((c) => c !== id))}>×</button>
+          </span>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Input className="h-8 min-w-0 flex-1 text-xs" value={q}
+               placeholder="Find a case by worldwide case ID, country or term"
+               onChange={(e) => setQ(e.target.value)}
+               onKeyDown={(e) => { if (e.key === "Enter") search(); }} />
+        <Button size="sm" variant="outline" onClick={search}>Search</Button>
+      </div>
+      {results.length > 0 && (
+        <ul className="flex flex-wrap gap-1.5">
+          {results.filter((c) => !bound.includes(c.id)).map((c) => (
+            <li key={c.id}>
+              <Button size="sm" variant="ghost" disabled={busy}
+                      onClick={() => save([...bound, c.id])}>
+                + {c.worldwide_case_id ?? c.id.slice(0, 8)}
+                {c.country_of_occurrence ? ` · ${c.country_of_occurrence}` : ""}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

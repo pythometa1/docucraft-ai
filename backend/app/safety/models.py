@@ -236,6 +236,9 @@ class PvReportInstance(Base):
     #: heuristic blockers a qualified person accepted rather than fixed. Keyed
     #: on what the finding says, so a changed figure is a new finding.
     accepted_findings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    #: The cases an ICSR narrative report is about -- one, or a batch. Other
+    #: report types describe an interval and leave this empty.
+    case_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
@@ -654,6 +657,11 @@ class PvSignal(Base):
     closure_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     linked_case_ids: Mapped[list] = mapped_column(JSON, default=list)
     linked_report_instance_ids: Mapped[list] = mapped_column(JSON, default=list)
+    #: Why the signal was raised, when a computation raised it: the screening
+    #: statistic, its counts and interval, the window and the background. A
+    #: candidate from disproportionality carries the evidence a reviewer
+    #: triages, rather than a number copied into a description.
+    detection_basis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)

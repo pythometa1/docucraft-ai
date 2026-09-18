@@ -153,6 +153,31 @@ def after_lock(scope: Scope):
                 _VERSION > scope.data_lock_point)
 
 
+def background(scope: Scope, window: str):
+    """Every OTHER product's cases in this tenant, over this report's dates.
+
+    The comparator for a disproportionality screen: the organisation's own
+    safety database minus this product. Same lock, same receipt window, so the
+    2x2 table compares like with like. `window` is "interval" or "cumulative";
+    cumulative counts from this product's birth date, because the question is
+    "since this product existed, how often was the term reported elsewhere".
+    """
+    if window == "interval":
+        start, end = scope.period_start, scope.period_end
+    else:
+        if not scope.has_cumulative:
+            raise CumulativeUnavailable(
+                f"this product records no {scope.anchor.upper()}, so there is no date "
+                "for a cumulative window to count from")
+        start, end = scope.cumulative_from, None
+    parts = [PvCase.org_id == scope.org_id,
+             PvCase.pv_product_id != scope.pv_product_id,
+             dlp(scope), _RECEIPT.is_not(None), _RECEIPT >= start]
+    if end is not None:
+        parts.append(_RECEIPT <= end)
+    return and_(*parts)
+
+
 class CumulativeUnavailable(Exception):
     """Asked for a cumulative figure with no date to count from."""
 
@@ -175,6 +200,25 @@ def count_events(db, scope: Scope, predicate) -> int:
         select(func.count(PvCaseEvent.id)).where(
             PvCaseEvent.org_id == scope.org_id,
             PvCaseEvent.case_id.in_(select(PvCase.id).where(predicate)))) or 0
+
+
+def term_case_counts(db, scope: Scope, predicate, *, level: str = "pt") -> tuple:
+    """Cases per coded term, and cases with any coded term, for the cases the
+    predicate admits.
+
+    CASES, not events: a case reporting the same term twice is one report of
+    it, and disproportionality compares reporting frequencies. `level` is
+    "pt" or "soc".
+    """
+    column = PvCaseEvent.meddra_soc if level == "soc" else PvCaseEvent.meddra_pt
+    admitted = select(PvCase.id).where(predicate)
+    coded = and_(PvCaseEvent.org_id == scope.org_id, column.is_not(None),
+                 PvCaseEvent.case_id.in_(admitted))
+    rows = db.execute(select(column, func.count(func.distinct(PvCaseEvent.case_id)))
+                      .where(coded).group_by(column)).all()
+    total = db.scalar(select(func.count(func.distinct(PvCaseEvent.case_id)))
+                      .where(coded)) or 0
+    return {term: count for term, count in rows}, total
 
 
 def preview(db, scope: Scope, *, baseline=None) -> dict:

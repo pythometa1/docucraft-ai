@@ -18,7 +18,7 @@ import type {
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
   CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
   PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
-  PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDelta, PvDraft, PvQcReport, PvExportRecord, PvExportOptions, PvAuditEntry,
+  PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDelta, PvDraft, PvQcReport, PvExportRecord, PvExportOptions, PvAuditEntry, PvSignal, PvScreenResult,
   PvDuplicatePair,
   PvEventSummary, PvExposure, PvMappingProfile, PvReadiness,
   PvRsiVersion, PvScopePreview, PvSection, PvSource, PvTabulation,
@@ -909,6 +909,21 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, "DOWNLOAD_FAILED", "The export could not be downloaded.");
     return URL.createObjectURL(await res.blob());
   },
+  /* ---- Safety M9: the signal log and the screen ---- */
+  pvSignals: (productId: string, status?: string) =>
+    request<{ items: PvSignal[]; statuses: string[]; detection_sources: string[];
+              priorities: string[]; disclaimer: string }>(
+      "GET", `/pv/products/${productId}/signals`, { query: status ? { status } : {} }),
+  /** A writer raises candidates; raising a validated ("new") signal is a reviewer's. */
+  pvCreateSignal: (productId: string, body: Partial<PvSignal>) =>
+    request<PvSignal>("POST", `/pv/products/${productId}/signals`, { json: body }),
+  pvUpdateSignal: (signalId: string, body: Partial<PvSignal>) =>
+    request<PvSignal>("PATCH", `/pv/signals/${signalId}`, { json: body }),
+  /** Figures only: a screen never creates a signal. */
+  pvDisproportionality: (reportId: string, body: {
+    window: "interval" | "cumulative"; level: "pt" | "soc"; min_cases: number;
+  }) => request<PvScreenResult>("POST", `/pv/reports/${reportId}/disproportionality`,
+                                { json: body }),
   pvAudit: (reportId: string, params: { scope: "report" | "product"; limit: number; offset: number }) =>
     request<{ items: PvAuditEntry[]; total: number; limit: number; offset: number; scope: string }>(
       "GET", `/pv/reports/${reportId}/audit`, { query: params }),

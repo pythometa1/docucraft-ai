@@ -442,8 +442,61 @@ def _is_container(code: str, codes) -> bool:
     return any(other.startswith(prefix) for other in codes)
 
 
-def seed_sections(doc_type_key: str) -> list[dict]:
-    """Every section of one report type, in document order.
+# ------------------------------------------------------ regional appendices
+
+#: Where a report's structure differs by region, the difference is a regional
+#: appendix seeded only for the regions the report is prepared for. A PBRER is
+#: one document under ICH E2C(R2); the EU adds GVP Module VII's regional
+#: appendix, and the US accepts a PBRER in place of a PADER with its own. A
+#: regional copy of the export carries the base report and that region's
+#: appendix only.
+REGIONAL_APPENDICES = {
+    "pbrer": {
+        "EU": (
+            ("EU", "EU Regional Appendix"),
+            ("EU.1", "Current Proposed Product Information"),
+            ("EU.2", "Proposed Additional Pharmacovigilance and Risk Minimisation "
+                     "Activities"),
+            ("EU.3", "Summary of Ongoing Safety Concerns"),
+            ("EU.4", "Reporting of Results from Post-authorisation Safety Studies"),
+            ("EU.5", "Effectiveness of Risk Minimisation"),
+        ),
+        "US": (
+            ("US", "US Regional Appendix"),
+            ("US.1", "Index Line Listing of 15-Day Alert Reports"),
+            ("US.2", "Actions Taken Since the Last Report"),
+            ("US.3", "Other Information Required under 21 CFR 314.80"),
+        ),
+    },
+}
+
+REGIONAL_TABLE_KEYS = {
+    "pbrer": {"EU.3": "safety_concern_table", "US.1": "line_listing_sar",
+              "US.2": "action_table"},
+}
+
+REGIONAL_SOURCE_TYPES = {
+    "pbrer": {"EU.1": ("rsi_doc",), "EU.2": ("rmp_doc",), "EU.3": ("rmp_doc",),
+              "EU.4": ("study_report",), "EU.5": ("rmp_doc",)},
+}
+
+
+def region_of(section_code: str) -> str | None:
+    """The region a section belongs to, or None for the base report."""
+    head = (section_code or "").split(".")[0]
+    for appendices in REGIONAL_APPENDICES.values():
+        if head in appendices:
+            return head
+    return None
+
+
+def regional_codes(doc_type_key: str, region: str) -> list[str]:
+    return [code for code, _t in REGIONAL_APPENDICES.get(doc_type_key, {}).get(region, ())]
+
+
+def seed_sections(doc_type_key: str, regions=()) -> list[dict]:
+    """Every section of one report type, in document order, with the regional
+    appendix of each region the report is prepared for.
 
     Returned as plain dicts so the caller can hand them straight to the model
     layer without this module importing it -- `app.safety.trees` is leaf data
@@ -452,9 +505,15 @@ def seed_sections(doc_type_key: str) -> list[dict]:
     tree = TREES.get(doc_type_key)
     if tree is None:
         raise KeyError(f"unknown report type {doc_type_key!r}")
+    appendices = REGIONAL_APPENDICES.get(doc_type_key, {})
+    tree = tuple(tree) + tuple(
+        entry for region in sorted(set(regions or ()) & set(appendices))
+        for entry in appendices[region])
     codes = [code for code, _title in tree]
-    tables = TABLE_KEYS.get(doc_type_key, {})
-    sources = SOURCE_TYPES.get(doc_type_key, {})
+    tables = {**TABLE_KEYS.get(doc_type_key, {}),
+              **REGIONAL_TABLE_KEYS.get(doc_type_key, {})}
+    sources = {**SOURCE_TYPES.get(doc_type_key, {}),
+               **REGIONAL_SOURCE_TYPES.get(doc_type_key, {})}
     guidance = GUIDANCE.get(doc_type_key, {})
 
     sections = []
@@ -477,4 +536,5 @@ def seed_sections(doc_type_key: str) -> list[dict]:
 
 
 def table_key_for(doc_type_key: str, section_code: str) -> str | None:
-    return TABLE_KEYS.get(doc_type_key, {}).get(section_code)
+    return (TABLE_KEYS.get(doc_type_key, {}).get(section_code)
+            or REGIONAL_TABLE_KEYS.get(doc_type_key, {}).get(section_code))

@@ -745,3 +745,100 @@ def test_qc_figures_are_json_safe(app_client, ws):
     import json
 
     assert json.loads(json.dumps(figures)) == figures
+
+
+# ------------------------------------------------------------------- M9 links
+
+def test_sign_off_records_the_report_on_each_signal_it_shows(app_client, ws):
+    from app.models import PvSignal
+
+    db = _db()
+    shown = PvSignal(org_id=ws["org"], pv_product_id=ws["product_id"],
+                     signal_reference="SIG-1", status="new",
+                     detection_date=date(2026, 2, 1), meddra_terms=["Headache"])
+    candidate = PvSignal(org_id=ws["org"], pv_product_id=ws["product_id"],
+                         signal_reference="CAND-1", status="candidate",
+                         detection_date=date(2026, 2, 1), meddra_terms=["Nausea"])
+    db.add_all([shown, candidate])
+    db.commit()
+    ids = (shown.id, candidate.id)
+    db.close()
+    assert _sign(app_client, ws, ws["report_id"]).status_code == 200
+    db = _db()
+    try:
+        assert db.get(PvSignal, ids[0]).linked_report_instance_ids == [ws["report_id"]]
+        assert not db.get(PvSignal, ids[1]).linked_report_instance_ids
+    finally:
+        db.close()
+
+
+def test_a_regional_copy_carries_only_its_own_appendix(app_client, ws, tmp_path):
+    """§12: region variants where the structure differs. A PBRER prepared for
+    the EU and the US is one signed report; its EU copy does not carry the US
+    appendix."""
+    from app.models import PvSection
+
+    made = app_client.post(f"/api/v1/pv/products/{ws['product_id']}/reports",
+                           headers=_auth(ws["token"]),
+                           json={"doc_type_key": "pbrer", "period_start": "2026-01-01",
+                                 "period_end": "2026-06-30",
+                                 "data_lock_point": "2026-07-15",
+                                 "rsi_version_id": ws["rsi_id"],
+                                 "meddra_version": "27.0", "regions": ["EU", "US"]})
+    report_id = made.json()["id"]
+    keep = {"1", "EU", "EU.1", "US", "US.3"}
+    db = _db()
+    for section in db.query(PvSection).filter(PvSection.report_instance_id == report_id):
+        section.enabled = section.section_code in keep
+    db.commit()
+    db.close()
+    _fill_and_approve(app_client, ws, report_id)
+    assert _sign(app_client, ws, report_id).status_code == 200, \
+        app_client.get(f"/api/v1/pv/reports/{report_id}/qc",
+                       headers=_auth(ws["token"])).json()["blockers"]
+
+    eu = _export(app_client, ws, report_id, region="EU").json()
+    text = export_mod.document_text(str(_saved(tmp_path, _download(app_client, ws, eu),
+                                               "eu.docx")))
+    assert "EU.1 Current Proposed Product Information" in text
+    assert "US Regional Appendix" not in text and "1 Introduction" in text
+    both = _export(app_client, ws, report_id).json()
+    text = export_mod.document_text(str(_saved(tmp_path, _download(app_client, ws, both),
+                                               "all.docx")))
+    assert "EU Regional Appendix" in text and "US.3 Other Information" in text
+
+
+def test_wide_tables_get_landscape_pages_and_every_table_repeats_its_header(tmp_path):
+    """A fourteen-column tabulation in portrait wraps its headers a letter at a
+    time. Layout only: the text emit verified is unchanged."""
+    from app.docgen import grids
+
+    wide = [grids.heading("Wide"), grids.grid(
+        ["SOC", "PT"] + [f"C{i}" for i in range(12)], [["Nervous", "Headache"] + ["1"] * 12])]
+    narrow = [grids.heading("Narrow"), grids.grid(["Context", "Value"], [["m", "1"]])]
+    sections = [export_mod.SectionText("5", "Data", False,
+                                       "5 Data\n\nLead.\n\n[TABLE: w]\n\nAfter.\n\n[TABLE: n]")]
+    assembled = export_mod.assemble(sections, {"w": wide, "n": narrow}, front=[], title="T")
+    path = str(tmp_path / "wide.docx")
+    export_mod.write(assembled, path, header="H")
+    body = _docx_part(path)
+    breaks = [s for s in body.iter(f"{W}sectPr")]
+    orientations = [s.find(f"{W}pgSz").get(f"{W}orient") for s in breaks]
+    # Portrait ends before the wide table, landscape ends after it, and the
+    # document's own (portrait) section closes the body.
+    assert orientations == [None, "landscape", None]
+    tables = list(body.iter(f"{W}tbl"))
+    for table in tables:
+        first = table.find(f"{W}tr/{W}trPr")
+        assert first.find(f"{W}tblHeader") is not None
+        assert all(r.find(f"{W}trPr/{W}cantSplit") is not None
+                   for r in table.findall(f"{W}tr"))
+    wide_sizes = {s.get(f"{W}val") for s in tables[0].iter(f"{W}sz")}
+    assert wide_sizes == {"16"} and not list(tables[1].iter(f"{W}sz"))
+    landscape = breaks[1].find(f"{W}pgSz")
+    assert int(landscape.get(f"{W}w")) > int(landscape.get(f"{W}h"))
+    width = int(tables[0].find(f"{W}tblPr/{W}tblW").get(f"{W}w"))
+    assert width > 12000                   # landscape text width, in twips
+    # Every landscape page keeps the report's header.
+    assert breaks[1].find(f"{W}headerReference") is not None
+    assert "After." in export_mod.document_text(path)

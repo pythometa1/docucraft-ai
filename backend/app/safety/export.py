@@ -314,6 +314,10 @@ def write(assembled: Assembled, output_path: str, *, header: str,
             _replace_with_field(paragraph._p, 'TOC \\o "1-4" \\h \\z \\u', TOC_PLACEHOLDER)
             break
     _header_and_footer(document, header, draft)
+    # After the header, because each landscape section copies the body's
+    # section properties -- header and footer references included -- and a
+    # copy taken earlier would point at no header at all.
+    _lay_out_tables(document)
     settings = document.settings.element
     if settings.find(qn("w:updateFields")) is None:
         update = settings.makeelement(qn("w:updateFields"), {qn("w:val"): "true"})
@@ -429,6 +433,126 @@ def _header_and_footer(document, header: str, draft: bool) -> None:
     _field_run(footer._p, "PAGE", "1")
     footer._p.append(_plain_run(" of "))
     _field_run(footer._p, "NUMPAGES", "1")
+
+
+# ------------------------------------------------------------ table layout
+
+#: At this many columns a table's text is set smaller...
+SMALL_TEXT_COLUMNS = 7
+#: ...and at this many it gets a landscape page. A summary tabulation has
+#: fourteen columns; in portrait each is under half an inch and its headers
+#: wrap a letter at a time.
+LANDSCAPE_COLUMNS = 9
+
+
+def _lay_out_tables(document) -> None:
+    """Repeat every table's header row on each page it spans, set wide tables
+    in smaller text, and give the widest their own landscape pages.
+
+    Layout only: no text is added, removed or reordered, so what `emit`
+    verified is still what the document says.
+    """
+    for table in document.tables:
+        tbl = table._tbl
+        for index, row in enumerate(tbl.findall(qn("w:tr"))):
+            trpr = row.find(qn("w:trPr"))
+            if trpr is None:
+                trpr = etree.Element(qn("w:trPr"))
+                # `w:trPr` follows `w:tblPrEx` if there is one, else it leads.
+                row.insert(1 if row.find(qn("w:tblPrEx")) is not None else 0, trpr)
+            # A case's row is read whole: one split across a page break reads
+            # as two cases, the second with no identifier.
+            if trpr.find(qn("w:cantSplit")) is None:
+                etree.SubElement(trpr, qn("w:cantSplit"))
+            if index == 0 and trpr.find(qn("w:tblHeader")) is None:
+                etree.SubElement(trpr, qn("w:tblHeader"))
+        columns = len(table.columns)
+        if columns >= SMALL_TEXT_COLUMNS:
+            for run in tbl.iter(qn("w:r")):
+                rpr = run.find(qn("w:rPr"))
+                if rpr is None:
+                    rpr = etree.Element(qn("w:rPr"))
+                    run.insert(0, rpr)
+                etree.SubElement(rpr, qn("w:sz"), {qn("w:val"): "16"})
+        if columns >= LANDSCAPE_COLUMNS and tbl.getparent() is document.element.body:
+            _landscape(document, tbl)
+
+
+def _landscape(document, tbl) -> None:
+    """Put one table -- and the title paragraph above it -- on landscape pages.
+
+    A Word section ends at the paragraph carrying its properties. So the
+    paragraph before the title ends a portrait section, and a new empty
+    paragraph after the table ends the landscape one; what follows returns to
+    the body's own portrait section.
+    """
+    import copy
+
+    body_sectpr = document.element.body.find(qn("w:sectPr"))
+    if body_sectpr is None:  # pragma: no cover - python-docx always writes one
+        return
+    title = tbl.getprevious()
+    start = title if title is not None and title.tag == qn("w:p") else tbl
+    before = start.getprevious()
+    if before is None or before.tag != qn("w:p"):
+        before = etree.Element(qn("w:p"))
+        start.addprevious(before)
+    _attach_sectpr(before, copy.deepcopy(body_sectpr))
+
+    wide = copy.deepcopy(body_sectpr)
+    size = wide.find(qn("w:pgSz"))
+    if size is not None:
+        width, height = size.get(qn("w:w")), size.get(qn("w:h"))
+        if width and height:
+            size.set(qn("w:w"), height)
+            size.set(qn("w:h"), width)
+        size.set(qn("w:orient"), "landscape")
+    after = etree.Element(qn("w:p"))
+    tbl.addnext(after)
+    _attach_sectpr(after, wide)
+    _fit_width(tbl, wide)
+
+
+def _fit_width(tbl, sectpr) -> None:
+    """Spread the table across the landscape text width. python-docx fixed
+    every column at a share of the PORTRAIT width when it made the table, and
+    a landscape page holding a portrait-width table has gained nothing."""
+    size, margins = sectpr.find(qn("w:pgSz")), sectpr.find(qn("w:pgMar"))
+    try:
+        width = (int(size.get(qn("w:w"))) - int(margins.get(qn("w:left")))
+                 - int(margins.get(qn("w:right"))))
+    except (AttributeError, TypeError, ValueError):  # pragma: no cover - defensive
+        return
+    grid = tbl.find(qn("w:tblGrid"))
+    columns = grid.findall(qn("w:gridCol")) if grid is not None else []
+    if not columns or width <= 0:  # pragma: no cover - a table always has a grid
+        return
+    share = str(width // len(columns))
+    for column in columns:
+        column.set(qn("w:w"), share)
+    for cell_width in tbl.iter(qn("w:tcW")):
+        cell_width.set(qn("w:w"), share)
+        cell_width.set(qn("w:type"), "dxa")
+    tblpr = tbl.find(qn("w:tblPr"))
+    if tblpr is not None:
+        tblw = tblpr.find(qn("w:tblW"))
+        if tblw is None:
+            tblw = etree.SubElement(tblpr, qn("w:tblW"))
+        tblw.set(qn("w:w"), str(width))
+        tblw.set(qn("w:type"), "dxa")
+
+
+def _attach_sectpr(paragraph_el, sectpr) -> None:
+    ppr = paragraph_el.find(qn("w:pPr"))
+    if ppr is None:
+        ppr = etree.Element(qn("w:pPr"))
+        paragraph_el.insert(0, ppr)
+    existing = ppr.find(qn("w:sectPr"))
+    if existing is not None:
+        ppr.remove(existing)
+    # `w:sectPr` belongs after the paragraph's other properties but before a
+    # revision record; there is none here, so it goes last.
+    ppr.append(sectpr)
 
 
 # ---------------------------------------------------------- the leakage scan

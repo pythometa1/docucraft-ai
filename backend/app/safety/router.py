@@ -117,11 +117,43 @@ def _report_out(report: PvReportInstance, *, section_count: int | None = None) -
         "qppv_signoff_by": report.qppv_signoff_by,
         "qppv_signoff_at": report.qppv_signoff_at,
         "figures_at_signoff": report.figures_at_signoff,
+        "case_ids": report.case_ids or [],
         "created_at": report.created_at, "updated_at": report.updated_at,
     }
     if section_count is not None:
         out["section_count"] = section_count
     return out
+
+
+def _sync_regional_sections(db, report: PvReportInstance) -> None:
+    """Give the report the regional appendices of the regions it now names.
+
+    A region added seeds its appendix (carried forward from the baseline where
+    the baseline had it); a region removed DISABLES its appendix rather than
+    deleting it, so text somebody wrote is not lost to a mis-click. Sort order
+    is recomputed from the full tree, so appendices always follow the base
+    report in the same order whatever order the regions were added in.
+    """
+    appendices = trees.REGIONAL_APPENDICES.get(report.doc_type_key, {})
+    if not appendices:
+        return
+    wanted = {code for region in (report.regions or []) if region in appendices
+              for code in trees.regional_codes(report.doc_type_key, region)}
+    existing = {s.section_code: s for s in db.scalars(select(PvSection).where(
+        PvSection.report_instance_id == report.id)).all()}
+    for code, section in existing.items():
+        if trees.region_of(code) is not None:
+            section.enabled = code in wanted
+    missing = wanted - set(existing)
+    if missing:
+        baseline = (db.get(PvReportInstance, report.baseline_report_id)
+                    if report.baseline_report_id else None)
+        _seed_sections(db, report, baseline=baseline, codes=missing)
+    order = {spec["section_code"]: spec["sort_order"] for spec in trees.seed_sections(
+        report.doc_type_key, regions=list(appendices))}
+    for section in db.scalars(select(PvSection).where(
+            PvSection.report_instance_id == report.id)).all():
+        section.sort_order = order.get(section.section_code, section.sort_order)
 
 
 def _withdraw_signoff(db, report: PvReportInstance, user: User, why: str) -> bool:
@@ -643,6 +675,8 @@ class ReportIn(BaseModel):
     meddra_version: str | None = None
     baseline_report_id: str | None = None
     regions: list = []
+    #: ICSR narrative reports only: the case, or batch of cases, narrated.
+    case_ids: list[str] = []
 
 
 class ScopePreviewIn(BaseModel):
@@ -660,6 +694,34 @@ class ReportPatch(BaseModel):
     meddra_version: str | None = None
     regions: list | None = None
     status: str | None = None
+    case_ids: list[str] | None = None
+
+
+#: The report types that narrate named cases rather than an interval.
+CASE_BOUND_TYPES = ("icsr_narrative",)
+
+
+def _validate_cases(db, product_id: str, doc_type_key: str, case_ids) -> list:
+    """Case ids for a case-bound report: this product's, and only for a report
+    type that narrates cases. Anything else is refused rather than stored --
+    a DSUR with a case list attached would look as if it were about them."""
+    from app.models import PvCase
+
+    case_ids = list(dict.fromkeys(case_ids or []))
+    if not case_ids:
+        return []
+    if doc_type_key not in CASE_BOUND_TYPES:
+        raise error("PV_CASES_NOT_APPLICABLE",
+                    "Only an ICSR narrative report is bound to cases; this report "
+                    "type describes an interval.", 422)
+    found = set(db.scalars(select(PvCase.id).where(
+        PvCase.id.in_(case_ids), PvCase.pv_product_id == product_id)).all())
+    missing = [c for c in case_ids if c not in found]
+    if missing:
+        raise error("PV_UNKNOWN_CASE",
+                    f"{len(missing)} case id(s) are not cases of this product.", 422,
+                    {"case_ids": missing})
+    return case_ids
 
 
 def _validate_dates(*, period_start: date, period_end: date,
@@ -734,7 +796,8 @@ def preview_scope(report_instance_id: str, db: Session = Depends(get_db),
                              baseline=baseline)
 
 
-def _seed_sections(db, report: PvReportInstance, *, baseline=None) -> list[PvSection]:
+def _seed_sections(db, report: PvReportInstance, *, baseline=None,
+                   codes=None) -> list[PvSection]:
     """The report's section tree, and whatever the baseline can carry into it.
 
     A section whose text the previous approved report already holds starts as
@@ -748,7 +811,9 @@ def _seed_sections(db, report: PvReportInstance, *, baseline=None) -> list[PvSec
     say, or a writer keeps last interval's sentences over this interval's
     table.
     """
-    seeded = trees.seed_sections(report.doc_type_key)
+    seeded = trees.seed_sections(report.doc_type_key, regions=report.regions or [])
+    if codes is not None:
+        seeded = [spec for spec in seeded if spec["section_code"] in codes]
     baseline_sections = {}
     if baseline is not None:
         baseline_sections = {
@@ -837,7 +902,9 @@ def create_report(pv_product_id: str, body: ReportIn, db: Session = Depends(get_
         data_lock_point=body.data_lock_point, rsi_version_id=body.rsi_version_id,
         meddra_version=body.meddra_version,
         baseline_report_id=baseline.id if baseline else None,
-        regions=body.regions, created_by=user.id)
+        regions=body.regions, created_by=user.id,
+        case_ids=_validate_cases(db, product.id, body.doc_type_key, body.case_ids)
+        or None)
     db.add(report)
     db.flush()
     sections = _seed_sections(db, report, baseline=baseline)
@@ -908,11 +975,16 @@ def update_report(report_instance_id: str, body: ReportPatch,
         if version.pv_product_id != report.pv_product_id:
             raise error("PV_RSI_WRONG_PRODUCT",
                         "That RSI version belongs to a different product.", 422)
+    if "case_ids" in changes:
+        changes["case_ids"] = _validate_cases(
+            db, report.pv_product_id, report.doc_type_key, changes["case_ids"]) or None
     if changes:
         _withdraw_signoff(db, report, user,
                           "the report's " + ", ".join(sorted(changes)) + " changed")
     for key, value in changes.items():
         setattr(report, key, value)
+    if "regions" in changes:
+        _sync_regional_sections(db, report)
     report.updated_at = now()
     log_audit(db, user, "Updated a report instance", "pv_report_instance", report.id,
               None, "info", ", ".join(sorted(changes)))
@@ -2715,7 +2787,64 @@ def _confirmed_data(db, product, report, section) -> dict:
         except tab.TableUnavailable as exc:
             data["table_totals"] = {}
             data["table_gaps"] = [str(exc)]
+    if section.table_key == "signal_overview":
+        # The table lists the signals; the prose discusses each one. It gets
+        # the recorded evaluation, conclusion and action, and writes nothing a
+        # person has not already concluded.
+        data["signals"] = [
+            {"reference": s.signal_reference, "terms": s.meddra_terms or [],
+             "status": s.status, "detection_source": s.detection_source,
+             "detection_date": s.detection_date,
+             "evaluation_summary": s.evaluation_summary,
+             "conclusion": s.conclusion, "action_taken": s.action_taken,
+             "closure_date": s.closure_date}
+            for s in tab.signals_in_report(db, report, scope)]
+    if report.doc_type_key in CASE_BOUND_TYPES:
+        data["cases"] = _bound_case_data(db, report)
     return data
+
+
+def _bound_case_data(db, report) -> list:
+    """The structured, confirmed facts of the cases an ICSR narrative is about.
+
+    Structured fields only -- no free text, no original narrative. The masked
+    narrative reaches the model through retrieval like every other source; what
+    is here is what the case store holds as data, in the order CIOMS I reads.
+    """
+    from app.models import PvCase, PvCaseDrug, PvCaseEvent, PvCaseLab
+
+    out = []
+    for case_id in report.case_ids or []:
+        case = db.get(PvCase, case_id)
+        if case is None:
+            continue
+        events = db.scalars(select(PvCaseEvent).where(
+            PvCaseEvent.case_id == case.id)).all()
+        drugs = db.scalars(select(PvCaseDrug).where(PvCaseDrug.case_id == case.id)).all()
+        labs = db.scalars(select(PvCaseLab).where(PvCaseLab.case_id == case.id)).all()
+        out.append({
+            "case": case.worldwide_case_id, "report_source": case.report_source,
+            "country": case.country_of_occurrence,
+            "age": case.patient_age, "age_group": case.patient_age_group,
+            "sex": case.patient_sex,
+            "serious": case.is_serious, "seriousness_criteria": case.seriousness_criteria,
+            "outcome": case.case_outcome,
+            "events": [{"term": e.meddra_pt, "onset": e.onset_date,
+                        "outcome": e.outcome, "serious": e.is_serious,
+                        "expectedness": e.expectedness,
+                        "causality_reporter": e.causality_reporter,
+                        "causality_company": e.causality_company,
+                        "confirmed": bool(e.confirmed_by)} for e in events],
+            "drugs": [{"name": d.drug_name, "role": d.role, "dose": d.dose,
+                       "dose_unit": d.dose_unit, "route": d.route,
+                       "start": d.start_date, "end": d.end_date,
+                       "action_taken": d.action_taken, "dechallenge": d.dechallenge,
+                       "rechallenge": d.rechallenge} for d in drugs],
+            "labs": [{"test": lab.test_name, "result": lab.result, "unit": lab.unit,
+                      "reference_range": lab.reference_range, "date": lab.test_date}
+                     for lab in labs],
+        })
+    return out
 
 
 def _rsi_context(db, report) -> dict:
@@ -3297,6 +3426,14 @@ def sign_off_report(report_instance_id: str, body: PvSignoffRequest,
                     "sign-off. Resolve them on the Checks screen first.", 409,
                     {"blockers": [f.as_dict() for f in blocking]})
     figures = qc.figures_for(db, report=report, product=product)
+    # The signal log remembers which reports each signal appeared in -- the
+    # reports as signed, not as drafted.
+    from app.safety import tabulations as tab
+
+    for signal in tab.signals_in_report(db, report, scope_mod.scope_for(product, report)):
+        linked = list(signal.linked_report_instance_ids or [])
+        if report.id not in linked:
+            signal.linked_report_instance_ids = linked + [report.id]
     report.qppv_signoff_by = user.id
     report.qppv_signoff_at = now()
     report.status = "approved"
@@ -3455,6 +3592,12 @@ def export_report(report_instance_id: str, body: PvExportRequest,
     sections = db.scalars(select(PvSection).where(
         PvSection.report_instance_id == report.id, PvSection.enabled.is_(True)
     ).order_by(PvSection.sort_order)).all()
+    if body.region:
+        # A regional copy is the base report and that region's appendix: the
+        # structure differs by region, and the EU does not receive the US
+        # appendix.
+        sections = [s for s in sections
+                    if trees.region_of(s.section_code) in (None, body.region)]
     texts = []
     for section in sections:
         draft = _latest_draft(db, section.id)
@@ -3673,3 +3816,326 @@ def report_audit(report_instance_id: str, scope: str = Query("report"),
                        "actor_id": r.actor_id, "actor_name": r.actor_name,
                        "target": r.target, "created_at": r.created_at} for r in rows],
             "total": total, "limit": limit, "offset": offset, "scope": scope}
+
+
+# ------------------------------------------------- M9: signals and screening
+
+def _owned_signal(db, signal_id: str, user: User):
+    from app.models import PvSignal
+
+    signal = db.get(PvSignal, signal_id)
+    if not signal or signal.org_id != user.org_id:
+        raise error("PV_SIGNAL_NOT_FOUND", "Signal not found", 404)
+    return signal
+
+
+def _signal_out(signal) -> dict:
+    return {
+        "id": signal.id, "pv_product_id": signal.pv_product_id,
+        "signal_reference": signal.signal_reference, "description": signal.description,
+        "meddra_terms": signal.meddra_terms or [],
+        "detection_source": signal.detection_source,
+        "detection_date": signal.detection_date, "status": signal.status,
+        "priority": signal.priority, "evaluation_summary": signal.evaluation_summary,
+        "conclusion": signal.conclusion, "action_taken": signal.action_taken,
+        "closure_date": signal.closure_date,
+        "linked_case_ids": signal.linked_case_ids or [],
+        "linked_report_instance_ids": signal.linked_report_instance_ids or [],
+        "detection_basis": signal.detection_basis,
+        "created_by": signal.created_by, "created_at": signal.created_at,
+        "updated_at": signal.updated_at,
+    }
+
+
+def _signal_cases(db, product_id: str, case_ids) -> list:
+    from app.models import PvCase
+
+    case_ids = list(dict.fromkeys(case_ids or []))
+    if not case_ids:
+        return []
+    found = set(db.scalars(select(PvCase.id).where(
+        PvCase.id.in_(case_ids), PvCase.pv_product_id == product_id)).all())
+    missing = [c for c in case_ids if c not in found]
+    if missing:
+        raise error("PV_UNKNOWN_CASE",
+                    f"{len(missing)} linked case id(s) are not cases of this product.",
+                    422, {"case_ids": missing})
+    return case_ids
+
+
+def _signal_fields(body, *, creating: bool) -> dict:
+    from app.safety import signals as sig
+
+    fields = body.model_dump(exclude_unset=not creating)
+    if fields.get("detection_source") and fields["detection_source"] not in \
+            sig.DETECTION_SOURCES:
+        raise error("PV_BAD_DETECTION_SOURCE",
+                    f"detection_source must be one of {', '.join(sig.DETECTION_SOURCES)}.",
+                    422)
+    if fields.get("priority") and fields["priority"] not in sig.PRIORITIES:
+        raise error("PV_BAD_PRIORITY",
+                    f"priority must be one of {', '.join(sig.PRIORITIES)}.", 422)
+    if fields.get("meddra_terms") is not None:
+        fields["meddra_terms"] = [t.strip() for t in fields["meddra_terms"]
+                                  if t and t.strip()]
+    return fields
+
+
+class SignalIn(BaseModel):
+    signal_reference: str | None = None
+    description: str | None = None
+    meddra_terms: list[str] = []
+    detection_source: str | None = None
+    detection_date: date | None = None
+    #: "candidate" (awaiting validation) or "new" (validated, a reviewer's act).
+    status: str = "candidate"
+    priority: str | None = None
+    evaluation_summary: str | None = None
+    linked_case_ids: list[str] = []
+    detection_basis: dict | None = None
+
+
+class SignalPatch(BaseModel):
+    signal_reference: str | None = None
+    description: str | None = None
+    meddra_terms: list[str] | None = None
+    detection_source: str | None = None
+    detection_date: date | None = None
+    status: str | None = None
+    priority: str | None = None
+    evaluation_summary: str | None = None
+    conclusion: str | None = None
+    action_taken: str | None = None
+    closure_date: date | None = None
+    linked_case_ids: list[str] | None = None
+
+
+@router.get("/pv/products/{pv_product_id}/signals")
+def list_signals(pv_product_id: str, status: str | None = Query(None),
+                 db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    from app.models import PvSignal
+    from app.safety import signals as sig
+
+    product = _owned_product(db, pv_product_id, user)
+    statement = select(PvSignal).where(PvSignal.pv_product_id == product.id)
+    if status:
+        statement = statement.where(PvSignal.status == status)
+    rows = db.scalars(statement.order_by(PvSignal.detection_date.desc(),
+                                         PvSignal.created_at.desc())).all()
+    return {"items": [_signal_out(s) for s in rows], "statuses": list(sig.STATUSES),
+            "detection_sources": list(sig.DETECTION_SOURCES),
+            "priorities": list(sig.PRIORITIES), "disclaimer": sig.DISCLAIMER}
+
+
+@router.post("/pv/products/{pv_product_id}/signals", status_code=201)
+def create_signal(pv_product_id: str, body: SignalIn, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    """Raise a signal: a candidate, or -- by a reviewer -- a validated one.
+
+    A candidate from a disproportionality screen can only be a candidate. The
+    screen says a term is reported more often; whether that is a signal is a
+    person's decision, taken afterwards, on the record.
+    """
+    from app.models import PvSignal
+    from app.safety import signals as sig
+
+    product = _owned_product(db, pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER, action="Raising a signal")
+    fields = _signal_fields(body, creating=True)
+    if fields["status"] not in ("candidate", "new"):
+        raise error("PV_BAD_SIGNAL_STATUS",
+                    "A signal is raised as a candidate, or as new by a reviewer who "
+                    "has validated it; it reaches any other status by changing.", 422)
+    if fields["status"] == "new":
+        if fields.get("detection_source") == "disproportionality":
+            raise error("PV_SCREEN_RAISES_CANDIDATES",
+                        "A disproportionality screen raises candidates. Validate the "
+                        "candidate to make it a signal.", 422)
+        roles.require_pv_role(db, product.id, user, roles.REVIEWER,
+                              action="Raising a validated signal")
+    if not fields["meddra_terms"] and not (fields.get("description") or "").strip():
+        raise error("PV_SIGNAL_EMPTY",
+                    "A signal needs the terms it concerns or a description.", 422)
+    fields["linked_case_ids"] = _signal_cases(db, product.id, fields["linked_case_ids"])
+    signal = PvSignal(org_id=user.org_id, pv_product_id=product.id, created_by=user.id,
+                      **{**fields, "detection_date": fields.get("detection_date")
+                         or date.today()})
+    db.add(signal)
+    db.flush()
+    log_audit(db, user,
+              "Raised a signal candidate" if signal.status == "candidate"
+              else "Opened a validated signal",
+              "pv_signal", signal.id, product.project_id, "info",
+              f"{signal.signal_reference or ''} {', '.join(signal.meddra_terms or [])}"
+              f" ({signal.detection_source or 'source not stated'})".strip())
+    db.commit()
+    db.refresh(signal)
+    return _signal_out(signal)
+
+
+@router.patch("/pv/signals/{signal_id}")
+def update_signal(signal_id: str, body: SignalPatch, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
+    """Move a signal through its lifecycle, or record its evaluation.
+
+    Validating or refuting a candidate, and closing a signal, are a
+    reviewer's. Closing needs a conclusion and the action taken; refuting
+    needs the conclusion that says why. Every change is audited with the
+    fields it touched.
+    """
+    from app.safety import signals as sig
+
+    signal = _owned_signal(db, signal_id, user)
+    product = _owned_product(db, signal.pv_product_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER, action="Changing a signal")
+    fields = _signal_fields(body, creating=False)
+    # A null in the patch clears a text field; it never clears the status or
+    # the terms, which a signal always has.
+    for key in ("status", "meddra_terms"):
+        if key in fields and fields[key] is None:
+            del fields[key]
+    before = signal.status
+    after = fields.get("status") or before
+    fields["status"] = after
+    try:
+        sig.check_transition(before, after)
+    except sig.SignalError as exc:
+        raise error("PV_BAD_SIGNAL_TRANSITION", str(exc), 409)
+    if sig.needs_reviewer(before, after):
+        roles.require_pv_role(db, product.id, user, roles.REVIEWER,
+                              action=f"Moving a signal from {before} to {after}")
+    conclusion = fields.get("conclusion", signal.conclusion)
+    action_taken = fields.get("action_taken", signal.action_taken)
+    if after == "closed" and before != "closed":
+        problems = sig.closing_problems(conclusion=conclusion, action_taken=action_taken)
+        if problems:
+            raise error("PV_SIGNAL_INCOMPLETE",
+                        "A signal is closed with " + " and ".join(problems) + ".", 409,
+                        {"missing": problems})
+    if after == "refuted" and before != "refuted" and not (conclusion or "").strip():
+        raise error("PV_SIGNAL_INCOMPLETE",
+                    "A refuted candidate needs the conclusion that says why.", 409,
+                    {"missing": ["a conclusion"]})
+    if "linked_case_ids" in fields:
+        fields["linked_case_ids"] = _signal_cases(db, product.id,
+                                                  fields["linked_case_ids"])
+    if after in ("closed", "refuted") and before != after \
+            and not fields.get("closure_date"):
+        fields["closure_date"] = date.today()
+    if before in ("closed", "refuted") and after not in ("closed", "refuted"):
+        fields["closure_date"] = None
+    changed = sorted(k for k, v in fields.items() if getattr(signal, k) != v)
+    for key, value in fields.items():
+        setattr(signal, key, value)
+    signal.updated_at = now()
+    log_audit(db, user, "Changed a signal", "pv_signal", signal.id, product.project_id,
+              "warning" if before != after else "info",
+              (f"{before} -> {after}; " if before != after else "")
+              + (", ".join(changed) or "no change"))
+    db.commit()
+    db.refresh(signal)
+    return _signal_out(signal)
+
+
+class ProvidedBackground(BaseModel):
+    term: str
+    cases_with_term: int
+    total_cases: int
+    source_note: str
+
+
+class DisproportionalityIn(BaseModel):
+    window: str = "cumulative"
+    level: str = "pt"
+    min_cases: int = 1
+    #: "organisation": every other product's cases in this tenant, same dates.
+    #: "provided": external counts (a national database extract), per term.
+    background: str = "organisation"
+    provided: list[ProvidedBackground] = []
+
+
+@router.post("/pv/reports/{report_instance_id}/disproportionality")
+def disproportionality(report_instance_id: str, body: DisproportionalityIn,
+                       db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """PRR and ROR per coded term, with 95% intervals and the 2x2 table.
+
+    Returns figures and nothing else: no signal is created, and every response
+    carries the screening disclaimer. A person may raise a candidate from a
+    row; the candidate carries the row as its `detection_basis`.
+    """
+    from app.safety import signals as sig
+
+    report, product = _tabulation_context(db, report_instance_id, user)
+    roles.require_pv_role(db, product.id, user, roles.WRITER,
+                          action="Running a disproportionality screen")
+    if body.window not in ("interval", "cumulative"):
+        raise error("PV_BAD_WINDOW", "window must be interval or cumulative.", 422)
+    if body.level not in ("pt", "soc"):
+        raise error("PV_BAD_LEVEL", "level must be pt or soc.", 422)
+    if body.background not in ("organisation", "provided"):
+        raise error("PV_BAD_BACKGROUND", "background must be organisation or provided.",
+                    422)
+    if body.min_cases < 1:
+        raise error("PV_BAD_MIN_CASES", "min_cases is at least 1.", 422)
+    scope = scope_mod.scope_for(product, report)
+    try:
+        own = (scope_mod.interval(scope) if body.window == "interval"
+               else scope_mod.cumulative(scope))
+        drug_terms, drug_total = scope_mod.term_case_counts(db, scope, own,
+                                                            level=body.level)
+        if body.background == "organisation":
+            background_terms, background_total = scope_mod.term_case_counts(
+                db, scope, scope_mod.background(scope, body.window), level=body.level)
+            basis = ("every other product's cases in this organisation, received in "
+                     "the same window and known before the same lock")
+        else:
+            if not body.provided:
+                raise error("PV_NO_BACKGROUND",
+                            "A provided background needs at least one term's counts.",
+                            422)
+            totals = {p.total_cases for p in body.provided}
+            if len(totals) != 1:
+                raise error("PV_BACKGROUND_INCONSISTENT",
+                            "Every provided term must come from the same background "
+                            "database, so they share one total.", 422)
+            background_total = totals.pop()
+            if any(p.cases_with_term < 0 or p.cases_with_term > background_total
+                   for p in body.provided):
+                raise error("PV_BACKGROUND_INCONSISTENT",
+                            "A term's case count must lie between 0 and the total.", 422)
+            background_terms = {p.term: p.cases_with_term for p in body.provided}
+            drug_terms = {t: n for t, n in drug_terms.items() if t in background_terms}
+            basis = "provided: " + "; ".join(sorted({p.source_note.strip()
+                                                     for p in body.provided}))
+    except scope_mod.CumulativeUnavailable as exc:
+        raise error("PV_NO_CUMULATIVE", str(exc), 409)
+    if not background_total:
+        raise error("PV_NO_BACKGROUND",
+                    "There is no background to compare with: no other product in this "
+                    "organisation has coded cases in the window. Provide background "
+                    "counts from an external database instead.", 409)
+
+    rows = sig.screen_all(drug_terms, drug_total, background_terms, background_total,
+                          min_cases=body.min_cases)
+    log_audit(db, user, "Ran a disproportionality screen", "pv_report_instance",
+              report.id, product.project_id, "info",
+              f"{body.window} {body.level}, {len(rows)} term(s), "
+              f"{sum(1 for r in rows if r.meets_evans or r.ror_lower_above_one)} "
+              "flagged; background " + body.background)
+    db.commit()
+    return {"disclaimer": sig.DISCLAIMER,
+            "window": body.window, "level": body.level,
+            "period": {"from": scope.cumulative_from if body.window == "cumulative"
+                       else scope.period_start,
+                       "to": scope.period_end if body.window == "interval"
+                       else scope.data_lock_point,
+                       "data_lock_point": scope.data_lock_point},
+            "product_cases": drug_total, "background_cases": background_total,
+            "background": body.background, "background_basis": basis,
+            "thresholds": {"evans": f"a >= {sig.EVANS_MIN_CASES}, PRR >= "
+                                    f"{sig.EVANS_MIN_PRR:g}, chi-squared >= "
+                                    f"{sig.EVANS_MIN_CHI2:g}",
+                           "ror": f"a >= {sig.EVANS_MIN_CASES}, lower 95% bound > 1"},
+            "rows": [r.as_dict() for r in rows]}
