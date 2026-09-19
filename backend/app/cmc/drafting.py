@@ -23,6 +23,7 @@ indistinguishable from the first until a reviewer catches it.
 """
 
 import json
+import logging
 import re
 
 from app.docgen.markers import (
@@ -30,6 +31,8 @@ from app.docgen.markers import (
     parse_citations, parse_data_needed,
 )
 from app.llm import provider as llm_provider
+
+log = logging.getLogger(__name__)
 
 #: The metering label for this capability. One string, spelled the same way
 #: every time it is asked for, because the cost report groups on it.
@@ -292,13 +295,15 @@ def draft_section(*, section_code: str, section_title: str, deliverable_name: st
         purpose="generate",
     )
     if result.data is None:
+        log.warning("CMC draft of section %s failed: %s", section_code,
+                    result.error or "no structured reply")
         raise DraftingFailed(
-            f"The model could not draft section {section_code}: "
-            f"{result.error or 'it returned no structured reply'}")
+            f"The AI draft of section {section_code} could not be produced right now. "
+            "Please try again.")
     content = (result.data.get("content") or "").strip()
     if not content:
         raise DraftingFailed(
-            f"The model returned an empty draft for section {section_code}.")
+            f"The AI returned an empty draft for section {section_code}. Please try again.")
 
     return DraftResult(
         content=content,

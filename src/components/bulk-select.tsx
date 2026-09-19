@@ -21,6 +21,7 @@
 
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { plainly } from "@/components/processing-banner";
 import { Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -134,7 +135,7 @@ export function SelectBox({ id, selection, label, blockedReason }: {
  * that says so.
  */
 export function BulkSelectBar({
-  selection, noun, pluralNoun, names, blockedNote, onDelete, onDone, idle, extra,
+  selection, noun, pluralNoun, names, blockedNote, onDelete, onDone, idle, extra, description,
 }: {
   selection: Selection;
   noun: string;
@@ -146,12 +147,16 @@ export function BulkSelectBar({
   onDelete: (ids: string[]) => Promise<{
     deleted: unknown[];
     refused: { reason: string }[];
+    /** Rows taken off the list without being destroyed (e.g. a published
+     *  template archived because documents name it). Reported separately. */
+    archived?: unknown[];
   }>;
   onDone: () => Promise<void> | void;
   /** Shown in place of the count when nothing is ticked. */
   idle?: React.ReactNode;
   /** Rendered to the right of the delete button, e.g. a download control. */
   extra?: React.ReactNode;
+  /** Replaces the default explanation in the confirmation dialog. */
   description?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -163,27 +168,34 @@ export function BulkSelectBar({
     setBusy(true);
     try {
       const result = await onDelete(selection.chosen);
-      const gone = result.deleted.length;
+      const archived = result.archived?.length ?? 0;
+      const gone = result.deleted.length + archived;
       const kept = result.refused.length;
+      // "Removed" only when some rows were archived rather than destroyed, so a
+      // caller that never archives reads exactly as before.
+      const verb = archived > 0 ? "Removed" : "Deleted";
+      const split = archived > 0
+        ? `${result.deleted.length} deleted, ${archived} archived because they were in use. Nothing generated from them was changed.`
+        : undefined;
       if (gone > 0 && kept === 0) {
-        toast.success(`Deleted ${gone} ${gone === 1 ? noun : pluralNoun}`);
+        toast.success(`${verb} ${gone} ${gone === 1 ? noun : pluralNoun}`, { description: split });
       } else if (gone > 0) {
         // Both halves. "Deleted 8" on its own would let the two that were
         // refused pass unnoticed, which is the failure this whole shape exists
         // to avoid.
-        toast.warning(`Deleted ${gone}; left ${kept} alone`, {
-          description: result.refused[0].reason,
+        toast.warning(`${verb} ${gone}; left ${kept} alone`, {
+          description: plainly(result.refused[0].reason),
         });
       } else {
         toast.error(`Nothing was deleted`, {
-          description: result.refused[0]?.reason ?? "The server refused the request.",
+          description: plainly(result.refused[0]?.reason ?? "The server refused the request."),
         });
       }
       setOpen(false);
       selection.clear();
     } catch (e: any) {
       toast.error(`Could not delete the selected ${pluralNoun}`, {
-        description: e?.message ?? String(e),
+        description: plainly(e?.message ?? String(e)),
       });
     } finally {
       setBusy(false);
@@ -241,7 +253,7 @@ export function BulkSelectBar({
             <AlertDialogTitle>Delete {count} {word}?</AlertDialogTitle>
             {/* `whitespace-pre-line` so the names sit on their own lines. */}
             <AlertDialogDescription className="whitespace-pre-line">
-              {describe(noun, pluralNoun, count)}
+              {description ?? describe(noun, pluralNoun, count)}
               {names.length > 0 && names.length <= 8 ? `\n\n${names.join("\n")}` : ""}
               {blockedNote ? `\n\n${blockedNote}` : ""}
             </AlertDialogDescription>
@@ -274,14 +286,14 @@ export function BulkSelectBar({
 function describe(noun: string, pluralNoun: string, count: number): string {
   const these = count === 1 ? `this ${noun}` : `these ${count} ${pluralNoun}`;
   if (noun === "document") {
-    return `This permanently deletes ${these}, every version of them, their generation `
-      + "lineage and the rendered files on disk. It cannot be undone.";
+    return `This permanently deletes ${these}, every version of them, their history `
+      + "and their files. It cannot be undone.";
   }
   if (noun === "project") {
     return `This removes ${these} from the workspace, along with the templates, sources and `
-      + "documents inside them. The files themselves are destroyed later by the retention "
-      + "sweep, on the schedule your organisation set.";
+      + "documents inside them. The files themselves are deleted on your organisation's "
+      + "retention schedule.";
   }
-  return `This removes ${these} from the project. Anything already compiled or generated from `
-    + "them is kept, and the uploaded files are destroyed later by the retention sweep.";
+  return `This removes ${these} from the project. Anything already created from them is kept, `
+    + "and the uploaded files are deleted on your organisation's retention schedule.";
 }

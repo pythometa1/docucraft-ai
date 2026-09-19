@@ -26,6 +26,7 @@ import { Input } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, TableSkeleton } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const SELECT_CLASS =
   "h-8 rounded-md border border-input bg-transparent px-2 text-xs";
@@ -89,14 +90,14 @@ function TablesPanel({ reportId }: { reportId: string }) {
     api.pvTabulation(reportId, active)
       .then((res) => { if (live) setTable(res); })
       .catch((e: any) => { if (live) toast.error("The table could not be built",
-                                                 { description: e?.message ?? String(e) }); });
+                                                 { description: plainly(e?.message ?? String(e)) }); });
     return () => { live = false; };
   }, [reportId, active]);
 
   if (statuses === null) return <TableSkeleton rows={4} cols={4} />;
   if (error) {
     return <ErrorBanner title="The tables could not be listed"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
   if (!statuses.length) {
     return <p className="text-sm text-muted-foreground">
@@ -185,7 +186,7 @@ function TablesPanel({ reportId }: { reportId: string }) {
               ))}
               {table.notes.map((note, i) => (
                 <p key={`n${i}`} className="flex items-start gap-1.5 text-xs text-muted-foreground">
-                  <Info className="mt-0.5 h-3 w-3 shrink-0" /> {note}
+                  <Info className="mt-0.5 h-3 w-3 shrink-0" /> {plainly(note)}
                 </p>
               ))}
             </div>
@@ -211,7 +212,7 @@ function Drilldown({ reportId, tableKey, cell, label, onClose }: {
     api.pvDrilldown(reportId, tableKey, cell)
       .then((res) => { if (live) setData(res); })
       .catch((e: any) => toast.error("The cases could not be loaded",
-                                     { description: e?.message ?? String(e) }));
+                                     { description: plainly(e?.message ?? String(e)) }));
     return () => { live = false; };
   }, [reportId, tableKey, cell]);
 
@@ -273,7 +274,7 @@ function ExposurePanel({ reportId }: { reportId: string }) {
         setMeasures(res.measures);
       })
       .catch((e: any) => toast.error("Exposure could not be loaded",
-                                     { description: e?.message ?? String(e) }));
+                                     { description: plainly(e?.message ?? String(e)) }));
     return () => { live = false; };
   }, [reportId, reload]);
 
@@ -293,7 +294,7 @@ function ExposurePanel({ reportId }: { reportId: string }) {
       setForm((f) => ({ ...f, value_text: "", region: "", calculation_method_note: "" }));
       setReload((n) => n + 1);
     } catch (e: any) {
-      toast.error("The figure could not be added", { description: e?.message ?? String(e) });
+      toast.error("The figure could not be added", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -308,7 +309,7 @@ function ExposurePanel({ reportId }: { reportId: string }) {
     } catch (e: any) {
       toast.error(action === "confirm" ? "The figure could not be confirmed"
                                        : "The figure could not be deleted",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }

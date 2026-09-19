@@ -56,7 +56,7 @@ const STATUS: Record<string, { label: string; hint: string; icon: any; cls: stri
   },
   pending_review: {
     label: "Awaiting a decision",
-    hint: "The engine could not work out every value on its own. Answer the open questions on the Review screen.",
+    hint: "Some values still need your input. Answer the open questions on the Review screen.",
     icon: Clock,
     cls: "text-ai-uncertain bg-ai-uncertain/10 border-ai-uncertain/30",
   },
@@ -67,7 +67,7 @@ const STATUS: Record<string, { label: string; hint: string; icon: any; cls: stri
     cls: "text-purple bg-purple/10 border-purple/30",
   },
   blocked: {
-    label: "Failed QA",
+    label: "Failed checks",
     hint: "This document failed its checks when it was generated and cannot be approved. Fix the template or the spreadsheet row it came from, then generate it again.",
     icon: ShieldAlert,
     cls: "text-ai-blocked bg-ai-blocked/10 border-ai-blocked/30",

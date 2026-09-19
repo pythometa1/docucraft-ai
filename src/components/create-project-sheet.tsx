@@ -5,10 +5,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
-import { useStore, FUNCTIONS, DOCUMENT_TYPES, REGIONS } from "@/lib/store";
+import { useStore, FUNCTIONS, ACTIVE_FUNCTIONS, DOCUMENT_TYPES, REGIONS } from "@/lib/store";
 import type { FunctionKey } from "@/lib/types";
 import { ChevronDown } from "lucide-react";
 
@@ -25,7 +25,8 @@ export function CreateProjectSheet({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [region, setRegion] = useState("Europe");
-  const [fn, setFn] = useState<FunctionKey | "">("");
+  // Human Resources is the first open function, so it is chosen up front.
+  const [fn, setFn] = useState<FunctionKey | "">("Human Resources");
   const [docType, setDocType] = useState("");
   const [language, setLanguage] = useState("English");
   const [advanced, setAdvanced] = useState(false);
@@ -33,7 +34,7 @@ export function CreateProjectSheet({
   const [audit, setAudit] = useState(true);
 
   const docOptions = fn ? DOCUMENT_TYPES[fn] ?? [] : [];
-  const canCreate = name && fn && docType;
+  const canCreate = name && fn && ACTIVE_FUNCTIONS.has(fn) && docType;
   const [submitting, setSubmitting] = useState(false);
 
   const submit = async () => {
@@ -92,9 +93,28 @@ export function CreateProjectSheet({
             <Select value={fn} onValueChange={(v) => { setFn(v as FunctionKey); setDocType(""); }}>
               <SelectTrigger><SelectValue placeholder="Select function" /></SelectTrigger>
               <SelectContent>
-                {FUNCTIONS.map((f) => <SelectItem key={f} value={f}>{f}</SelectItem>)}
+                {FUNCTIONS.filter((f) => ACTIVE_FUNCTIONS.has(f)).map((f) => (
+                  <SelectItem key={f} value={f}>{f}</SelectItem>
+                ))}
+                <SelectSeparator />
+                {FUNCTIONS.filter((f) => !ACTIVE_FUNCTIONS.has(f)).map((f) => (
+                  <SelectItem key={f} value={f} disabled className="data-[disabled]:opacity-100 [&>span:last-child]:flex-1">
+                    <span className="flex w-full items-center justify-between gap-3">
+                      <span className="text-muted-foreground">{f}</span>
+                      <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Coming soon
+                      </span>
+                    </span>
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
+            {fn === "Other" && (
+              <p className="text-xs text-muted-foreground">
+                For any document not listed here. Upload your Word template and a spreadsheet,
+                and get one finished document per row, the same way as HR.
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">

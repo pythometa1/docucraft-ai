@@ -113,7 +113,7 @@ export function TextDocumentEditor({
   const [drafts, setDrafts] = useState<Record<Key, string>>({});
   const [selected, setSelected] = useState<Span | null>(null);
   const [instruction, setInstruction] = useState("");
-  const [suggestion, setSuggestion] = useState<{ replacement: string; note: string; model: string } | null>(null);
+  const [suggestion, setSuggestion] = useState<{ replacement: string; note: string } | null>(null);
   const [asking, setAsking] = useState(false);
   const [saving, setSaving] = useState(false);
   const areaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -333,7 +333,7 @@ export function TextDocumentEditor({
                       changed && "bg-ai-uncertain/15 underline decoration-ai-uncertain decoration-2",
                     );
                     const title = [
-                      `Paragraph ${s.paragraph_index}, run ${s.span_index}`,
+                      `Paragraph ${s.paragraph_index}`,
                       role?.label,
                     ].filter(Boolean).join(" · ");
                     const body = textOf(s) || <span className="text-muted-foreground">(empty)</span>;
@@ -413,8 +413,8 @@ export function TextDocumentEditor({
                   className="mt-1 w-full resize-y rounded-md border border-border bg-background p-2 text-sm transition-shadow duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50"
                 />
                 <p className="mt-1 text-[11px] text-muted-foreground">
-                  Line breaks and tabs cannot be saved into a run — Word stores those as elements,
-                  so they would vanish. Edit one line at a time.
+                  Line breaks and tabs cannot be kept here, so they would be lost. Edit one line
+                  at a time.
                 </p>
                 {drafts[keyOf(selected.paragraph_index, selected.span_index)] !== undefined && (
                   <button
@@ -485,7 +485,6 @@ export function TextDocumentEditor({
                       >
                         <X className="h-3.5 w-3.5" /> Discard
                       </button>
-                      <span className="ml-auto text-[11px] text-muted-foreground">{suggestion.model}</span>
                     </div>
                   </motion.div>
                 )}

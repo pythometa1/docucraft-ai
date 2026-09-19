@@ -29,6 +29,8 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { ErrorBanner } from "@/components/error-banner";
+import { plainly } from "@/components/processing-banner";
+import { qaNoteLines } from "@/lib/friendly";
 import { PolishedEmpty, StageSkeleton, TableSkeleton } from "@/components/skeletons";
 import { SwapIn } from "@/components/motion";
 import {
@@ -167,7 +169,7 @@ function InvoiceList({ projectId, refreshKey }: { projectId: string; refreshKey:
       await saveBlob(url, `${invoice.number}.${format}`);
     } catch (e: any) {
       toast.error(format === "pdf" ? "PDF is not available" : "Download failed", {
-        description: e?.message ?? String(e),
+        description: plainly(String(e?.message ?? e)),
       });
     } finally {
       setBusy(null);
@@ -181,7 +183,7 @@ function InvoiceList({ projectId, refreshKey }: { projectId: string; refreshKey:
       toast.success(`${invoice.number} voided. Its number is kept — a numbering with silent gaps is worse.`);
       await load();
     } catch (e: any) {
-      toast.error("Could not void this invoice", { description: e?.message ?? String(e) });
+      toast.error("Could not void this invoice", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(null);
     }
@@ -222,7 +224,7 @@ function InvoiceList({ projectId, refreshKey }: { projectId: string; refreshKey:
               <td className="px-4 py-2.5">
                 <StatusChip status={invoice.status} />
                 {!invoice.qa_passed && (
-                  <span className="ml-1.5 text-xs text-ai-blocked" title="This invoice failed its generation checks.">QA</span>
+                  <span className="ml-1.5 text-xs text-ai-blocked" title="This invoice failed its generation checks.">Failed checks</span>
                 )}
               </td>
               <td className="px-4 py-2.5">
@@ -299,7 +301,7 @@ function CustomerBook() {
       toast.success(`${customer.name} removed. Existing invoices keep their snapshot.`);
       await load();
     } catch (e: any) {
-      toast.error("Could not remove this customer", { description: e?.message ?? String(e) });
+      toast.error("Could not remove this customer", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(null);
     }
@@ -420,7 +422,7 @@ export function CustomerDialog({ editing, onClose, onSaved }: {
         : await api.updateCustomer(editing.id, payload as any);
       await onSaved(saved);
     } catch (e: any) {
-      toast.error("Could not save this customer", { description: e?.message ?? String(e) });
+      toast.error("Could not save this customer", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setSaving(false);
     }
@@ -568,7 +570,7 @@ function InvoiceWizard({ projectId, onIssued, onViewAll }: {
       setStep(4);
       onIssued();
     } catch (e: any) {
-      toast.error("The invoice could not be generated", { description: e?.message ?? String(e) });
+      toast.error("The invoice could not be generated", { description: plainly(String(e?.message ?? e)) });
     }
   }
 
@@ -795,14 +797,14 @@ function TemplateStep({ projectId, onReady }: {
       });
       setGenerated({ blueprint });
       if (blueprint.generation?.source === "kit_fallback") {
-        toast.info("A shipped invoice template is standing in", {
-          description: blueprint.generation.notes[0],
+        toast.info("Using a ready-made template", {
+          description: "You can tweak it in the studio before you use it.",
         });
       }
       const res = await api.listBlueprints(projectId).catch(() => null);
       if (res) setExisting(res.items);
     } catch (e: any) {
-      setError({ title: "The template could not be authored", detail: e?.message ?? String(e) });
+      setError({ title: "The template could not be authored", detail: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(null);
     }
@@ -836,10 +838,10 @@ function TemplateStep({ projectId, onReady }: {
       if (e instanceof ApiError && e.code === "BLUEPRINT_NOT_PUBLISHABLE") {
         setError({
           title: "This template is not ready to publish",
-          detail: `${e.message} — open it in the studio to fix, then come back.`,
+          detail: `${plainly(String(e.message))} — open it in the studio to fix, then come back.`,
         });
       } else {
-        setError({ title: "This template could not be used", detail: e?.message ?? String(e) });
+        setError({ title: "This template could not be used", detail: plainly(String(e?.message ?? e)) });
       }
     } finally {
       setBusy(null);
@@ -877,7 +879,7 @@ function TemplateStep({ projectId, onReady }: {
               {generated.blueprint.name} is drafted
             </div>
             {(generated.blueprint.generation?.notes ?? []).map((note, i) => (
-              <p key={i} className="text-xs text-muted-foreground">{note}</p>
+              <p key={i} className="text-xs text-muted-foreground">{plainly(String(note))}</p>
             ))}
             <div className="mt-3 flex flex-wrap gap-2">
               <Button size="sm" onClick={() => use(generated.blueprint)} disabled={busy !== null}>
@@ -996,7 +998,7 @@ function SuccessPanel({ result, onAnother, onDone }: {
       await saveBlob(url, `${result.number}.${format}`);
     } catch (e: any) {
       toast.error(format === "pdf" ? "PDF is not available on this server" : "Download failed", {
-        description: e?.message ?? String(e),
+        description: plainly(String(e?.message ?? e)),
       });
     } finally {
       setBusy(null);
@@ -1025,7 +1027,7 @@ function SuccessPanel({ result, onAnother, onDone }: {
       )}
       {!result.qa_passed && result.qa_notes.length > 0 && (
         <ul className="mx-auto max-w-lg space-y-1 text-left text-xs text-ai-blocked">
-          {result.qa_notes.slice(0, 4).map((note, i) => <li key={i}>• {note}</li>)}
+          {qaNoteLines(result.qa_notes).slice(0, 4).map((note, i) => <li key={i}>• {note}</li>)}
         </ul>
       )}
       <div className="flex flex-wrap justify-center gap-2">

@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.public_errors import public_message
 from app.audit.service import log_audit
 from app.cmc import registry
 from app.cmc.ctd import seed_sections
@@ -1499,7 +1500,8 @@ def _latest_cmc_draft(db: Session, section_id: str):
 
 def _draft_out(draft) -> dict:
     return {"id": draft.id, "version": draft.version, "content": draft.content,
-            "created_by": draft.created_by, "model": draft.model,
+            # The model stays on the row, not on the wire.
+            "created_by": draft.created_by,
             "generation_params": draft.generation_params,
             "created_at": draft.created_at}
 
@@ -1690,7 +1692,9 @@ class ExportRequest(BaseModel):
     #: ectd_leaves | combined | both
     granularity: str = "combined"
     #: inline | stripped | appendix -- what happens to [S#] citation markers.
-    citations: str = "inline"
+    #: Stripped by default: a citation marker points at a retrieval chunk the
+    #: recipient has never seen. "inline" is an internal review copy, chosen.
+    citations: str = "stripped"
     draft_watermark: bool = False
     #: Export unapproved sections anyway. Audited, never silent.
     override_approval: bool = False
@@ -1722,6 +1726,8 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
 
     from app.cmc import export as export_mod
     from app.cmc.tables import TableError, render_table
+    from app.generation.filenames import safe_filename
+    from app.generation.reproducibility import write_fixed
     from app.models import CmcExport, CmcSectionDraft
     from app.storage import abs_path, save_bytes
 
@@ -1744,6 +1750,7 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
     written: list = []
     plans: list = []
     all_blockers: list = []
+    citation_blockers: list = []
     base = f"cmc-export/{cp.id}"
 
     # QC is the gate, and it was not wired to the gate. `run_qc` was reachable
@@ -1777,7 +1784,12 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
         """
         if body.citations == "inline":
             return section_render
-        stripped = _re.sub(r"[ \t]*\[S\d+(?:,[^\]]*)?\]", "",
+        # Anything from "[S<digits>" to the next "]" on the same line, not
+        # `[S\d+(?:,...)?]`: the older pattern missed the multi-source form
+        # "[S5; S1, p.2]", which then shipped. Never across a newline or
+        # another "[": an unclosed "[S7" must not swallow the `[TABLE: key]`
+        # line after it.
+        stripped = _re.sub(r"[ \t]*\[S\d+[^\]\[\n]*\]", "",
                            section_render.content or "")
         section_render.content = stripped
         return section_render
@@ -1863,7 +1875,8 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
                 except Exception as exc:  # noqa: BLE001 - a builder bug is not a 500 either
                     unresolved.append({"section_code": section_render.section_code,
                                        "table_key": key,
-                                       "reason": f"the table could not be built: {exc}"})
+                                       "reason": public_message(
+                                           exc, "the table could not be built")})
             tables_by_section[section_render.section_code] = resolved
         blockers.extend([
             {"code": "TABLE_UNRESOLVED", "section_code": u["section_code"],
@@ -1887,6 +1900,9 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
 
         entry = registry.DELIVERABLES.get(deliverable.doc_type_key) or {}
         title = f"{cp.product_name} -- {entry.get('name') or deliverable.doc_type_key}"
+        # Named after the deliverable a reader knows ("CTD Module 3.2.P - Drug
+        # Product"), never the internal key it is registered under.
+        human_name = safe_filename(entry.get("name") or "Dossier", fallback="Dossier")
         subtitle = "CONFIDENTIAL" + (" -- DRAFT" if body.draft_watermark else "")
 
         if body.granularity in ("combined", "both"):
@@ -1894,9 +1910,21 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
                 rendered_sections, tables_by_section, title=title, subtitle=subtitle)
             relative = save_bytes(b"", base, ".docx")
             export_mod.write_docx(document, str(abs_path(relative)))
+            leftover = [] if body.citations == "inline" else \
+                export_mod.citation_markers(str(abs_path(relative)))
+            if leftover:
+                # The strip ran and something that reads as a citation is still
+                # in the file. Refused, not shipped: the recipient cannot
+                # resolve a marker, and one surviving says the strip missed a form.
+                abs_path(relative).unlink(missing_ok=True)
+                citation_blockers.append({
+                    "code": "CITATION_MARKERS_REMAIN", "section_code": None,
+                    "message": (f"{len(leftover)} citation marker(s) survived stripping in "
+                                f"{human_name} (for example {leftover[0]!r}).")})
+                continue
             written.append({"kind": "combined",
                             "deliverable_id": deliverable.id,
-                            "filename": f"{deliverable.doc_type_key}-combined.docx",
+                            "filename": f"{human_name}.docx",
                             "storage_path": relative})
 
         if body.granularity in ("ectd_leaves", "both"):
@@ -1911,15 +1939,23 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
                     title=f"{title} -- {leaf}", subtitle=subtitle)
                 relative = save_bytes(b"", base, ".docx")
                 export_mod.write_docx(document, str(abs_path(relative)))
+                leftover = [] if body.citations == "inline" else \
+                    export_mod.citation_markers(str(abs_path(relative)))
+                if leftover:
+                    citation_blockers.append({
+                        "code": "CITATION_MARKERS_REMAIN", "section_code": None,
+                        "message": (f"{len(leftover)} citation marker(s) survived stripping in "
+                                    f"{human_name}, {leaf} (for example {leftover[0]!r}).")})
                 leaf_files.append((export_mod.ectd_path("", leaf), relative))
             # One zip, so the folder tree survives a download.
             bundle = save_bytes(b"", base, ".zip")
             with zipfile.ZipFile(str(abs_path(bundle)), "w", zipfile.ZIP_DEFLATED) as archive:
+                # Fixed entry headers: no server mtimes or Unix permissions.
                 for arcname, relative in leaf_files:
-                    archive.write(str(abs_path(relative)), arcname)
-                archive.writestr("manifest.txt", export_mod.manifest_lines(plan.leaves))
-                archive.writestr(
-                    "README.txt",
+                    write_fixed(archive, arcname, path=str(abs_path(relative)))
+                write_fixed(archive, "manifest.txt", data=export_mod.manifest_lines(plan.leaves))
+                write_fixed(
+                    archive, "README.txt", data=
                     "Leaf files and a manifest, named by convention. This is NOT an eCTD "
                     "backbone: assembling and validating a submission is a publishing tool's "
                     "job, and a partial backbone would look submittable without being so.\n")
@@ -1930,9 +1966,19 @@ def export_dossier(cmc_project_id: str, body: ExportRequest,
                     pass
             written.append({"kind": "ectd_leaves",
                             "deliverable_id": deliverable.id,
-                            "filename": f"{deliverable.doc_type_key}-ectd.zip",
+                            "filename": f"{human_name} (eCTD leaves).zip",
                             "storage_path": bundle})
 
+    if citation_blockers:
+        # Not overridable: approval can be overridden, a marker the recipient
+        # cannot resolve is a defect in the file.
+        for item in written:
+            abs_path(item["storage_path"]).unlink(missing_ok=True)
+        raise error(
+            "CMC_EXPORT_BLOCKED",
+            "Citation markers survived stripping, so the export was refused. Edit the "
+            "sections that contain them and export again.",
+            409, {"blockers": citation_blockers + all_blockers[:49], "plans": plans})
     if all_blockers and not body.override_approval:
         raise error(
             "CMC_EXPORT_BLOCKED",
@@ -1988,6 +2034,7 @@ def download_export(cmc_export_id: str, index: int = Query(0, ge=0),
     """
     from fastapi.responses import FileResponse
 
+    from app.generation.filenames import content_disposition
     from app.models import CmcExport
     from app.storage import abs_path
 
@@ -2012,4 +2059,4 @@ def download_export(cmc_export_id: str, index: int = Query(0, ge=0),
         raise error("CMC_EXPORT_MISSING",
                     "The exported file is no longer in storage.", 410)
     name = (entry or {}).get("filename") or os.path.basename(str(path))
-    return FileResponse(str(path), filename=name)
+    return FileResponse(str(path), headers={"Content-Disposition": content_disposition(name)})

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
 
+from app.public_errors import public_message
 from app.docgen.markers import parse_assessments, parse_data_needed, table_markers
 from app.safety import deident
 from app.safety import expectedness as exp
@@ -437,6 +438,35 @@ def _markers(ctx) -> list:
     return out
 
 
+def _prompt_text(ctx) -> list:
+    """A draft that quotes the model's brief does not leave the building.
+
+    "[CONFIRMED SAFETY DATA: table_totals]" is the model echoing the heading
+    and key it was given, not a marker anything resolves, so it would print
+    verbatim in the report. Blocked rather than stripped: removing it silently
+    would leave a sentence whose figure was never stated, and the writer needs
+    to see where that happened.
+    """
+    from app.safety.drafting import prompt_artifacts
+
+    out = []
+    for section in ctx.sections:
+        if not section.enabled or section.is_container:
+            continue
+        draft = ctx.drafts.get(section.id)
+        if draft is None:
+            continue
+        found = prompt_artifacts(draft.content)
+        if found:
+            out.append(PvFinding(
+                "PROMPT_TEXT_IN_DRAFT", BLOCKER,
+                f"{section.section_code} contains drafting labels that are not report text "
+                f"({', '.join(sorted(set(found))[:3])}). Replace each with the figure or fact "
+                "it stands for, or regenerate the section.",
+                section.section_code, {"section_id": section.id, "found": found[:10]}))
+    return out
+
+
 def _denominator(ctx) -> list:
     """§11.9: a rate needs its exposure."""
     from app.models import PvExposure
@@ -763,7 +793,7 @@ def _info(ctx) -> list:
 
 
 BLOCKER_CHECKS = (_deid, _unconfirmed, _reconciliation, _windows, _rsi, _meddra,
-                  _markers, _denominator, _bound_cases, _approval)
+                  _markers, _prompt_text, _denominator, _bound_cases, _approval)
 WARNING_CHECKS = (_duplicates, _coding, _narratives, _signals, _continuity,
                   _baseline_drift, _citations, _regions)
 INFO_CHECKS = (_info,)
@@ -812,10 +842,13 @@ def run_qc(db, *, report, product) -> list:
         try:
             findings.extend(check(ctx))
         except Exception as exc:  # noqa: BLE001 - fail closed, and keep going
+            # Named, so the reviewer knows which check; the exception itself is
+            # logged, since the finding is shown to and exported by clients.
             findings.append(PvFinding(
                 "QC_CHECK_FAILED", BLOCKER,
                 f"The {check.__name__.strip('_').replace('_', ' ')} check could not "
-                f"run: {exc}", detail={"check": check.__name__}))
+                "run. " + public_message(exc, "Try again, or contact support if it persists."),
+                detail={"check": check.__name__}))
     # An accepted finding stays on the list, as a warning that says who
     # accepted it and why -- a blocker that vanished would leave the record
     # agreeing with the person who waved it through.

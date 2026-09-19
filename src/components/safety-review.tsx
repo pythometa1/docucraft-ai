@@ -28,6 +28,7 @@ import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, TableSkeleton } from "@/components/skeletons";
 import { SwapIn } from "@/components/motion";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const SELECT_CLASS =
   "h-8 rounded-md border border-input bg-transparent px-2 text-xs";
@@ -146,10 +147,10 @@ function EventsTab({ productId, reportId, only }: {
     try {
       const res = await api.pvSuggestExpectedness(reportId);
       setReload((n) => n + 1);
-      toast.success(`${res.events} event(s) assessed.`, { description: res.note });
+      toast.success(`${res.events} event(s) assessed.`, { description: res.note ? plainly(res.note) : undefined });
     } catch (e: any) {
       toast.error("Suggestions could not be computed",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -169,7 +170,7 @@ function EventsTab({ productId, reportId, only }: {
         toast.success(`${res.coded} event(s) coded against MedDRA ${res.meddra_version}.`);
       }
     } catch (e: any) {
-      toast.error("Coding could not run", { description: e?.message ?? String(e) });
+      toast.error("Coding could not run", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -182,7 +183,7 @@ function EventsTab({ productId, reportId, only }: {
       setReload((n) => n + 1);
     } catch (e: any) {
       toast.error("The determination could not be recorded",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -205,7 +206,7 @@ function EventsTab({ productId, reportId, only }: {
       toast.success(`${res.confirmed} event(s) confirmed.`);
     } catch (e: any) {
       toast.error("The determination could not be recorded",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -214,7 +215,7 @@ function EventsTab({ productId, reportId, only }: {
   if (rows === null) return <TableSkeleton rows={6} cols={6} />;
   if (error) {
     return <ErrorBanner title="The events could not be loaded"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
 
   return (
@@ -414,7 +415,7 @@ function SuggestionChip({ event }: { event: PvCaseEvent }) {
           <span className="font-medium text-warning">Needs a person</span>
         )}
         <span className="block text-[0.65rem] text-muted-foreground">
-          {suggestion.basis}
+          {plainly(suggestion.basis ?? "")}
         </span>
       </div>
     </div>
@@ -441,9 +442,9 @@ function DuplicatesTab({ productId }: { productId: string }) {
       const res = await api.pvDetectDuplicates(productId);
       setReload((n) => n + 1);
       toast.success(`${res.candidates} candidate pair(s), ${res.new} new.`,
-                    { description: res.note });
+                    { description: res.note ? plainly(res.note) : undefined });
     } catch (e: any) {
-      toast.error("Detection could not run", { description: e?.message ?? String(e) });
+      toast.error("Detection could not run", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -460,7 +461,7 @@ function DuplicatesTab({ productId }: { productId: string }) {
       setReload((n) => n + 1);
     } catch (e: any) {
       toast.error("The pair could not be resolved",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -469,7 +470,7 @@ function DuplicatesTab({ productId }: { productId: string }) {
   if (pairs === null) return <TableSkeleton rows={4} cols={3} />;
   if (error) {
     return <ErrorBanner title="Candidates could not be loaded"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
 
   return (
@@ -514,7 +515,7 @@ function DuplicatesTab({ productId }: { productId: string }) {
 
               <ul className="mt-3 space-y-0.5">
                 {pair.matched_on.map((note, index) => (
-                  <li key={index} className="text-xs text-muted-foreground">· {note}</li>
+                  <li key={index} className="text-xs text-muted-foreground">· {plainly(note)}</li>
                 ))}
               </ul>
 

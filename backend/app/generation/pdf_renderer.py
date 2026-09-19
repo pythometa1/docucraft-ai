@@ -60,6 +60,7 @@ Known limits, stated rather than discovered later:
 
 from __future__ import annotations
 
+import logging
 import math
 import shutil
 import subprocess
@@ -84,10 +85,12 @@ from app.templates.semantic_model import (
     resolve,
 )
 
+log = logging.getLogger(__name__)
+
 #: Recorded in every document's lineage (§17). §19 lists "Renderer version
 #: change alters output" as a risk whose whole mitigation is that the version was
 #: written down, so this string changes whenever the drawn output would.
-PDF_RENDERER_VERSION = "pdf_overlay/1.0.0"
+PDF_RENDERER_VERSION = "pdf_overlay/1.0.1"
 
 #: Used when a region was blank in the approved PDF, so there is no masked text
 #: whose size the value could inherit.
@@ -155,10 +158,11 @@ FALLBACK_ADVANCE = 0.5
 
 _IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
-#: The resource name the overlay font is added under. Chosen not to collide with
-#: the /F1, /TT0, /C2_0 conventions every PDF producer uses; if it collides
-#: anyway a digit is appended, deterministically.
-OVERLAY_FONT_NAME = "/DMOverlay"
+#: The resource name the overlay font is added under. A generic name, because
+#: resource names are visible to anyone who opens the file in a PDF inspector
+#: and a product-specific one says what drew the text. If it collides with a
+#: font the template already declares, a digit is appended, deterministically.
+OVERLAY_FONT_NAME = "/F9"
 
 
 class PdfOverlayError(RuntimeError):
@@ -1015,17 +1019,65 @@ def render_pdf(docx_path: str | Path, out_dir: str | Path, language: str = "en")
 
     pdf = out_dir / (Path(docx_path).stem + ".pdf")
     if not pdf.exists():
+        # The converter's output names paths on this host; it is for the log.
+        log.error("PDF conversion produced no file (exit %s): %s",
+                  proc.returncode, (proc.stderr or proc.stdout)[:2000])
         raise PreviewUnavailable(
-            f"LibreOffice produced no PDF (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:400]}"
+            "The PDF conversion did not produce a file. The .docx is unaffected."
         )
 
     _refuse_if_script_was_lost(docx_path, pdf)
+    scrub_pdf_metadata(pdf, docx_path)
 
     notes.append(
         "Page breaks are LibreOffice's. Word is the authority on pagination for the .docx, "
         "which this preview does not modify."
     )
     return PreviewResult(pdf_path=str(pdf), renderer=soffice, notes=notes)
+
+
+def _docx_identity(docx_path) -> dict:
+    """The title and author the source document itself declares, if any."""
+    try:
+        from docx import Document
+
+        core = Document(str(docx_path)).core_properties
+    except Exception:  # noqa: BLE001 - an unreadable source just has no identity
+        return {}
+    identity = {}
+    if (core.title or "").strip():
+        identity["/Title"] = core.title.strip()
+    if (core.author or "").strip():
+        identity["/Author"] = core.author.strip()
+    return identity
+
+
+def scrub_pdf_metadata(pdf_path, docx_path=None) -> None:
+    """Rewrite `pdf_path` so its metadata describes the document, not the toolchain.
+
+    The converter stamps every PDF with its own name and build ("LibreOffice
+    26.8.0.3 (AARCH64)", Creator "Writer"), a creation date in the server's
+    time zone, and an XMP packet repeating all of it. None of that is about the
+    letter, and all of it tells the recipient how the letter was produced. So
+    the document information dictionary is replaced with the title and author
+    the source .docx declares (nothing else, and no dates), the XMP metadata
+    stream is removed from the catalogue, and the objects nothing refers to any
+    more are dropped so the old packet is not still sitting in the file.
+
+    Pages, the structure tree and the outline are untouched: this rewrites the
+    envelope, never what is drawn.
+    """
+    reader = PdfReader(str(pdf_path))
+    writer = PdfWriter(clone_from=reader)
+    writer._root_object.pop(NameObject("/Metadata"), None)
+    writer.metadata = _docx_identity(docx_path) if docx_path else {}
+    writer.compress_identical_objects(remove_identicals=False, remove_orphans=True)
+    staged = Path(str(pdf_path) + ".scrubbing")
+    try:
+        writer.write(str(staged))
+        staged.replace(pdf_path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def _refuse_if_script_was_lost(docx_path: str | Path, pdf: Path) -> None:

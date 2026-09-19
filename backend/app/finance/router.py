@@ -33,6 +33,7 @@ from app.models import (
 )
 from app.numbering import INVOICE_KEY, allocate
 from app.ownership import owned_manifest, owned_project
+from app.public_errors import public_message
 from app.security import error, get_current_user
 
 router = APIRouter(tags=["invoices"])
@@ -402,7 +403,7 @@ def generate_invoice(body: InvoiceGenerateRequest, db: Session = Depends(get_db)
             change_summary=f"Invoice {number}",
         )
     except FillFailed as exc:
-        raise error("FILL_FAILED", f"Could not generate the invoice: {exc}", 422)
+        raise error("FILL_FAILED", public_message(exc, "Could not generate the invoice."), 422)
 
     # An invoice the person just generated from values they typed, that passed
     # every QA gate, is approved in the same act -- downloading is the entire

@@ -40,6 +40,7 @@ from functools import cached_property
 
 from sqlalchemy import select
 
+from app.public_errors import public_message
 from app.cmc.limits import FAIL, UNKNOWN, compare
 from app.cmc.tables import ON_STABILITY, classify_result
 from app.cmc.values import limits_of, parse_criterion, parse_value
@@ -781,8 +782,8 @@ def _tables(db, store: _Store, *, cmc_project_id: str, org_id: str) -> list:
         # No builders at all is not "every table is fine". Reporting each
         # marker as unrenderable is the honest answer, and it blocks the
         # export rather than passing a document with holes in it.
-        findings.extend(_unresolved(section, key, draft,
-                                    f"the table builders could not be loaded ({exc})")
+        reason = public_message(exc, "the table builders could not be loaded")
+        findings.extend(_unresolved(section, key, draft, reason)
                         for section, key, draft in markers)
         return findings
 
@@ -803,7 +804,11 @@ def _tables(db, store: _Store, *, cmc_project_id: str, org_id: str) -> list:
             # blocker here as it does there. Letting it escape would take all
             # fourteen checks down with it, and a reviewer would be looking at
             # an error page instead of the list of what to fix.
-            findings.append(_unresolved(section, key, draft, str(exc)))
+            # TableUnavailable is written for the reviewer; a KeyError's text
+            # is just a key name out of the store, which is ours.
+            findings.append(_unresolved(section, key, draft, public_message(
+                exc, "a value this table needs is missing from the store",
+                user_facing=(TableUnavailable,))))
     return findings
 
 

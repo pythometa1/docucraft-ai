@@ -28,6 +28,8 @@ behind the masking.
 """
 
 import json
+import logging
+import re
 
 from app.docgen.markers import (
     MISSING_VALUE, DraftingFailed, DraftResult, _one_line, parse_assessments,
@@ -36,16 +38,18 @@ from app.docgen.markers import (
 from app.llm import provider as llm_provider
 from app.safety import deident
 
+log = logging.getLogger(__name__)
+
 CAPABILITY = "Drafting a periodic safety report section"
 NARRATIVE_CAPABILITY = "Drafting an ICSR case narrative"
 
 #: Recorded on every draft; changes when the prompt does.
-PROMPT_VERSION = "pv-m6-1"
+PROMPT_VERSION = "pv-m6-2"
 NARRATIVE_PROMPT_VERSION = "pv-icsr-m6-1"
 
 __all__ = ["SYSTEM_PROMPT", "NARRATIVE_PROMPT", "build_prompt", "draft_section",
            "draft_narrative", "IdentifierInPrompt", "table_markers",
-           "parse_assessments", "PROMPT_VERSION"]
+           "parse_assessments", "PROMPT_VERSION", "OUTPUT_RULES", "prompt_artifacts"]
 
 SYSTEM_PROMPT = """You are drafting section {section_code} "{section_title}" of a {deliverable_name} — a pharmacovigilance
 periodic safety document prepared to {structure_basis} conventions for {target_regions}.
@@ -101,6 +105,67 @@ RULES:
 11. Keep the exact section code and title given. Output the heading, then the content. No markdown
     decoration beyond headings. No commentary about being an AI.
 """
+
+#: Appended after §8's rules, which stay byte for byte as the spec gives them.
+#: Written because drafts came back quoting the prompt to the reader: a PBRER
+#: export printed "[CONFIRMED SAFETY DATA: table_totals]" twelve times and
+#: "[Product and period metadata]" four, and called the report a "report
+#: workspace". The input block headings and the JSON keys are how the model is
+#: briefed; none of them is a word a regulator should read.
+OUTPUT_RULES = """
+OUTPUT FORMAT:
+- The only square-bracketed tokens the content may contain are citations [S#, p.X] / [S#, Table Y],
+  [TABLE: <table_key>] lines, [DATA NEEDED: ...] and [ASSESSMENT REQUIRED: ...]. Write nothing else in
+  square brackets.
+- Never name or echo the headings of the inputs above (for example "confirmed safety data", "product
+  and period metadata", "source extracts", "baseline text", "template guidance") and never write a
+  data key such as table_totals or case_counts. State the figure or fact itself, with its citation.
+- Never refer to the software, the drafting process, a "workspace", a "prompt" or "the data provided";
+  write as the author of the report.
+"""
+
+#: The headings of the blocks `SYSTEM_PROMPT` and `NARRATIVE_PROMPT` brief the
+#: model with. A bracket opening with one of these is the model quoting its
+#: brief, not writing the report.
+PROMPT_BLOCK_LABELS = (
+    "CONFIRMED SAFETY DATA", "PRODUCT AND PERIOD METADATA", "BASELINE TEXT",
+    "TEMPLATE GUIDANCE", "SOURCE EXTRACTS", "REFERENCE SAFETY INFORMATION",
+    "REPORTING INTERVAL", "DATA LOCK POINT", "CASE RECORD", "RULES", "OUTPUT FORMAT",
+)
+
+#: The bracketed forms a draft is meant to contain. Citations are resolved or
+#: stripped at export, table markers are replaced by tables, and the two gap
+#: markers block export until a person answers them -- so none of them can
+#: reach a finished document by accident, and none is reported here.
+_INTENDED_BRACKET_RE = re.compile(
+    r"^\s*(?:S\d|TABLE\s*:|DATA NEEDED|ASSESSMENT REQUIRED)", re.IGNORECASE)
+_BRACKET_RE = re.compile(r"\[([^\[\]\n]{1,200})\]")
+#: A data key: lower-case words joined by underscores, the shape of every key
+#: in the confirmed-data summary and every table key.
+_DATA_KEY_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+
+
+def prompt_artifacts(text: str) -> list:
+    """Every bracketed token in `text` that quotes the model's brief.
+
+    Two shapes: a bracket that opens with an input block's heading
+    ("[CONFIRMED SAFETY DATA: table_totals]", "[Product and period
+    metadata]"), and a bracket holding a data key ("[table_totals]"). The
+    intended markers -- citations, `[TABLE: key]`, `[DATA NEEDED: ...]`,
+    `[ASSESSMENT REQUIRED: ...]` -- are never reported: they are handled by the
+    export and by their own QC blockers, and must keep reaching them.
+    """
+    found = []
+    for match in _BRACKET_RE.finditer(text or ""):
+        inner = match.group(1)
+        if _INTENDED_BRACKET_RE.match(inner):
+            continue
+        heading = inner.strip().upper()
+        if any(heading.startswith(label) for label in PROMPT_BLOCK_LABELS) \
+                or _DATA_KEY_RE.search(inner):
+            found.append(match.group(0))
+    return found
+
 
 #: §8 describes the narrative prompt rather than giving it, so this is written
 #: to its description: the fixed order, every clause traceable to a case field,
@@ -212,7 +277,7 @@ def build_prompt(*, section_code: str, section_title: str, deliverable_name: str
             f'sources and the confirmed data do not contain, write [DATA NEEDED: ...] '
             f'or [ASSESSMENT REQUIRED: ...] rather than the statement.\n'
         )
-    return prompt
+    return prompt + OUTPUT_RULES
 
 
 def _guard(*parts: str) -> None:
@@ -282,12 +347,15 @@ def draft_section(*, section_code: str, section_title: str, deliverable_name: st
                f'rule above.',
         schema=DRAFT_SCHEMA, purpose="generate")
     if result.data is None:
+        log.warning("Safety draft of section %s failed: %s", section_code,
+                    result.error or "no structured reply")
         raise DraftingFailed(
-            f"The model could not draft section {section_code}: "
-            f"{result.error or 'it returned no structured reply'}")
+            f"The AI draft of section {section_code} could not be produced right now. "
+            "Please try again.")
     content = (result.data.get("content") or "").strip()
     if not content:
-        raise DraftingFailed(f"The model returned an empty draft for {section_code}.")
+        raise DraftingFailed(
+            f"The AI returned an empty draft for {section_code}. Please try again.")
     # The OUTPUT is scanned too. Rule 8 tells the model never to write an
     # identifier, and a model that expanded a masked token or recalled a name
     # from its training data has written one anyway.
@@ -312,9 +380,11 @@ def draft_narrative(*, case_id: str, product_name: str, case_record: dict,
         system=prompt, prompt=f"Write the narrative for case {case_id} now.",
         schema=DRAFT_SCHEMA, purpose="generate")
     if result.data is None or not (result.data.get("content") or "").strip():
+        log.warning("Narrative for case %s failed: %s", case_id,
+                    getattr(result, "error", None) or "it returned nothing")
         raise DraftingFailed(
-            f"The model could not write the narrative for case {case_id}: "
-            f"{getattr(result, 'error', None) or 'it returned nothing'}")
+            f"The AI narrative for case {case_id} could not be produced right now. "
+            "Please try again.")
     content = result.data["content"].strip()
     _guard(content)
     return DraftResult(content=content, model=result.model, citations=[],

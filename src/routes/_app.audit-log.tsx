@@ -132,13 +132,14 @@ const ENTITY_LABEL: Record<string, string> = {
   document_review: "Review",
   review_task: "Review question",
   generation_job: "Batch run",
-  org_model_rate: "Model rate",
+  org_model_rate: "AI pricing",
   organization: "Workspace",
 };
 
 function entityLabel(raw: string): string {
   if (!raw) return "—";
-  return ENTITY_LABEL[raw] ?? raw.replace(/_/g, " ").replace(/^(.)/, (m) => m.toUpperCase());
+  // Unmapped keys are internal names, so they get a generic word.
+  return ENTITY_LABEL[raw] ?? "Record";
 }
 
 /**
@@ -153,10 +154,10 @@ function entityLabel(raw: string): string {
  * `plainly()`, which is enough for the rest.
  */
 const EVENT_LABEL: Record<string, string> = {
-  "Compiled template manifest": "Processed a template into rules",
-  "Compiled manifest left unapproved": "Processed a template, rules left unapproved",
-  "Published manifest left unapproved": "Published a template, rules left unapproved",
-  "Approved template manifest": "Approved the template rules",
+  "Compiled template manifest": "Read a template",
+  "Compiled manifest left unapproved": "Read a template, left unapproved",
+  "Published manifest left unapproved": "Published a template, left unapproved",
+  "Approved template manifest": "Approved a template",
   "Generated document from manifest": "Generated a document from a template",
   "Created a template blueprint from an upload": "Created a template from an upload",
   "Saved a template blueprint": "Saved a template",
@@ -167,11 +168,16 @@ const EVENT_LABEL: Record<string, string> = {
   "Published a template from a blueprint": "Published a template",
   "Migrated a token-library template": "Migrated an older template",
   "data_policy.updated": "Updated the data policy",
-  "retention.sweep": "Ran the retention sweep",
+  "retention.sweep": "Applied the retention schedule",
+  "compiled (no sample data to verify against)": "Read a template",
 };
 
 function eventLabel(raw: string): string {
-  return EVENT_LABEL[raw] ?? plainly(raw ?? "");
+  if (EVENT_LABEL[raw]) return EVENT_LABEL[raw];
+  // Single-token machine keys are internal; stored sentences are already
+  // written for a reader and only need scrubbing.
+  if (!raw || !/\s/.test(raw.trim())) return "Activity";
+  return plainly(raw);
 }
 
 /* ---------------------------------------------------------------------- time */

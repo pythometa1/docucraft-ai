@@ -25,6 +25,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, TableSkeleton } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const SELECT_CLASS =
   "h-8 rounded-md border border-input bg-transparent px-2 text-xs";
@@ -83,7 +84,7 @@ export function SafetySignals({ product }: { product: PvProduct }) {
           </select>
         </div>
         <NewSignal productId={product.id} onCreated={reload} />
-        {error && <ErrorBanner title="The signal log could not be read" message={error} />}
+        {error && <ErrorBanner title="The signal log could not be read" message={plainly(error)} />}
         {signals === null ? (
           <TableSkeleton rows={4} />
         ) : signals.length === 0 ? (
@@ -126,7 +127,7 @@ function NewSignal({ productId, onCreated }: { productId: string; onCreated: () 
       setTerms(""); setDescription(""); setOpen(false);
       onCreated();
     } catch (e: any) {
-      toast.error("Could not raise the candidate", { description: e?.message ?? String(e) });
+      toast.error("Could not raise the candidate", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -185,7 +186,7 @@ function SignalRow({ signal, reports, onChanged }: {
       toast.success(extra.status ? `Signal is now ${STATUS_LABEL[extra.status] ?? extra.status}` : "Saved");
       onChanged();
     } catch (e: any) {
-      toast.error("Not saved", { description: e?.message ?? String(e) });
+      toast.error("Not saved", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -312,7 +313,7 @@ function ScreenPanel({ product, disclaimer, onRaised }: {
       });
       onRaised();
     } catch (e: any) {
-      toast.error("Could not raise the candidate", { description: e?.message ?? String(e) });
+      toast.error("Could not raise the candidate", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -327,7 +328,7 @@ function ScreenPanel({ product, disclaimer, onRaised }: {
       </h3>
       <p className="flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        {disclaimer || "Screening statistic — indicates reporting frequency, not causality; not evidence of a causal association."}
+        {plainly(disclaimer) || "Screening statistic — indicates reporting frequency, not causality; not evidence of a causal association."}
       </p>
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <select className={cn(SELECT_CLASS, "max-w-full")} value={reportId}
@@ -357,7 +358,7 @@ function ScreenPanel({ product, disclaimer, onRaised }: {
           {busy === "run" ? "Screening…" : "Run screen"}
         </Button>
       </div>
-      {error && <ErrorBanner title="The screen could not run" message={error} />}
+      {error && <ErrorBanner title="The screen could not run" message={plainly(error)} />}
       {result && (
         <div className="space-y-2">
           <p className="text-xs text-muted-foreground">
@@ -388,7 +389,7 @@ function ScreenPanel({ product, disclaimer, onRaised }: {
                         </span>
                       )}
                       {row.notes.map((note, i) => (
-                        <div key={i} className="font-normal text-muted-foreground">{note}</div>
+                        <div key={i} className="font-normal text-muted-foreground">{plainly(note)}</div>
                       ))}
                     </td>
                     <td className="whitespace-nowrap py-1 pr-3 font-mono">

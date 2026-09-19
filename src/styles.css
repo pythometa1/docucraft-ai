@@ -63,6 +63,7 @@
   --color-ai-confident: var(--ai-confident);
   --color-ai-uncertain: var(--ai-uncertain);
   --color-ai-blocked: var(--ai-blocked);
+  --color-ai-live: var(--ai-live);
 
   /* Run classification. The x-ray paints these onto the template's own runs, so
      they are a separate ramp from the ai-* one: ai-* says how sure the engine
@@ -136,6 +137,9 @@
   --ai-confident: oklch(0.74 0.17 162);
   --ai-uncertain: oklch(0.8 0.16 78);
   --ai-blocked: oklch(0.66 0.23 25);
+  /* Work running right now, as distinct from "active" (selected / current).
+     Cyan so a live reading never reads as the brand violet of a selection. */
+  --ai-live: oklch(0.8 0.13 205);
 
   --run-placeholder: oklch(0.7 0.19 255);
   --run-instruction: oklch(0.68 0.2 22);
@@ -225,6 +229,7 @@
   --ai-confident: oklch(0.52 0.15 162);
   --ai-uncertain: oklch(0.6 0.14 62);
   --ai-blocked: oklch(0.55 0.22 25);
+  --ai-live: oklch(0.56 0.12 215);
 
   --run-placeholder: oklch(0.5 0.2 255);
   --run-instruction: oklch(0.52 0.21 22);
@@ -357,6 +362,29 @@
     oklch(0.66 0.19 268),
     oklch(0.6 0.22 295)
   );
+}
+
+/* The primary action on a live surface: brand violet into the running cyan. */
+@utility bg-gradient-live {
+  background-image: linear-gradient(
+    100deg,
+    oklch(0.6 0.21 285),
+    oklch(0.64 0.17 250) 55%,
+    oklch(0.7 0.13 212)
+  );
+}
+
+/* A bar segment that is filling: a light band travelling across the cyan.
+   Stopped by the reduced-motion block below like every other loop. */
+@utility live-stripe {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--ai-live) 55%, transparent) 0%,
+    var(--ai-live) 50%,
+    color-mix(in oklab, var(--ai-live) 55%, transparent) 100%
+  );
+  background-size: 200% 100%;
+  animation: ai-shimmer 1.4s linear infinite;
 }
 
 @utility bg-hero-orbs {
@@ -663,6 +691,14 @@
   box-shadow:
     0 0 0 1px color-mix(in oklab, var(--ai-active) 45%, transparent),
     0 0 28px -6px color-mix(in oklab, var(--ai-active) 55%, transparent);
+}
+
+/* The halo on a surface where work is running right now: the cyan of
+   `--ai-live`, so it never reads as the violet of a selection. */
+@utility glow-live {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--ai-live) 42%, transparent),
+    0 0 36px -10px color-mix(in oklab, var(--ai-live) 55%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {

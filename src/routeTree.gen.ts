@@ -18,6 +18,7 @@ import { Route as AppTeamRouteImport } from './routes/_app.team'
 import { Route as AppSettingsRouteImport } from './routes/_app.settings'
 import { Route as AppReviewRouteImport } from './routes/_app.review'
 import { Route as AppQualityRouteImport } from './routes/_app.quality'
+import { Route as AppGuideRouteImport } from './routes/_app.guide'
 import { Route as AppDashboardRouteImport } from './routes/_app.dashboard'
 import { Route as AppChatRouteImport } from './routes/_app.chat'
 import { Route as AppAuditLogRouteImport } from './routes/_app.audit-log'
@@ -70,6 +71,11 @@ const AppQualityRoute = AppQualityRouteImport.update({
   path: '/quality',
   getParentRoute: () => AppRoute,
 } as any)
+const AppGuideRoute = AppGuideRouteImport.update({
+  id: '/guide',
+  path: '/guide',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppDashboardRoute = AppDashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
@@ -114,6 +120,7 @@ export interface FileRoutesByFullPath {
   '/audit-log': typeof AppAuditLogRoute
   '/chat': typeof AppChatRoute
   '/dashboard': typeof AppDashboardRoute
+  '/guide': typeof AppGuideRoute
   '/quality': typeof AppQualityRoute
   '/review': typeof AppReviewRoute
   '/settings': typeof AppSettingsRoute
@@ -131,6 +138,7 @@ export interface FileRoutesByTo {
   '/audit-log': typeof AppAuditLogRoute
   '/chat': typeof AppChatRoute
   '/dashboard': typeof AppDashboardRoute
+  '/guide': typeof AppGuideRoute
   '/quality': typeof AppQualityRoute
   '/review': typeof AppReviewRoute
   '/settings': typeof AppSettingsRoute
@@ -150,6 +158,7 @@ export interface FileRoutesById {
   '/_app/audit-log': typeof AppAuditLogRoute
   '/_app/chat': typeof AppChatRoute
   '/_app/dashboard': typeof AppDashboardRoute
+  '/_app/guide': typeof AppGuideRoute
   '/_app/quality': typeof AppQualityRoute
   '/_app/review': typeof AppReviewRoute
   '/_app/settings': typeof AppSettingsRoute
@@ -169,6 +178,7 @@ export interface FileRouteTypes {
     | '/audit-log'
     | '/chat'
     | '/dashboard'
+    | '/guide'
     | '/quality'
     | '/review'
     | '/settings'
@@ -186,6 +196,7 @@ export interface FileRouteTypes {
     | '/audit-log'
     | '/chat'
     | '/dashboard'
+    | '/guide'
     | '/quality'
     | '/review'
     | '/settings'
@@ -204,6 +215,7 @@ export interface FileRouteTypes {
     | '/_app/audit-log'
     | '/_app/chat'
     | '/_app/dashboard'
+    | '/_app/guide'
     | '/_app/quality'
     | '/_app/review'
     | '/_app/settings'
@@ -286,6 +298,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppQualityRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/guide': {
+      id: '/_app/guide'
+      path: '/guide'
+      fullPath: '/guide'
+      preLoaderRoute: typeof AppGuideRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/dashboard': {
       id: '/_app/dashboard'
       path: '/dashboard'
@@ -343,6 +362,7 @@ interface AppRouteChildren {
   AppAuditLogRoute: typeof AppAuditLogRoute
   AppChatRoute: typeof AppChatRoute
   AppDashboardRoute: typeof AppDashboardRoute
+  AppGuideRoute: typeof AppGuideRoute
   AppQualityRoute: typeof AppQualityRoute
   AppReviewRoute: typeof AppReviewRoute
   AppSettingsRoute: typeof AppSettingsRoute
@@ -358,6 +378,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppAuditLogRoute: AppAuditLogRoute,
   AppChatRoute: AppChatRoute,
   AppDashboardRoute: AppDashboardRoute,
+  AppGuideRoute: AppGuideRoute,
   AppQualityRoute: AppQualityRoute,
   AppReviewRoute: AppReviewRoute,
   AppSettingsRoute: AppSettingsRoute,

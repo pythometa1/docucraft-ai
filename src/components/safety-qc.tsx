@@ -29,6 +29,7 @@ import { Input } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, TableSkeleton } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const SELECT_CLASS =
   "h-8 rounded-md border border-input bg-transparent px-2 text-xs";
@@ -106,7 +107,7 @@ function QcPanel({ report, onChanged }: {
           Run checks again
         </Button>
       </div>
-      {error && <ErrorBanner title="The checks could not run" message={error} onRetry={refresh} />}
+      {error && <ErrorBanner title="The checks could not run" message={plainly(error)} onRetry={refresh} />}
       {loading && !qc && <TableSkeleton rows={6} />}
       {qc && (
         <div className="space-y-4">
@@ -178,15 +179,13 @@ function FindingGroup({ title, hint, findings, tone, reportId, onAccepted }: {
               <div className="flex items-start gap-2">
                 <Icon className={cn("mt-0.5 h-4 w-4 shrink-0", style.text)} />
                 <div className="min-w-0 flex-1 space-y-1">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <code className="rounded bg-muted px-1.5 py-0.5 text-[11px]">{f.code}</code>
-                    {f.section_code && (
-                      <span className="rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                        § {f.section_code}
-                      </span>
-                    )}
-                  </div>
-                  <p className="break-words">{f.message}</p>
+                  {/* The finding code is an internal key; the message says what to fix. */}
+                  {f.section_code && (
+                    <span className="inline-block rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                      § {f.section_code}
+                    </span>
+                  )}
+                  <p className="break-words">{plainly(f.message)}</p>
                   <Evidence detail={f.detail} />
                   {f.acceptable && onAccepted && (
                     <AcceptFinding reportId={reportId} finding={f} onAccepted={onAccepted} />
@@ -217,7 +216,7 @@ function AcceptFinding({ reportId, finding, onAccepted }: {
       });
       onAccepted();
     } catch (e: any) {
-      toast.error("Could not accept the finding", { description: e?.message ?? String(e) });
+      toast.error("Could not accept the finding", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -250,7 +249,7 @@ function Evidence({ detail }: { detail: Record<string, unknown> }) {
     <dl className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
       {entries.map(([k, v]) => (
         <div key={k} className="flex min-w-0 gap-1">
-          <dt>{k.replace(/_/g, " ")}:</dt>
+          <dt>{plainly(k.replace(/_/g, " "))}:</dt>
           <dd className="truncate font-mono" title={render(v)}>{render(v)}</dd>
         </div>
       ))}
@@ -288,7 +287,7 @@ function SignOffPanel({ report, qc, onChanged }: {
       setStatement("");
       onChanged();
     } catch (e: any) {
-      toast.error("Sign-off refused", { description: e?.message ?? String(e) });
+      toast.error("Sign-off refused", { description: plainly(e?.message ?? String(e)) });
       onChanged();
     } finally {
       setBusy(false);
@@ -303,7 +302,7 @@ function SignOffPanel({ report, qc, onChanged }: {
       setReason("");
       onChanged();
     } catch (e: any) {
-      toast.error("Could not withdraw", { description: e?.message ?? String(e) });
+      toast.error("Could not withdraw", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -382,11 +381,11 @@ function ExportPanel({ report, qc, onRefused }: {
     try {
       const made = await api.pvExport(report.id, options);
       toast.success("Report exported", {
-        description: `${made.files.length} file${made.files.length === 1 ? "" : "s"}; the identifier scan passed.`,
+        description: `${made.files.length} file${made.files.length === 1 ? "" : "s"}; checked for personal details.`,
       });
       load();
     } catch (e: any) {
-      toast.error("Export refused", { description: e?.message ?? String(e) });
+      toast.error("Export refused", { description: plainly(e?.message ?? String(e)) });
       onRefused();
     } finally {
       setBusy(null);
@@ -403,7 +402,7 @@ function ExportPanel({ report, qc, onRefused }: {
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch (e: any) {
-      toast.error("Download failed", { description: e?.message ?? String(e) });
+      toast.error("Download failed", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -501,7 +500,7 @@ function ExportPanel({ report, qc, onRefused }: {
                   </div>
                 </div>
                 {record.options.notes.map((note, i) => (
-                  <p key={i} className="pt-1 text-xs text-muted-foreground">{note}</p>
+                  <p key={i} className="pt-1 text-xs text-muted-foreground">{plainly(note)}</p>
                 ))}
               </li>
             ))}
@@ -548,7 +547,7 @@ function AuditPanel({ reportId, tick }: { reportId: string; tick: number }) {
           <option value="product">Product data: cases, events, RSI</option>
         </select>
       </div>
-      {error && <ErrorBanner title="The audit trail could not be read" message={error} />}
+      {error && <ErrorBanner title="The audit trail could not be read" message={plainly(error)} />}
       {!page ? (
         <TableSkeleton rows={4} />
       ) : page.items.length === 0 ? (

@@ -54,6 +54,7 @@ import docx
 from docx.oxml.ns import qn
 
 from app.generation.reproducibility import normalise_docx
+from app.templates.base_docx import BASE_DOCX
 from app.templates.blueprint import (
     HYPERLINK, INSTRUCTION, MERGEFIELD, PLACEHOLDER, ROLE_RGB, SPAN_ROLES, STATIC,
     BlueprintError, RGB_BY_COLOUR, emits, emitted_spans, is_normalised, observed_colour,
@@ -228,7 +229,10 @@ def emit(body: dict, output_path: str) -> EmitResult:
             "merged first, or one segment stops meaning one span and every slot after the "
             "merge addresses the wrong text. Call blueprint.normalise_body first.")
 
-    document = docx.Document()
+    # The neutral base, never `docx.Document()`: python-docx's own default
+    # package names python-docx as the author and carries a thumbnail, a
+    # custom-XML part and revision ids into every file a customer receives.
+    document = docx.Document(BASE_DOCX)
     # A fresh python-docx document opens with no body paragraphs, so nothing has
     # to be removed here -- unlike a table cell, which does.
     _write_blocks(document, body.get("blocks") or (), document)

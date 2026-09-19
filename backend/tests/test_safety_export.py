@@ -421,6 +421,52 @@ def test_citations_are_stripped_unless_asked_to_be_kept(app_client, ws, tmp_path
         str(_saved(tmp_path, _download(app_client, ws, kept), "b.docx")))
 
 
+def test_every_citation_form_is_stripped_and_the_package_is_neutral(
+        app_client, ws, tmp_path):
+    """"[S5; S1, p.2]" survived the old pattern; nothing of the form may."""
+    section = _sections(app_client, ws, ws["report_id"])[0]
+    _write(app_client, ws, section["id"], _text(
+        section, " One [S1]. Two [S1, p.2]. Three [S5; S1, p.2]. Four [S6; S9]."))
+    _approve(app_client, ws, section["id"])
+    _sign(app_client, ws, ws["report_id"])
+    export = _export(app_client, ws, ws["report_id"]).json()
+    response = _download(app_client, ws, export)
+    path = _saved(tmp_path, response)
+    text = export_mod.document_text(str(path))
+    assert "[S" not in text and "One. Two. Three. Four." in text
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        core = archive.read("docProps/core.xml").decode()
+        settings = archive.read("word/settings.xml").decode()
+    assert not any(n.startswith("customXml/") for n in names)
+    assert "docProps/thumbnail.jpeg" not in names
+    assert "python-docx" not in core and "w:rsids" not in settings
+
+
+def test_drafting_labels_in_the_finished_file_refuse_the_export(
+        app_client, ws, monkeypatch):
+    """QC blocks labels in a draft; the written file is read again anyway, and a
+    label that got there (by any route) deletes it."""
+    _sign(app_client, ws, ws["report_id"])
+    monkeypatch.setattr(export_mod, "document_text",
+                        lambda path: "Totals [CONFIRMED SAFETY DATA: table_totals] [S3]")
+    refused = _export(app_client, ws, ws["report_id"])
+    assert refused.status_code == 409
+    error = refused.json()["detail"]["error"]
+    assert error["code"] == "PV_EXPORT_INTERNAL_MARKERS"
+    kinds = sorted(h["kind"] for h in error["details"]["found"])
+    assert kinds == ["citation", "prompt_label"]
+
+
+def test_internal_markers_respect_the_citation_mode():
+    text = "A [S1; S2] b [Product and period metadata] [DATA NEEDED: x]"
+    assert [h["kind"] for h in export_mod.internal_markers(text)] == \
+        ["prompt_label", "citation"]
+    assert [h["kind"] for h in export_mod.internal_markers(text, citations="keep")] == \
+        ["prompt_label"]
+
+
 def test_a_draft_copy_carries_a_watermark_and_says_so(app_client, ws, tmp_path):
     _sign(app_client, ws, ws["report_id"])
     export = _export(app_client, ws, ws["report_id"], draft_watermark=True,
@@ -429,7 +475,9 @@ def test_a_draft_copy_carries_a_watermark_and_says_so(app_client, ws, tmp_path):
     header = etree.tostring(_docx_part(path, "word/header1.xml")).decode()
     assert 'string="DRAFT"' in header and "| DRAFT" in header
     assert "Regional copy: EU" in export_mod.document_text(str(path))
-    assert export["files"][0]["filename"] == "signal_eval-2026-06-30-EU.docx"
+    # Named after the report a reader knows, never the internal key.
+    assert export["files"][0]["filename"] == \
+        "Signal Evaluation Assessment Report - 2026-06-30 - EU.docx"
 
 
 def test_appendices_come_from_the_same_builders(app_client, ws, tmp_path):

@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { User, Building2, Bell, Key, Cpu, CreditCard, Shield, Check } from "lucide-react";
+import { User, Building2, Bell, Key, CreditCard, Shield, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,7 +18,6 @@ export const Route = createFileRoute("/_app/settings")({
 const TABS = [
   { id: "profile", label: "Profile", icon: User },
   { id: "workspace", label: "Workspace", icon: Building2 },
-  { id: "ai", label: "AI Models", icon: Cpu },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "security", label: "Security", icon: Shield },
   { id: "api", label: "API keys", icon: Key },
@@ -53,7 +52,6 @@ function SettingsPage() {
         <div className="space-y-6">
           {tab === "profile" && <ProfileTab />}
           {tab === "workspace" && <WorkspaceTab />}
-          {tab === "ai" && <AITab />}
           {tab === "notifications" && <NotificationsTab />}
           {tab === "security" && <SecurityTab />}
           {tab === "api" && <ApiTab />}
@@ -133,40 +131,6 @@ function WorkspaceTab() {
       <Row label="Public workspace" hint="Allow anyone with the link to view approved documents."><Switch /></Row>
       <Row label="Require approval before export" hint="Drafts must be approved by an admin before download."><Switch defaultChecked /></Row>
     </Section>
-  );
-}
-
-function AITab() {
-  const models = [
-    { name: "GPT-4 Turbo", vendor: "OpenAI", context: "128K", pref: true },
-    { name: "Claude 3.5 Sonnet", vendor: "Anthropic", context: "200K", pref: false },
-    { name: "Gemini 1.5 Pro", vendor: "Google", context: "1M", pref: false },
-    { name: "Llama 3.1 70B", vendor: "Meta (self-host)", context: "128K", pref: false },
-  ];
-  return (
-    <>
-      <Section title="Default model" description="Used for drafting when a project doesn't specify one.">
-        <div className="space-y-2">
-          {models.map((m) => (
-            <label key={m.name} className={cn("flex items-center gap-3 p-3 rounded-lg border cursor-pointer", m.pref ? "border-primary bg-primary/5" : "border-border hover:bg-muted/40")}>
-              <div className={cn("h-4 w-4 rounded-full border-2 flex items-center justify-center", m.pref ? "border-primary" : "border-muted-foreground")}>
-                {m.pref && <div className="h-2 w-2 rounded-full bg-primary" />}
-              </div>
-              <div className="flex-1">
-                <div className="text-sm font-medium">{m.name}</div>
-                <div className="text-xs text-muted-foreground">{m.vendor} · {m.context} context</div>
-              </div>
-              {m.pref && <span className="text-xs font-medium text-primary">Selected</span>}
-            </label>
-          ))}
-        </div>
-      </Section>
-      <Section title="Generation defaults">
-        <Row label="Temperature" hint="Lower = more deterministic. Recommended 0.3 for regulated documents."><span className="text-sm tabular-nums">0.3</span></Row>
-        <Row label="Cite sources inline" hint="Automatically add citations to every generated claim."><Switch defaultChecked /></Row>
-        <Row label="Redact PII on export" hint="Detect and mask names, emails, and IDs in exported files."><Switch defaultChecked /></Row>
-      </Section>
-    </>
   );
 }
 
@@ -260,8 +224,8 @@ function BillingTab() {
             <div className="text-lg font-semibold mt-1 tabular-nums">10 / ∞</div>
           </div>
           <div className="rounded-lg bg-muted/40 p-4">
-            <div className="text-xs text-muted-foreground">Tokens this cycle</div>
-            <div className="text-lg font-semibold mt-1 tabular-nums">14.2M</div>
+            <div className="text-xs text-muted-foreground">Documents this cycle</div>
+            <div className="text-lg font-semibold mt-1 tabular-nums">1,284</div>
           </div>
           <div className="rounded-lg bg-muted/40 p-4">
             <div className="text-xs text-muted-foreground">Next invoice</div>

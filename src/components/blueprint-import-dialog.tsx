@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/select";
 import { CompileProgressList, useCompileProgress } from "@/components/compile-progress";
 import { ErrorBanner } from "@/components/error-banner";
+import { plainly } from "@/components/processing-banner";
 import { cn } from "@/lib/utils";
 
 type Project = { id: string; name: string };
@@ -47,7 +48,7 @@ export function BlueprintImportDialog({
   const [templateId, setTemplateId] = useState("");
   const [uploading, setUploading] = useState(false);
   const [reading, setReading] = useState(false);
-  const [failure, setFailure] = useState<{ title: string; detail: string } | null>(null);
+  const [failure, setFailure] = useState<{ title: string; detail?: string } | null>(null);
   /* What the server sent back, kept rather than dropped.
    *
    * The progress panel narrates the stages while the request is in flight and
@@ -91,7 +92,7 @@ export function BlueprintImportDialog({
       setTemplateId(created.id);
       toast.success("Uploaded", { description: file.name });
     } catch (e: any) {
-      toast.error("Could not upload", { description: e?.message ?? String(e) });
+      toast.error("Could not upload", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setUploading(false);
     }
@@ -122,11 +123,13 @@ export function BlueprintImportDialog({
       // open, the choices that produced the failure are still on screen, and a
       // notice that slides away after eight seconds is the wrong home for the
       // one sentence explaining why nothing happened.
+      // The unavailable case gets fixed wording, not the server's reason.
+      const unavailable = e?.code === "LLM_NOT_CONFIGURED";
       setFailure({
-        title: e?.code === "LLM_NOT_CONFIGURED"
-          ? "No language model is configured"
+        title: unavailable
+          ? "Template reading isn't available right now. Please try again later or contact your administrator."
           : "Could not read this template",
-        detail: e?.message ?? String(e),
+        detail: unavailable ? undefined : plainly(e?.message ?? String(e)),
       });
     } finally {
       setReading(false);
@@ -139,7 +142,7 @@ export function BlueprintImportDialog({
     <Dialog open={open} onOpenChange={(next) => { if (!reading) onOpenChange(next); }}>
       {/* Wider than the app's other dialogs, and scrollable. While a template is
           being read this fills with the processing panel — a header, a segmented
-          bar and one row per stage, each naming the kind of work it is — which
+          bar and one row per step — which
           needs the width to keep a stage on one line, and the height cap to keep
           the footer buttons on screen. */}
       <DialogContent className="sm:max-w-2xl">
@@ -148,9 +151,8 @@ export function BlueprintImportDialog({
             <Wand2 className="h-4 w-4 text-primary" /> Read a legacy template
           </DialogTitle>
           <DialogDescription>
-            The document is pre-scanned and read on the server — colour-coded placeholders,
-            author instructions and conditional sections are identified, and what comes back is a
-            template you can edit.
+            Upload your existing Word template and get back an editable version, with its
+            placeholders, author instructions and optional sections already identified.
           </DialogDescription>
         </DialogHeader>
 
@@ -178,7 +180,7 @@ export function BlueprintImportDialog({
                   <SelectContent>
                     {templates.map((t) => (
                       <SelectItem key={t.id} value={t.id} disabled={!t.current_version_id}>
-                        {t.name}{t.status === "failed" ? " — could not be parsed" : ""}
+                        {t.name}{t.status === "failed" ? " — could not be read" : ""}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -233,18 +235,10 @@ export function BlueprintImportDialog({
                 result={result}
                 title="Reading your template"
               />
-              {/* What this used to say was "the scan runs on this machine",
-                  which in a browser dialog reads as "your laptop" -- a privacy
-                  claim, and a false one. The file was uploaded before any of
-                  this started, and `:from-template` pre-scans and compiles it on
-                  the API host like every other template. The true and still
-                  useful point is the other one: the scan is deterministic, so
-                  the only stages that reach a model are the ones saying so. */}
+              {/* Sets expectations only; how the reading works is not the reader's concern. */}
               <p className="px-1 text-[11px] leading-relaxed text-muted-foreground">
-                The scan is deterministic — the same document reads the same way every time,
-                with no model involved. Only the stages marked{" "}
-                <span className="text-ai-uncertain">AI model</span> send anything to a model,
-                and those are the slow ones.
+                This can take a minute for a long template. You can review and change everything
+                once it is ready.
               </p>
             </div>
           )}

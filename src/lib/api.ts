@@ -16,13 +16,13 @@ import type {
   CmcDraft, CmcExportRecord, CmcFinding, CmcMaterial, CmcProject, CmcReadiness,
   CmcRenderedTable, CmcResultRow, CmcSection, CmcSite, CmcSource, CmcTestRow,
   CsrDocument, CsrDraft, CsrProject, CsrReadiness, CsrSection, CsrSource,
-  CostReport, Customer, InvoiceGenerated, InvoiceSummary, LintReport, QualityReport,
+  CostReport, Customer, InvoiceGenerated, Guide, InvoiceSummary, LintReport,
   PvApprovalStatus, PvDueDate, PvMember, PvProduct, PvReportInstance, PvReportType,
   PvCaseEvent, PvCaseRow, PvDeidGate, PvDeidItem, PvDelta, PvDraft, PvQcReport, PvExportRecord, PvExportOptions, PvAuditEntry, PvSignal, PvScreenResult,
   PvDuplicatePair,
   PvEventSummary, PvExposure, PvMappingProfile, PvReadiness,
   PvRsiVersion, PvScopePreview, PvSection, PvSource, PvTabulation,
-  PvTabulationStatus,
+  PvTabulationStatus, ReadingJob, ReadingStarted,
   SettableWorkflowStatus, Study, TopTemplates, TrendSeries,
 } from "@/lib/types";
 
@@ -193,6 +193,8 @@ export const api = {
      *  refuse -- not a boundary; `require()` still checks every one. */
     capabilities: string[];
   }>("GET", "/me"),
+  // The authoring guide is served behind a login so it never ships in the bundle.
+  guide: () => request<Guide>("GET", "/guide"),
   lookups: (kind: string, parent?: string) => request<{ items: string[] }>("GET", "/lookups", { query: { kind, parent } }),
 
   listProjects: (q?: string, opts: { status?: string; limit?: number; offset?: number } = {}) =>
@@ -323,7 +325,7 @@ export const api = {
 
   // Returns replacement text, never a saved change. A person always accepts.
   suggestEdit: (versionId: string, body: { selection: string; instruction: string; paragraph_index?: number }) =>
-    request<{ replacement: string; note: string; model: string }>(
+    request<{ replacement: string; note: string }>(
       "POST", `/document-versions/${versionId}/suggest-edit`, { json: body }),
 
   // Writes a NEW version. An approved letter that changes under the same id is
@@ -990,7 +992,7 @@ export const api = {
    *  proves the result (emit round-trip) before persisting, and stands a kit in
    *  -- reason recorded in `generation` -- when no model is configured. */
   blueprintFromDescription: (body: { description: string; name?: string; project_id?: string; service?: string }) =>
-    request<Blueprint & { version: BlueprintVersion; generation: { source: "model" | "kit_fallback"; notes: string[]; model: string | null } }>(
+    request<Blueprint & { version: BlueprintVersion; generation: { source: "model" | "kit_fallback"; notes: string[] } }>(
       "POST", "/template-blueprints:from-description", { json: body }),
   /** One record in, one stored document out -- no spreadsheet, no binding. */
   generateFromManifest: (manifestId: string, body: { source_record: Record<string, unknown>; language?: string; project_id?: string }) =>
@@ -1002,14 +1004,19 @@ export const api = {
   // is what makes the compile watchable while it runs: a server-generated id
   // only arrives with the response, by which point there is nothing left to see.
   // Poll `getJob(token)` alongside this call.
-  compileManifest: (templateId: string, opts: { agentic?: boolean; refine?: boolean; progressToken?: string } = {}) =>
+  compileManifest: (templateId: string, opts: { progressToken?: string } = {}) =>
     request<any>("POST", `/templates/${templateId}/compile-manifest`, {
-      query: {
-        agentic: String(!!opts.agentic),
-        use_llm_refinement: String(!!opts.refine),
-        progress_token: opts.progressToken,
-      },
+      query: { progress_token: opts.progressToken },
     }),
+  /** Start a reading and return at once (202). Progress, the counts found so
+   *  far and the result arrive on `getReadingJob(token)`. A second reading of
+   *  a template already being read answers 409 COMPILE_IN_PROGRESS. */
+  compileManifestBackground: (templateId: string, progressToken: string) =>
+    request<ReadingStarted>("POST", `/templates/${templateId}/compile-manifest`, {
+      query: { progress_token: progressToken, background: "true" },
+    }),
+  /** `getJob`, typed for a template reading. */
+  getReadingJob: (token: string) => request<ReadingJob>("GET", `/jobs/${token}`),
   listManifests: (templateId: string) => request<{ items: any[] }>("GET", `/templates/${templateId}/manifests`),
   getManifest: (manifestId: string) => request<any>("GET", `/template-manifests/${manifestId}`),
   patchManifest: (manifestId: string, body: { fields?: any[]; conditions?: any[]; blocks?: any[] }) =>
@@ -1132,11 +1139,6 @@ export const api = {
     request<{ items: { source_version_id: string; field_bindings: Record<string, string>; value_map: Record<string, Record<string, string>> }[] }>(
       "GET", `/template-manifests/${manifestId}/bindings`,
     ),
-  // §22's metrics and §18's targets. READ_AUDIT-gated server-side: these are a
-  // summary of a customer's estate, its error rate and its review behaviour.
-  qualityReport: (windowDays = 30) =>
-    request<QualityReport>("GET", "/metrics", { query: { window_days: windowDays } }),
-
   fieldDictionary: () => request<{ items: any[] }>("GET", "/field-dictionary"),
   async batchZipUrl(jobId: string): Promise<string> {
     const token = ensureAuth();
@@ -1231,12 +1233,18 @@ export type DataPolicy = {
   recorded: boolean;
 };
 
+/** What the reviewer should do about one proposed column. The engine's score,
+ *  band and evidence stay on the server; these four are the whole verdict. */
+export type BindingStatus = "matched" | "confirm" | "review" | "unmatched";
+
 export type BindingSuggestion = {
   field_id: string;
   column: string | null;
-  confidence: number;
-  method: "dictionary" | "exact_slug" | "mergefield" | "fuzzy" | "llm" | "unmatched";
-  rationale: string;
+  status: BindingStatus;
+  /** A short reason in words, never a number. */
+  reason: string;
+  /** Every other column offered for this field, best first. */
+  alternatives: string[];
   origin: "field" | "condition" | "formula";
   type: string;
   sample_value: string | null;
@@ -1251,9 +1259,18 @@ export type ManifestSpan = {
   is_instruction: boolean;
 };
 
+/** Counts a reviewer can check against their own document. Null where the
+ *  reading did not record one. */
+export type DocumentSummary = {
+  paragraph_count: number | null;
+  placeholder_count: number | null;
+  instruction_count: number | null;
+  word_field_count: number | null;
+};
+
 export type ManifestPreview = {
   paragraph_count: number;
-  prescan_summary: Record<string, any>;
+  document_summary: DocumentSummary;
   blocks: any[];
   conditions: any[];
   paragraphs: {

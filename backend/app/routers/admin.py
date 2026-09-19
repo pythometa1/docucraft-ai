@@ -14,7 +14,7 @@ from app.models import (
     AuditLog, DeletionCertificate, DocumentVersion, GeneratedDocument, GenerationJob,
     OrgDataPolicy, OrgModelRate, Project, TemplateFile, User,
 )
-from app.security import error, get_current_user
+from app.security import error, get_current_user, require_internal_endpoints
 from app.tenancy import GLOBAL
 
 router = APIRouter(tags=["admin"])
@@ -77,16 +77,9 @@ def analytics_cost(range: str = analytics.DEFAULT_RANGE, db: Session = Depends(g
     `MANAGE_USERS`, below.
     """
     since, until, days = _window(range)
-    return {
-        "summary": analytics.cost_summary(db, org_id=user.org_id, since=since, until=until),
-        "trend": analytics.cost_trend(
-            db, org_id=user.org_id, since=since, until=until, days=days),
-        "by_model": analytics.cost_by_model(db, org_id=user.org_id, since=since, until=until),
-        "by_operation": analytics.cost_by_operation(
-            db, org_id=user.org_id, since=since, until=until),
-        "by_template": analytics.cost_by_template(
-            db, org_id=user.org_id, since=since, until=until),
-    }
+    # The public shape: one spend series and spend by activity. Per-model
+    # figures and token counts stay in `llm_calls` for the operator.
+    return analytics.cost_report(db, org_id=user.org_id, since=since, until=until, days=days)
 
 
 @router.get("/analytics/compiles")
@@ -98,6 +91,11 @@ def analytics_compiles(range: str = analytics.DEFAULT_RANGE, db: Session = Depen
 
 
 # ------------------------------------------------------------------- model rates
+#
+# The vendor price catalogue names every model we can run and what it costs us,
+# so these three are operator-only: 404 wherever internal endpoints are off.
+
+_internal = [Depends(require_internal_endpoints)]
 
 
 class ModelRateUpsert(BaseModel):
@@ -111,7 +109,7 @@ class ModelRateReset(BaseModel):
     model: str
 
 
-@router.get("/admin/model-rates")
+@router.get("/admin/model-rates", dependencies=_internal)
 def list_model_rates(db: Session = Depends(get_db),
                      user: User = Depends(require(MANAGE_USERS))):
     """Every rate in force for this organisation, and where each came from."""
@@ -129,7 +127,7 @@ def list_model_rates(db: Session = Depends(get_db),
     return {"items": items, "read_on": pricing.RATES_READ_ON}
 
 
-@router.put("/admin/model-rates")
+@router.put("/admin/model-rates", dependencies=_internal)
 def upsert_model_rate(body: ModelRateUpsert, db: Session = Depends(get_db),
                       user: User = Depends(require(MANAGE_USERS))):
     """Set this organisation's own rate for one model.
@@ -166,7 +164,7 @@ def upsert_model_rate(body: ModelRateUpsert, db: Session = Depends(get_db),
             "output_usd_per_mtok": body.output_usd_per_mtok, "origin": "org"}
 
 
-@router.post("/admin/model-rates:reset")
+@router.post("/admin/model-rates:reset", dependencies=_internal)
 def reset_model_rate(body: ModelRateReset, db: Session = Depends(get_db),
                      user: User = Depends(require(MANAGE_USERS))):
     """Drop an override and fall back to the shipped rate."""

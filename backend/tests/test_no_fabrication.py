@@ -189,7 +189,11 @@ def test_chat_answers_503_rather_than_a_made_up_answer(app_client, two_orgs):
     assert res.status_code == 503, res.text
     body = res.json()
     assert body["error"]["code"] == "LLM_NOT_CONFIGURED"
-    assert "ANTHROPIC_API_KEY" in body["error"]["message"]
+    # An explicit refusal, not a made-up answer -- and one that names no vendor
+    # or setting: which key is missing is the operator's to read in the log.
+    assert body["error"]["message"] == (
+        "AI features are not available right now. Please contact your administrator.")
+    assert "ANTHROPIC_API_KEY" not in res.text
 
 
 # ------------------------------------------------------- no silent re-scoping

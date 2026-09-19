@@ -50,6 +50,9 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
+import { DeleteTemplateDialog } from "@/components/delete-template-dialog";
+import { plainly } from "@/components/processing-banner";
+import { lintText, severityLabel } from "@/lib/friendly";
 import type {
   Blueprint, BlueprintBlock, BlueprintBody, BlueprintParagraph, BlueprintSegment,
   LintFinding, LintReport, SegmentRole,
@@ -284,6 +287,44 @@ const SEVERITY_STYLE: Record<string, string> = {
   advisory: "border-border bg-muted/40 text-muted-foreground",
 };
 
+/** Shown whenever template reading is unavailable, instead of the server's reason. */
+const READING_UNAVAILABLE =
+  "Template reading isn't available right now. Please try again later or contact your administrator.";
+
+/** Co-pilot operation names, in words; the raw name never reaches the screen. */
+const OP_LABEL: Record<string, string> = {
+  set_segment_text: "Edit text",
+  set_segment_role: "Change how text is treated",
+  set_segment_emit: "Keep or leave out an instruction",
+  add_field: "Add field",
+  remove_field: "Remove field",
+  rename_field: "Rename field",
+  retype_field: "Change field type",
+  set_on_missing: "Change what happens when a value is missing",
+  remove_condition: "Remove optional section",
+  rewrite_condition: "Change when a section is shown",
+  set_row_repeat: "Repeat a table row",
+  remove_row_repeat: "Stop repeating a table row",
+  set_block_range: "Change where a section starts and ends",
+};
+
+/** A name the author would recognise for an object, or "" -- never its raw id,
+ *  except a field's, which is its user-facing name once made readable. */
+function objectName(object: Record<string, any> | null): string {
+  if (!object) return "";
+  const given = object.display_name ?? object.label ?? object.name ?? object.title;
+  if (given) return String(given).trim();
+  if (object.object_type !== "FIELD" || !object.object_id) return "";
+  const words = String(object.object_id).replace(/[_\-.]+/g, " ").trim();
+  return words ? `Field: ${words.charAt(0).toUpperCase()}${words.slice(1)}` : "";
+}
+
+/** A condition in plain words, when the payload carries them. */
+function conditionWords(object: Record<string, any>): string {
+  const words = object.plain ?? object.description ?? object.summary ?? object.explanation;
+  return words ? plainly(String(words).trim()) : "";
+}
+
 /** Paragraphs in the order the backend indexes them: document order, into tables. */
 function walkParagraphs(body: BlueprintBody | undefined) {
   const out: { index: number; block: BlueprintParagraph; inTable: boolean; path: number[] }[] = [];
@@ -511,7 +552,7 @@ function TemplateEditorPage() {
     } catch (e: any) {
       toast.error(
         e?.code === "BLUEPRINT_VERSION_CONFLICT" ? "Somebody else saved first" : "Could not save",
-        { description: e?.message ?? String(e), duration: 8000 });
+        { description: plainly(e?.message ?? String(e)), duration: 8000 });
     } finally { setBusy(null); }
   };
 
@@ -525,7 +566,7 @@ function TemplateEditorPage() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (e: any) {
-      toast.error("Could not download", { description: e?.message ?? String(e) });
+      toast.error("Could not download", { description: plainly(e?.message ?? String(e)) });
     } finally { setBusy(null); }
   };
 
@@ -572,7 +613,7 @@ function TemplateEditorPage() {
         {
           description: pending
             ? `${pending} Until then, generation still uses the previous version.`
-            : "The template and the rules that fill it are both live.",
+            : "Your updated template is live.",
           duration: pending ? 10000 : 5000,
         },
       );
@@ -592,11 +633,12 @@ function TemplateEditorPage() {
       if (e?.code === "TEMPLATE_NOT_READ" || e?.code === "LLM_NOT_CONFIGURED") {
         // Nothing was published -- the server compiles before it writes, so the
         // template is exactly as it was. Offer the route its own message names.
-        setReadFailure(e?.message ?? String(e));
+        setReadFailure(e?.code === "LLM_NOT_CONFIGURED"
+          ? READING_UNAVAILABLE : plainly(e?.message ?? String(e)));
         return;
       }
       toast.error("Not ready to publish", {
-        description: e?.message ?? String(e), duration: 10000,
+        description: plainly(e?.message ?? String(e)), duration: 10000,
       });
     } finally { setBusy(null); }
   };
@@ -655,7 +697,7 @@ function TemplateEditorPage() {
             aria-pressed={xray}
             onClick={toggleXray}
             className={cn("gap-1.5", xray && "border border-ai-active/50 text-ai-active")}
-            title="Colour every run by what the engine classified it as"
+            title="Highlight what will be filled in and what will be removed"
           >
             <ScanLine className="h-3.5 w-3.5" /> X-ray
           </Button>
@@ -678,7 +720,7 @@ function TemplateEditorPage() {
           <Button size="sm" className="gap-1.5"
                   onClick={() => (blocking.length ? setConfirmPublish(true) : publish(true))}
                   disabled={busy != null || dirty}
-                  title="Write the edited template, have the compiler read it again, and publish the result">
+                  title="Save your edits, prepare the template again, and publish the updated version">
             {busy === "publish" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
             Publish &amp; regenerate updated template
           </Button>
@@ -695,10 +737,9 @@ function TemplateEditorPage() {
               Publish with {blocking.length} unresolved {blocking.length === 1 ? "finding" : "findings"}?
             </AlertDialogTitle>
             <AlertDialogDescription className="whitespace-pre-line">
-              {"The compiler reads the document again on the way out, so these may no longer apply — "
-               + "they describe the reading this template is carrying now, not the one that will ship. "
-               + "But nothing checks them again, so if they are real they will reach the letters.\n\n"
-               + blocking.slice(0, 3).map((f) => f.detail).join("\n")}
+              {"Publishing reads the template again, so these may already be resolved by your edits. "
+               + "If they are not, they will show up in the documents you generate.\n\n"
+               + [...new Set(blocking.slice(0, 3).map((f) => lintText(f.code, f.severity)))].join("\n")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -717,19 +758,19 @@ function TemplateEditorPage() {
       <AlertDialog open={readFailure != null} onOpenChange={(o) => { if (!o && busy == null) setReadFailure(null); }}>
         <AlertDialogContent className="border-border bg-surface">
           <AlertDialogHeader>
-            <AlertDialogTitle>The edited template could not be read</AlertDialogTitle>
+            <AlertDialogTitle>The edited template could not be prepared</AlertDialogTitle>
             <AlertDialogDescription className="whitespace-pre-line">
               {`${readFailure ?? ""}\n\nNothing was published — your template is exactly as it was. `
-               + "You can publish without re-reading, which ships the reading this editor is carrying "
-               + "rather than a fresh one. Every check runs on that path, so it refuses if the reading "
-               + "no longer matches the document."}
+               + "You can publish without reading it again, which keeps the setup shown in this editor. "
+               + "The usual checks still apply, so publishing stops if that setup no longer matches "
+               + "the document."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={busy != null}>Leave it</AlertDialogCancel>
             <AlertDialogAction disabled={busy != null}
                                onClick={(e) => { e.preventDefault(); void publish(false); }}>
-              {busy === "fallback" ? "Publishing…" : "Publish without re-reading"}
+              {busy === "fallback" ? "Publishing…" : "Publish without reading again"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -949,10 +990,10 @@ function TemplateEditorPage() {
         {/* Inspector + findings */}
         <div className="space-y-4">
           <div className="rounded-xl surface-raised p-4">
-            <p className="mb-3 text-xs uppercase tracking-wider text-muted-foreground">Selected run</p>
+            <p className="mb-3 text-xs uppercase tracking-wider text-muted-foreground">Selected text</p>
             {!selectedSegment ? (
               <p className="text-sm text-muted-foreground">
-                Click any run in the document to see what the engine thinks it is, and change it.
+                Click any text in the document to see how it will be treated, and change it.
               </p>
             ) : (
               <div className="space-y-3">
@@ -994,8 +1035,8 @@ function TemplateEditorPage() {
                       onChange={(e) => update((s) => ({ ...s, emit: e.target.checked ? false : undefined }))}
                     />
                     <span>
-                      Leave this out of the published template. The compile marks the instructions
-                      it recognised; you decide whether each one was written for you or for the
+                      Leave this out of the published template. Instructions found in the template
+                      are marked for you; you decide whether each one was written for you or for the
                       reader.
                     </span>
                   </label>
@@ -1013,7 +1054,7 @@ function TemplateEditorPage() {
               {lint && (lint.can_publish
                 ? <span
                     className="inline-flex items-center gap-1 text-xs text-emerald-500"
-                    title="These checks read the blueprint. Publishing runs a stricter set against the document it writes, so it can still refuse."
+                    title="These checks cover the draft. Publishing checks the finished template again, so it can still stop."
                   >
                     {/* Not "ready": this pass writes no document, and the check
                         that asks an emitted file what is still wrong only runs
@@ -1032,11 +1073,10 @@ function TemplateEditorPage() {
             {blueprint.kind === "legacy" && (
               <div className="mb-3 rounded-lg border border-border bg-background/40 p-2.5 text-xs">
                 <p className="text-muted-foreground">
-                  These checks read the draft, not the finished file. Publishing has the engine
-                  read the document it writes and build its rules from <em>that</em>, so a finding
-                  here describes the reading this editor is carrying rather than the one that will
-                  ship — and one you have already fixed in the document may still be
-                  listed. They are worth reading before you publish, not worth being stopped by.
+                  These checks cover the draft, not the finished file. Publishing reads the
+                  template again from <em>your edited document</em>, so something you have already
+                  fixed may still be listed here. They are worth reading before you publish, not
+                  worth being stopped by.
                 </p>
               </div>
             )}
@@ -1064,11 +1104,11 @@ function TemplateEditorPage() {
                     className={cn("w-full rounded-lg border p-2.5 text-left text-xs",
                                   SEVERITY_STYLE[f.severity] ?? SEVERITY_STYLE.advisory)}
                   >
-                    <div className="mb-0.5 flex items-center gap-1.5 font-mono text-[10px] uppercase opacity-70">
-                      {f.severity} · {f.code}
+                    <div className="mb-0.5 flex items-center gap-1.5 text-[10px] uppercase opacity-70">
+                      {severityLabel(f.severity)}
                       {f.paragraph_index != null && <span>· paragraph {f.paragraph_index}</span>}
                     </div>
-                    <div className="leading-snug">{f.detail}</div>
+                    <div className="leading-snug">{lintText(f.code, f.severity)}</div>
                   </button>
                 ))}
               </div>
@@ -1087,8 +1127,7 @@ function TemplateEditorPage() {
                   template) the publish toast says so at the moment it happens,
                   which is where that belongs. */}
               <p className="text-muted-foreground">
-                The template and the rules that fill it are both live. Documents generated from
-                this project use this version.
+                Your template is live. Documents generated from this project use this version.
               </p>
             </div>
           )}
@@ -1152,7 +1191,7 @@ function XrayLegend({ counts, filter, onFilter }: {
                 "active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40",
                 on ? style.chipOn : style.chip,
               )}
-              title={count === 0 ? undefined : on ? "Show every classification again"
+              title={count === 0 ? undefined : on ? "Show everything again"
                                                   : `Dim everything that is not ${style.label.toLowerCase()}`}
             >
               <span className={cn("h-1.5 w-1.5 rounded-full", style.dot)} />
@@ -1185,9 +1224,8 @@ function XrayLegend({ counts, filter, onFilter }: {
       </div>
 
       <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-        Blue runs are placeholders, red runs are author instructions — that is the classification,
-        read from the colours the document itself carries. Merge fields are Word&rsquo;s own.
-        The x-ray covers the body shown below; headers and footers are not part of this view.
+        Highlighted text shows what will be filled in and what will be removed from the final
+        document. The x-ray covers the body shown below; headers and footers are not part of this view.
       </p>
     </FadeIn>
   );
@@ -1265,8 +1303,11 @@ function XrayTooltip({ container, active, paragraphs, objectIndex }: {
   if (!style) return null;
 
   const object = objectForRun(at.paragraphIndex, segment, objectIndex);
-  const expression = object?.object_type === "CONDITION"
-    ? String(object.expression ?? "").trim() : "";
+  // Never the raw id or expression: a name the author would recognise, and the
+  // condition in words when the payload carries them.
+  const name = objectName(object);
+  const condition = object?.object_type === "CONDITION"
+    ? (conditionWords(object) || "Shown only when its condition is met") : "";
   // The author's own sentence, quoted back. Deliberately not run through
   // `plainly()`: that rewrites our vocabulary on the way to the screen, and this
   // string is not ours -- it is a line out of the customer's template, and
@@ -1303,14 +1344,12 @@ function XrayTooltip({ container, active, paragraphs, objectIndex }: {
           </p>
         )}
 
-        {object?.object_id && (
-          <p className="mt-1.5 break-all font-mono text-[11px] text-muted-foreground">
-            {String(object.object_id)}
-          </p>
+        {name && (
+          <p className="mt-1.5 break-words text-[11px] text-muted-foreground">{name}</p>
         )}
 
-        {expression && (
-          <p className="mt-1 break-all font-mono text-[11px] text-foreground/90">{expression}</p>
+        {condition && (
+          <p className="mt-1 break-words text-[11px] text-foreground/90">{condition}</p>
         )}
 
         {compiledFrom && (
@@ -1458,7 +1497,7 @@ function RunToolbar({ container, anchorKey, segment, onRole, onEmit, onDismiss }
               type="button"
               aria-pressed={segment.emit === false}
               onClick={() => onEmit(segment.emit !== false)}
-              title="Keep this instruction out of the file that ships. The reading marks the instructions it recognised; you decide whether each one was written for you or for the reader."
+              title="Keep this instruction out of the final document. You decide whether each instruction was written for you or for the reader."
               className={cn(
                 "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium",
                 "transition-[scale,color,background-color] duration-150 ease-out active:scale-[0.98]",
@@ -1479,19 +1518,9 @@ function RunToolbar({ container, anchorKey, segment, onRole, onEmit, onDismiss }
 
 
 /**
- * Remove this template, under the chat that edits it.
- *
- * Two outcomes, and the difference is worth being honest about rather than
- * hiding behind one word. A template nothing has been published from is deleted:
- * it comes off the list and the retention sweep destroys the file later. One
- * that *has* been published is refused, because letters already sent name the
- * version they came from -- and for those the server offers an archive, which
- * takes it off the list and leaves everything generated from it alone.
- *
- * The refusal is the common case now, not the rare one: compiling approves its
- * own reading, so almost every template that has been read has an approved
- * manifest. So rather than showing the user a 409 and stopping, this asks the
- * question again with the honest answer attached.
+ * Remove this template, under the chat that edits it. The question itself --
+ * delete, or archive when something was published from it -- lives in
+ * DeleteTemplateDialog, which the Templates list uses too.
  */
 function DeleteTemplatePanel({ blueprintId, name, open, onOpenChange, onGone }: {
   blueprintId: string;
@@ -1500,40 +1529,6 @@ function DeleteTemplatePanel({ blueprintId, name, open, onOpenChange, onGone }: 
   onOpenChange: (v: boolean) => void;
   onGone: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  /** Set when the server refused the delete because something was published
-   *  from this template. Carries the reason it gave. */
-  const [inUse, setInUse] = useState<string | null>(null);
-
-  const run = async (archive: boolean) => {
-    setBusy(true);
-    try {
-      if (archive) {
-        await api.archiveBlueprint(blueprintId);
-        toast.success("Template archived", {
-          description: `${name} is off the list. Everything generated from it is unchanged.`,
-        });
-      } else {
-        await api.deleteBlueprint(blueprintId);
-        toast.success("Template deleted", { description: name });
-      }
-      onOpenChange(false);
-      onGone();
-    } catch (e: any) {
-      if (!archive && e?.code === "BLUEPRINT_IN_USE") {
-        // Not an error to report and stop on -- it is the answer to a question
-        // the user has not been asked yet.
-        setInUse(e?.message ?? "Something has been published from this template.");
-        return;
-      }
-      toast.error(archive ? "Could not archive this template" : "Could not delete this template", {
-        description: e?.message ?? String(e),
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="rounded-xl border border-destructive/25 bg-destructive/5 p-4">
       <p className="mb-1 flex items-center gap-1.5 text-xs font-medium text-destructive">
@@ -1544,42 +1539,11 @@ function DeleteTemplatePanel({ blueprintId, name, open, onOpenChange, onGone }: 
       </p>
       <Button variant="outline" size="sm"
               className="w-full gap-2 border-destructive/40 text-destructive hover:bg-destructive/10"
-              onClick={() => { setInUse(null); onOpenChange(true); }}>
+              onClick={() => onOpenChange(true)}>
         <Trash2 className="h-3.5 w-3.5" /> Delete template
       </Button>
-
-      <AlertDialog open={open} onOpenChange={(o) => { if (!busy) { onOpenChange(o); if (!o) setInUse(null); } }}>
-        <AlertDialogContent className="border-border bg-surface">
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {inUse ? `Archive “${name}” instead?` : `Delete “${name}”?`}
-            </AlertDialogTitle>
-            <AlertDialogDescription className="whitespace-pre-line">
-              {inUse
-                ? `${inUse}\n\nArchiving takes it off the Templates list and changes nothing else: `
-                  + "the template, its versions and every document generated from it stay exactly "
-                  + "as they are. Documents already sent keep working."
-                : "This removes the template from the list. Anything already compiled or generated "
-                  + "from it is kept, and the file itself is destroyed later by the retention sweep, "
-                  + "on the schedule your organisation set."}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={busy}
-              className={cn("bg-destructive text-destructive-foreground hover:bg-destructive/90")}
-              // Radix closes on action click; the dialog stays up while the
-              // request is in flight so the disabled state is visible, a second
-              // click cannot fire it, and the refusal above can replace the
-              // question in place rather than after a close and a reopen.
-              onClick={(e) => { e.preventDefault(); void run(inUse != null); }}
-            >
-              {busy ? "Working…" : inUse ? "Archive it" : "Delete template"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <DeleteTemplateDialog blueprintId={blueprintId} name={name} open={open}
+                            onOpenChange={onOpenChange} onGone={onGone} />
     </div>
   );
 }
@@ -1614,8 +1578,9 @@ function CopilotPanel({ blueprintId, versionNo, onApplied }: {
       setProposal(await api.blueprintCopilot(blueprintId, { message: message.trim(), mode }));
     } catch (e: any) {
       toast.error(
-        e?.code === "LLM_NOT_CONFIGURED" ? "No language model is configured" : "Could not ask",
-        { description: e?.message ?? String(e), duration: 8000 });
+        e?.code === "LLM_NOT_CONFIGURED" ? READING_UNAVAILABLE : "Could not ask",
+        { description: e?.code === "LLM_NOT_CONFIGURED" ? undefined : plainly(e?.message ?? String(e)),
+          duration: 8000 });
     } finally { setAsking(false); }
   };
 
@@ -1632,7 +1597,7 @@ function CopilotPanel({ blueprintId, versionNo, onApplied }: {
       setMessage("");
       await onApplied();
     } catch (e: any) {
-      toast.error("Could not apply", { description: e?.message ?? String(e) });
+      toast.error("Could not apply", { description: plainly(e?.message ?? String(e)) });
     } finally { setAsking(false); }
   };
 
@@ -1685,7 +1650,7 @@ function CopilotPanel({ blueprintId, versionNo, onApplied }: {
         <div className="mt-3 space-y-2">
           {proposal.answers?.map((a: any, i: number) => (
             <div key={i} className="rounded-lg border border-border bg-muted/40 p-2.5 text-xs">
-              <p className="leading-snug">{a.answer}</p>
+              <p className="leading-snug">{plainly(a.answer)}</p>
               {a.paragraph_indices?.length > 0 && (
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   paragraphs {a.paragraph_indices.join(", ")}
@@ -1695,7 +1660,7 @@ function CopilotPanel({ blueprintId, versionNo, onApplied }: {
           ))}
           {!proposal.answers?.length && (
             <p className="text-xs text-muted-foreground">
-              Nothing in the template or its lineage answers that.
+              Nothing in the template or its history answers that.
             </p>
           )}
         </div>
@@ -1711,8 +1676,8 @@ function CopilotPanel({ blueprintId, versionNo, onApplied }: {
               </p>
               {proposal.operations.map((op: any, i: number) => (
                 <div key={i} className="rounded-lg border border-border bg-muted/40 p-2.5 text-xs">
-                  <div className="font-mono text-[10px] uppercase opacity-70">{op.op}</div>
-                  {op.reason && <div className="mt-0.5 leading-snug">{op.reason}</div>}
+                  <div className="text-[10px] uppercase opacity-70">{OP_LABEL[op.op] ?? "Change"}</div>
+                  {op.reason && <div className="mt-0.5 leading-snug">{plainly(op.reason)}</div>}
                 </div>
               ))}
               <Button size="sm" onClick={apply} disabled={asking} className="w-full gap-1.5">
@@ -1737,7 +1702,7 @@ function CopilotPanel({ blueprintId, versionNo, onApplied }: {
                 {proposal.rejected.length} suggestion{proposal.rejected.length === 1 ? "" : "s"} refused
               </p>
               {proposal.rejected.slice(0, 3).map((r: any, i: number) => (
-                <p key={i} className="leading-snug opacity-90">{r.reason}</p>
+                <p key={i} className="leading-snug opacity-90">{plainly(r.reason)}</p>
               ))}
             </div>
           )}

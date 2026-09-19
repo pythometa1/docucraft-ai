@@ -101,7 +101,11 @@ def docprops_failures(template_path: str, output_path: str) -> list:
     title or the revision of an approved template with nothing noticing. So the
     same normalisation is applied to both sides and what is left is compared: the
     clocks are ignored *because* the writer is known to set them, and everything
-    else in the part is still gated.
+    else in the part is still gated. "The same normalisation" includes the
+    removal of the template's internal bookkeeping (description, keywords,
+    subject, category, status, last editor, revision count): the writer is known
+    to remove those, so they are forgiven on both sides, while a render that
+    changed the title or the author is still refused.
 
     A template with no core properties is not a failure. python-docx synthesises
     the part on save, which is an addition the writer is entitled to make and the
@@ -120,8 +124,8 @@ def docprops_failures(template_path: str, output_path: str) -> list:
         if normalise_core_properties(before) != normalise_core_properties(after):
             return [
                 f"Part changed that the engine must not touch: {CORE_PROPERTIES_PART} "
-                "(compared with the render timestamps normalised, so this is a real edit to the "
-                "author, title or revision the template carried)"
+                "(compared with the render timestamps and internal properties normalised, so this "
+                "is a real edit to the author or title the template carried)"
             ]
     except NotAPackage as exc:
         return [str(exc)]

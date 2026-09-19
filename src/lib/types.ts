@@ -10,7 +10,8 @@ export type FunctionKey =
   | "Marketing"
   | "Legal"
   | "Finance"
-  | "Regulatory Affairs";
+  | "Regulatory Affairs"
+  | "Other";
 
 export interface TemplateFile {
   /** Set when a blueprint is already open on this template, so the row can offer
@@ -37,6 +38,72 @@ export interface TemplateFile {
    *  which is the moment somebody can still change the template. */
   unfillable: UnfillablePlaceholder[];
   unfillableCount: number;
+  /** A background reading in progress, from the templates list, so a reload
+   *  can re-attach to it. Null when the template is idle. */
+  reading?: TemplateReadingRef | null;
+}
+
+/* ---- Reading a template in the background ----
+ * `POST /templates/{id}/compile-manifest?background=true` answers 202 with the
+ * token; `GET /jobs/{token}` then carries the three public steps, the counts
+ * known so far and, once finished, the result. Nothing about how it is done. */
+
+export type ReadingStepKey = "read" | "analyse" | "finish";
+export type ReadingStepStatus = "pending" | "running" | "done" | "failed";
+
+export interface ReadingStep {
+  key: ReadingStepKey | string;
+  label: string;
+  status: ReadingStepStatus;
+  elapsed_seconds?: number | null;
+}
+
+/** Each count appears only once it is actually known. */
+export interface ReadingFacts {
+  placeholders_found?: number;
+  instructions_found?: number;
+  word_fields_found?: number;
+  values_found?: number;
+  optional_sections_found?: number;
+}
+
+export interface ReadingResult {
+  manifest_id: string;
+  status: string;
+  document_summary?: {
+    paragraph_count: number | null;
+    placeholder_count: number | null;
+    instruction_count: number | null;
+    word_field_count: number | null;
+  };
+  field_count: number;
+  condition_count: number;
+  warning_count: number;
+  approval_blocked_reason?: string | null;
+  failure_reason?: string | null;
+}
+
+export interface ReadingStarted {
+  progress_token: string;
+  status: "running";
+}
+
+export interface ReadingJob {
+  id: string;
+  status: "running" | "done" | "failed" | string;
+  error: string | null;
+  stages?: ReadingStep[];
+  elapsed_seconds?: number | null;
+  facts?: ReadingFacts;
+  result?: ReadingResult | null;
+  template_file_id?: string | null;
+}
+
+export interface TemplateReadingRef {
+  progressToken: string;
+  status: string;
+  /** 0-based index of the step under way. */
+  stepIndex: number;
 }
 
 export interface UnfillablePlaceholder {
@@ -271,30 +338,27 @@ export interface TopTemplates {
   total_documents: number;
 }
 
-export interface CostSlice {
-  key: string;
+/** Spend on one activity, in the product's words ("Template reading",
+ *  "Drafting", "Chat", "Editing", "Other"). No model and no token count: the
+ *  server keeps those, and they describe how the product runs, not what the
+ *  customer did. */
+export interface CostActivity {
+  activity: string;
   calls: number;
-  tokens: number;
   cost_usd: number | null;
 }
 
 export interface CostReport {
   summary: {
     calls: number;
-    input_tokens: number;
-    output_tokens: number;
-    total_tokens: number;
     cost_usd: number | null;
+    /** Calls that could not be priced -- a count, never which models. */
     unpriced_calls: number;
-    unpriced_models: string[];
   };
-  trend: { granularity: "day" | "week"; models: string[]; items: Record<string, any>[] };
-  by_model: CostSlice[];
-  by_operation: CostSlice[];
-  by_template: {
-    template_file_id: string; name: string; calls: number; tokens: number;
-    cost_usd: number | null;
-  }[];
+  /** Total spend per bucket, as one series. */
+  trend: { granularity: "day" | "week"; items: { bucket: string; cost_usd: number }[] };
+  by_activity: CostActivity[];
+  by_template: { template_file_id: string; name: string; cost_usd: number | null }[];
 }
 
 export interface CompileReport {
@@ -302,9 +366,9 @@ export interface CompileReport {
   failed: number;
   by_status: Record<string, number>;
   duration: {
-    operation: string;
+    /** A neutral name for what was timed, e.g. "Template reading time". */
+    label: string;
     target: string;
-    target_ms: number;
     status: "meeting" | "breaching" | "unmeasured";
     measured: { samples: number; p50_ms: number; p95_ms: number; worst_ms: number } | null;
     failed_runs: number;
@@ -631,7 +695,6 @@ export type CmcDraft = {
   version: number;
   content: string;
   created_by: string;
-  model: string | null;
   generation_params: Record<string, unknown>;
   created_at: string;
 };
@@ -1011,7 +1074,6 @@ export type PvDraft = {
   content: string;
   /** model | edited | carried_forward */
   origin: string;
-  model: string | null;
   prompt_version: string | null;
   created_by: string;
   created_at: string;
@@ -1217,7 +1279,6 @@ export type CsrDraft = {
   version: number;
   content: string;
   created_by: string; // "ai" or a user id
-  model: string | null;
   generation_params: Record<string, unknown>;
   created_at: string;
   citations: CsrCitation[];
@@ -1256,3 +1317,29 @@ export type TableRowSpec = {
   empty_behaviour: string;
   required?: boolean;
 };
+
+/* ---- the authoring guide (GET /guide) ---- */
+
+export type GuideBlock =
+  | { type: "p"; text: string }
+  | { type: "steps"; items: { title: string; text: string }[] }
+  | { type: "swatches"; items: { colour: string; name: string; means: string; hexes: string }[] }
+  | { type: "highlights"; text: string; items: { colour: string; label: string; means: string }[] }
+  | { type: "note"; tone: "info" | "warning"; title: string; text: string }
+  | { type: "code"; lang: string; text: string }
+  | { type: "table"; columns: string[]; rows: string[][] }
+  | { type: "cards"; items: { title: string; text: string }[] }
+  | { type: "endpoints"; title: string; items: [string, string, string][] };
+
+export interface GuideSection {
+  id: string;
+  eyebrow?: string;
+  title: string;
+  blocks: GuideBlock[];
+}
+
+export interface Guide {
+  title: string;
+  intro: string;
+  sections: GuideSection[];
+}

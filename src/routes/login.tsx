@@ -98,8 +98,7 @@ function Login() {
           </Button>
 
           <p className="text-xs text-muted-foreground">
-            No account yet? Create the first one on the server with{" "}
-            <code className="text-[11px]">python -m app.bootstrap</code>.
+            No account yet? Ask your administrator for an account.
           </p>
         </form>
       </div>

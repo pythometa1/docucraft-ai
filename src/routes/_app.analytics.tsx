@@ -17,8 +17,11 @@
  *
  * **Colour identifies a series, and never alone.** The palette is the six
  * validated categorical slots in `styles.css`, assigned in fixed order so a
- * filter that drops a model does not repaint the others, and every chart with
- * more than one series carries a labelled legend.
+ * bar keeps its colour when a neighbour disappears.
+ *
+ * Spend is reported as one total over time and by activity, in the product's
+ * words. The server does not send which models ran or how many tokens they
+ * took, so nothing here draws them.
  */
 
 import { createFileRoute } from "@tanstack/react-router";
@@ -33,7 +36,6 @@ import {
 
 import { api } from "@/lib/api";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
-import type { ChartConfig } from "@/components/ui/chart";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ErrorBanner } from "@/components/error-banner";
 import {
@@ -50,7 +52,7 @@ export const Route = createFileRoute("/_app/analytics")({
   head: () => ({
     meta: [
       { title: "Analytics — DocuMind AI" },
-      { name: "description", content: "Documents produced, templates processed, time taken, tokens consumed and what it cost." },
+      { name: "description", content: "Documents produced, templates processed, time taken and what it cost." },
     ],
   }),
   component: AnalyticsPage,
@@ -62,24 +64,6 @@ const RANGES: { key: AnalyticsRange; label: string }[] = [
   { key: "90d", label: "90 days" },
   { key: "1y", label: "12 months" },
 ];
-
-/**
- * The spend buckets in the product's words rather than the engine's.
- *
- * `compile` is one of six grouping keys the server sends, and it was the axis
- * tick and the tooltip heading on this page -- the one place the internal name
- * for reading a template reached a customer's screen through a chart. The keys
- * are left exactly as they arrive: they are what the bars are keyed and ordered
- * on, and only the text a person reads is rewritten.
- */
-const OPERATION_LABEL: Record<string, string> = {
-  compile: "Processing",
-  authoring: "Authoring",
-  generate: "Generating",
-  edit: "Editing",
-  chat: "Chat",
-  other: "Other",
-};
 
 /**
  * How long a bar takes to grow out of its baseline, in the milliseconds recharts
@@ -159,7 +143,7 @@ function AnalyticsPage() {
           <div>
             <h1 className="text-2xl font-semibold tracking-tight text-gradient">Analytics</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              What was produced, how long it took, and what the model calls cost.
+              What was produced, how long it took, and what it cost.
             </p>
           </div>
           <div className="flex items-center gap-1.5">
@@ -195,7 +179,7 @@ function AnalyticsPage() {
 
         {firstLoad ? <AnalyticsSkeleton /> : kpis == null ? null : (
           <>
-            {/* Tiles. Six of them, and the two speed figures §6 asks for --
+            {/* Tiles. Five of them, and the two speed figures §6 asks for --
                 `compile_p95_seconds` and `seconds_per_document` -- are already
                 among them: the server ranks every tile it can measure and this
                 grid renders all of them rather than a hand-picked subset, so a
@@ -212,10 +196,8 @@ function AnalyticsPage() {
               <div className="flex items-start gap-2 rounded-xl border border-ai-uncertain/40 bg-ai-uncertain/10 p-3 text-xs text-ai-uncertain">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 <span>
-                  {cost.summary.unpriced_calls} call{cost.summary.unpriced_calls === 1 ? "" : "s"} used a
-                  model with no configured rate ({cost.summary.unpriced_models.join(", ")}), so the spend
-                  above excludes them. Set a rate in Settings and future calls will be costed — the ones
-                  already recorded keep the rate that was in force when they ran.
+                  {cost.summary.unpriced_calls} item{cost.summary.unpriced_calls === 1 ? "" : "s"} could
+                  not be priced, so the spend above excludes {cost.summary.unpriced_calls === 1 ? "it" : "them"}.
                 </span>
               </div>
             ) : null}
@@ -253,92 +235,49 @@ function AnalyticsPage() {
 
               <Panel title="Spend over time"
                      delay={staggerDelay(1, STEP_MS)}
-                     subtitle={cost?.trend.models.length
-                       ? `${cost.trend.models.length} model${cost.trend.models.length === 1 ? "" : "s"}, stacked`
-                       : undefined}>
-                {cost && cost.trend.models.length > 0 ? (
-                  <>
-                    <ChartContainer
-                      config={Object.fromEntries(cost.trend.models.map((m, i) => [
-                        m, { label: m, color: SERIES[i % SERIES.length] },
-                      ])) as ChartConfig}
-                      className="h-[220px] w-full"
-                    >
-                      <BarChart data={cost.trend.items} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                        <CartesianGrid vertical={false} strokeOpacity={0.15} />
-                        <XAxis dataKey="bucket" tickLine={false} axisLine={false} tickMargin={8}
-                               minTickGap={24} tickFormatter={(v: string) => v.slice(5)}
-                               className="text-[10px]" />
-                        <YAxis tickLine={false} axisLine={false} width={44}
-                               tickFormatter={(v: number) => `$${v < 1 ? v.toFixed(2) : v.toFixed(0)}`}
-                               className="text-[10px]" />
-                        <ChartTooltip content={<ChartTooltipContent />} />
-                        {cost.trend.models.map((m, i) => (
-                          // A 2px gap between stacked segments, so adjacent fills of
-                          // similar hue never read as one block.
-                          //
-                          // The palette value directly, never `var(--color-${m})`. A
-                          // model name is server data and goes into `dataKey`
-                          // unchanged, but a CSS custom property name has to be a
-                          // <dashed-ident> and `.` is not a valid ident character --
-                          // so on a Gemini deployment (`gemini-2.5-pro`,
-                          // `gemini-3.6-flash` are the shipped defaults in config.py)
-                          // both the declaration and the reference failed to parse,
-                          // `fill` fell back to black, and the legend underneath --
-                          // which uses this same array inline -- contradicted the
-                          // chart it was labelling. The tooltip reads `payload.fill`,
-                          // so it follows this and stays correct too.
-                          //
-                          // Every segment of a stack grows on the same beat.
-                          // Staggering them would show the top of a column
-                          // hanging in mid-air over a segment that had not
-                          // arrived, which reads as a gap in the data.
-                          <Bar key={m} dataKey={m} stackId="cost" fill={SERIES[i % SERIES.length]}
-                               stroke="var(--color-card)" strokeWidth={2}
-                               isAnimationActive={!reduced} animationDuration={CHART_MS}
-                               animationEasing="ease-out"
-                               radius={i === cost.trend.models.length - 1 ? [4, 4, 0, 0] : 0} />
-                        ))}
-                      </BarChart>
-                    </ChartContainer>
-                    {/* The legend is not optional: identity must never be colour
-                        alone, and three of the light-mode slots sit under 3:1 on
-                        white. */}
-                    <Legend items={cost.trend.models.map((m, i) => ({
-                      label: m, color: SERIES[i % SERIES.length],
-                      value: money(cost.by_model.find((r) => r.key === m)?.cost_usd ?? null),
-                    }))} />
-                  </>
+                     subtitle={cost?.trend.granularity === "week" ? "By week, UTC" : "By day, UTC"}>
+                {cost && cost.trend.items.some((i) => i.cost_usd > 0) ? (
+                  // One series: the total. Which models made it up is not sent.
+                  <ChartContainer config={{ cost_usd: { label: "Spend", color: SERIES[0] } }}
+                                  className="h-[220px] w-full">
+                    <BarChart data={cost.trend.items} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                      <CartesianGrid vertical={false} strokeOpacity={0.15} />
+                      <XAxis dataKey="bucket" tickLine={false} axisLine={false} tickMargin={8}
+                             minTickGap={24} tickFormatter={(v: string) => v.slice(5)}
+                             className="text-[10px]" />
+                      <YAxis tickLine={false} axisLine={false} width={44}
+                             tickFormatter={(v: number) => `$${v < 1 ? v.toFixed(2) : v.toFixed(0)}`}
+                             className="text-[10px]" />
+                      <ChartTooltip content={<ChartTooltipContent />} />
+                      <Bar dataKey="cost_usd" fill="var(--color-cost_usd)" radius={[4, 4, 0, 0]}
+                           isAnimationActive={!reduced} animationDuration={CHART_MS}
+                           animationEasing="ease-out" />
+                    </BarChart>
+                  </ChartContainer>
                 ) : (
                   <Empty icon={<CircleDollarSign className="h-5 w-5" />} title="No spend recorded">
-                    No model call has been recorded in this window.
+                    Nothing billable was recorded in this window.
                   </Empty>
                 )}
               </Panel>
 
-              <Panel title="What the spend was on" subtitle="By operation"
+              <Panel title="Spend by activity" subtitle="What the spend was on"
                      delay={staggerDelay(2, STEP_MS)}>
-                {cost && cost.by_operation.length > 0 ? (
-                  <ChartContainer
-                    config={{
-                      cost_usd: { label: "Spend" },
-                      ...Object.fromEntries(
-                        Object.entries(OPERATION_LABEL).map(([key, label]) => [key, { label }]),
-                      ),
-                    } as ChartConfig}
-                    className="h-[200px] w-full"
-                  >
-                    <BarChart data={cost.by_operation} layout="vertical"
+                {cost && cost.by_activity.length > 0 ? (
+                  <ChartContainer config={{ cost_usd: { label: "Spend" } }}
+                                  className="h-[200px] w-full">
+                    <BarChart data={cost.by_activity} layout="vertical"
                               margin={{ top: 4, right: 48, left: 8, bottom: 4 }}>
                       <XAxis type="number" hide />
-                      <YAxis type="category" dataKey="key" tickLine={false} axisLine={false}
-                             width={78} className="text-[11px]"
-                             tickFormatter={(v: string) => OPERATION_LABEL[v] ?? plainly(v)} />
+                      {/* The server already names each activity in the product's
+                          words, so the label is printed as it arrives. */}
+                      <YAxis type="category" dataKey="activity" tickLine={false} axisLine={false}
+                             width={110} className="text-[11px]" />
                       <ChartTooltip content={<ChartTooltipContent />} />
                       <Bar dataKey="cost_usd" radius={[0, 4, 4, 0]} barSize={18}
                            isAnimationActive={!reduced} animationDuration={CHART_MS}
                            animationEasing="ease-out">
-                        {cost.by_operation.map((_row, i) => (
+                        {cost.by_activity.map((_row, i) => (
                           <Cell key={i} fill={SERIES[i % SERIES.length]} />
                         ))}
                         <LabelList dataKey="cost_usd" position="right"
@@ -349,7 +288,7 @@ function AnalyticsPage() {
                   </ChartContainer>
                 ) : (
                   <Empty icon={<PieChart className="h-5 w-5" />} title="Nothing to attribute">
-                    No priced call has been recorded against an operation yet.
+                    No priced activity has been recorded yet.
                   </Empty>
                 )}
               </Panel>
@@ -426,8 +365,7 @@ function AnalyticsPage() {
                     </div>
                     {templates.covered_documents < templates.total_documents && (
                       <p className="mt-2 text-[11px] text-muted-foreground">
-                        Documents produced outside the template pipeline carry no template record, so
-                        they are not ranked here.
+                        Documents not made from a saved template are not ranked here.
                       </p>
                     )}
                   </>
@@ -438,7 +376,7 @@ function AnalyticsPage() {
                 )}
               </Panel>
 
-              <Panel title="Processing templates" subtitle="Reading a template into rules the engine can run"
+              <Panel title="Processing templates" subtitle="Getting new templates ready to use"
                      delay={staggerDelay(1, STEP_MS)}>
                 <div className="grid grid-cols-2 gap-3">
                   {/* Every `count` below is handed a figure only where one was
@@ -448,17 +386,17 @@ function AnalyticsPage() {
                       being reported as nothing. */}
                   <Figure label="Templates processed"
                           count={compiles ? { target: compiles.compiled, format: whole } : undefined} />
-                  <Figure label="Runs that stopped"
+                  <Figure label="Could not be set up"
                           count={compiles ? { target: compiles.failed, format: whole } : undefined}
                           tone={compiles?.failed ? "warn" : undefined} />
                   <Figure
-                    label="Median run"
+                    label="Typical time"
                     count={compiles?.duration?.measured
                       ? { target: compiles.duration.measured.p50_ms / 1000, format: seconds }
                       : undefined}
                     hint={compiles?.duration?.measured ? undefined : "Nothing has been timed yet."} />
                   <Figure
-                    label="Slowest run"
+                    label="Longest time"
                     count={compiles?.duration?.measured
                       ? { target: compiles.duration.measured.worst_ms / 1000, format: seconds }
                       : undefined}
@@ -477,30 +415,6 @@ function AnalyticsPage() {
               </Panel>
             </div>
 
-            {cost && (
-              <Panel title="Token usage" subtitle="Input and output across every model call"
-                     delay={staggerDelay(2, STEP_MS)}>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  <Figure label="Calls"
-                          count={{ target: cost.summary.calls, format: (n) => compact(Math.round(n)) }} />
-                  <Figure label="Input tokens"
-                          count={{ target: cost.summary.input_tokens, format: (n) => compact(Math.round(n)) }} />
-                  <Figure label="Output tokens"
-                          count={{ target: cost.summary.output_tokens, format: (n) => compact(Math.round(n)) }} />
-                  {/* The one figure here that can be absent. `cost_usd` is null
-                      when no call in the window carried a priced model, which is
-                      not a spend of nothing -- so it keeps the dash and states
-                      the reason rather than counting up to $0.00. */}
-                  <Figure label="Total spend"
-                          count={cost.summary.cost_usd != null
-                            ? { target: cost.summary.cost_usd, format: money }
-                            : undefined}
-                          hint={cost.summary.cost_usd == null
-                            ? "No priced model call in this window."
-                            : undefined} />
-                </div>
-              </Panel>
-            )}
           </>
         )}
       </div>
@@ -597,11 +511,6 @@ function StatTile({ stat }: { stat: Stat }) {
           {compact(stat.sample.all_time ?? 0)} all time
         </p>
       )}
-      {stat.available && stat.key === "tokens_consumed" && (
-        <p className="mt-1 text-[11px] text-muted-foreground">
-          {compact(stat.sample.input ?? 0)} in · {compact(stat.sample.output ?? 0)} out
-        </p>
-      )}
     </div>
   );
 }
@@ -640,20 +549,6 @@ function Panel({ title, subtitle, delay = 0, children }: {
       </div>
       {children}
     </Reveal>
-  );
-}
-
-function Legend({ items }: { items: { label: string; color: string; value?: string }[] }) {
-  return (
-    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5">
-      {items.map((item) => (
-        <span key={item.label} className="inline-flex items-center gap-1.5 text-[11px]">
-          <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: item.color }} />
-          <span className="text-muted-foreground">{item.label}</span>
-          {item.value && <span className="tabular-nums text-foreground">{item.value}</span>}
-        </span>
-      ))}
-    </div>
   );
 }
 

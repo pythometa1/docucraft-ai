@@ -20,6 +20,7 @@ produce something that looks submittable and is not.
 """
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from app.docgen import assembly as _assembly
@@ -160,7 +161,31 @@ def write_docx(body: dict, output_path: str) -> str:
             document.save(output_path)
     except Exception:  # noqa: BLE001 - borders are cosmetic; the content is not
         pass
-    return output_path
+    # The border pass saved through python-docx again, which restamps every
+    # zip entry with the clock; the same body must still give the same bytes.
+    from app.generation.reproducibility import normalise_docx
+
+    return normalise_docx(output_path)
+
+
+#: Anything that opens like a citation, closed or not.
+_CITATION_LEFT_RE = re.compile(r"\[S\d[^\]\n]{0,40}\]?")
+
+
+def citation_markers(path: str) -> list:
+    """Every citation marker still in the written file: body and table cells.
+
+    Read from the file rather than from the text that went in, because the
+    file is what leaves.
+    """
+    import docx as docx_lib
+
+    document = docx_lib.Document(path)
+    texts = [p.text for p in document.paragraphs]
+    for table in document.tables:
+        for row in table.rows:
+            texts.extend(cell.text for cell in row.cells)
+    return [m.group(0) for text in texts for m in _CITATION_LEFT_RE.finditer(text or "")]
 
 
 def manifest_lines(leaves: dict) -> str:

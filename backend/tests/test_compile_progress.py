@@ -22,6 +22,7 @@ from app.compile_progress import (
     FAILED,
     MODEL,
     RUNNING,
+    STAGE_FAILED_MESSAGE,
     CompileProgress,
     valid_token,
 )
@@ -130,7 +131,14 @@ def test_a_failing_stage_is_recorded_and_the_error_still_raises(org):
     job = _job(token)
     assert job.status == FAILED
     assert job.progress["stages"][0]["status"] == FAILED
-    assert "model refused" in job.progress["stages"][0]["detail"]
+    # The row is polled by the client, so it names the stage and never carries
+    # the exception's own text -- that stays in the server log.
+    assert job.progress["stages"][0]["detail"] == STAGE_FAILED_MESSAGE
+    assert "model refused" not in job.progress["stages"][0]["detail"]
+    assert "model refused" not in (job.error or "")
+    # Named by the public step the stage folds into, never the internal stage:
+    # `error` is returned to the poller as it stands.
+    assert job.error.startswith("Understanding the structure failed.")
 
 
 def test_a_note_lands_on_the_running_stage(org):

@@ -23,11 +23,29 @@ depend only on the two abstract methods below.
 """
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
+
+log = logging.getLogger(__name__)
+
+#: What a caller is told when a provider call raised. The exception itself
+#: names the vendor, the endpoint and sometimes the key's prefix, and
+#: `StructuredResult.error` travels a long way -- into compile notes, stored
+#: transcripts and HTTP responses -- so it is logged here and never carried.
+PROVIDER_CALL_FAILED = "The AI service did not return a usable reply."
+
+#: The client-facing text for LLM_NOT_CONFIGURED. Vendor-neutral on purpose:
+#: which key or setting is missing is the operator's business, and is logged.
+LLM_NOT_CONFIGURED_MESSAGE = "AI features are not available right now. Please contact your administrator."
+
+
+def _call_failed(model: str, exc: Exception) -> "StructuredResult":
+    log.error("Provider call failed (model=%s): %s", model, exc, exc_info=exc)
+    return StructuredResult(data=None, model=model, error=PROVIDER_CALL_FAILED)
 
 
 @dataclass
@@ -183,7 +201,7 @@ class AnthropicProvider(LLMProvider):
         except Exception as exc:
             # Compile-time callers all have a rule-based fallback, so a failure
             # here degrades quality rather than breaking the request.
-            return StructuredResult(data=None, model=model, error=str(exc))
+            return _call_failed(model, exc)
 
 
 class GeminiProvider(LLMProvider):
@@ -307,7 +325,7 @@ class GeminiProvider(LLMProvider):
                 return StructuredResult(data=None, model=model, input_tokens=in_tok, output_tokens=out_tok, error=error)
             return StructuredResult(data=json.loads(raw), model=model, input_tokens=in_tok, output_tokens=out_tok)
         except Exception as exc:
-            return StructuredResult(data=None, model=model, error=str(exc))
+            return _call_failed(model, exc)
 
 
 class OpenAIProvider(LLMProvider):
@@ -433,7 +451,7 @@ class OpenAIProvider(LLMProvider):
                 return StructuredResult(data=None, model=model, input_tokens=in_tok, output_tokens=out_tok, error=error)
             return StructuredResult(data=json.loads(raw), model=model, input_tokens=in_tok, output_tokens=out_tok)
         except Exception as exc:
-            return StructuredResult(data=None, model=model, error=str(exc))
+            return _call_failed(model, exc)
 
 
 class RoutedProvider(LLMProvider):

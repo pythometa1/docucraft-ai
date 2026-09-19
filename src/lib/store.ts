@@ -56,6 +56,9 @@ function mapTemplateFile(t: any): TemplateFile {
     // than after a batch has run and stopped on its canary rows.
     unfillable: t.unfillable ?? [],
     unfillableCount: t.unfillable_count ?? 0,
+    reading: t.reading
+      ? { progressToken: t.reading.progress_token, status: t.reading.status, stepIndex: t.reading.step_index ?? 0 }
+      : null,
   };
 }
 
@@ -185,6 +188,10 @@ export const useStore = create<Store>((set, get) => ({
       else next.unshift(mapped);
       return { projects: next };
     });
+    // A reading still running on the server (after a reload, or started in
+    // another tab) is picked back up here, so its progress keeps arriving.
+    const { attachFromTemplates } = (await import("./background-tasks")).useBackgroundTasks.getState();
+    attachFromTemplates(id, templates.items);
   },
 
   createProject: async (input) => {
@@ -246,17 +253,24 @@ export const useStore = create<Store>((set, get) => ({
 }));
 
 export const FUNCTIONS: FunctionKey[] = [
+  "Human Resources",
+  // Any document none of the functions covers. It runs the same flow as HR:
+  // a Word template, a spreadsheet, one document per row.
+  "Other",
   "Clinical",
   "Quality-CMC",
   "Safety",
   "Medical Affairs",
   "Marketing",
   "Quality",
-  "Human Resources",
   "Legal",
   "Regulatory Affairs",
   "Finance",
 ];
+
+// The functions a new project can be created under today. The rest stay in the
+// picker, marked "Coming soon" and not selectable, until their services are ready.
+export const ACTIVE_FUNCTIONS: ReadonlySet<FunctionKey> = new Set<FunctionKey>(["Human Resources", "Other"]);
 
 export const DOCUMENT_TYPES: Record<string, string[]> = {
   "Human Resources": ["HR Letters", "Offer Letter", "Termination Letter", "Promotion Memo", "Policy Update"],
@@ -272,6 +286,7 @@ export const DOCUMENT_TYPES: Record<string, string[]> = {
   Legal: ["Contract", "NDA", "Legal Memo"],
   "Regulatory Affairs": ["Regulatory Cover Letter", "Submission Package"],
   Finance: ["Invoice", "Quotation", "Purchase Order"],
+  Other: ["General Document", "Letter", "Certificate", "Agreement", "Form", "Notice", "Report"],
 };
 
 export const REGIONS = ["Europe", "North America", "Asia Pacific", "Latin America", "Middle East & Africa", "Global"];
@@ -287,4 +302,5 @@ export const FUNCTION_COLORS: Record<FunctionKey, string> = {
   Legal: "bg-muted text-muted-foreground border-border",
   "Regulatory Affairs": "bg-brand/15 text-brand border-brand/30",
   Finance: "bg-success/15 text-success border-success/30",
+  Other: "bg-muted text-foreground border-border-strong",
 };

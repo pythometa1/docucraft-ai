@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.metrics import TEMPLATE_PARSE, timed
 from app.models import TemplateFile, TemplateSection, TemplateVersion
 from app.templates.parsers.docx_parser import parse_docx_template
+from app.public_errors import public_message
 from app.storage import abs_path
 
 
@@ -47,7 +48,7 @@ def parse_template_version(db: Session, tf: TemplateFile, tv: TemplateVersion) -
         except Exception as exc:  # noqa: BLE001 - an unreadable upload is kept, not lost
             tf.current_version_id = tv.id
             tf.status = "failed"
-            tf.parse_error = f"{type(exc).__name__}: {exc}"
+            tf.parse_error = public_message(exc, "Could not read this PDF template.")
         return
 
     try:
@@ -79,4 +80,6 @@ def parse_template_version(db: Session, tf: TemplateFile, tv: TemplateVersion) -
     except Exception as exc:
         tf.current_version_id = tv.id  # keep the blob reachable for re-parsing
         tf.status = "failed"
-        tf.parse_error = f"Could not parse template: {exc}"
+        # The parser's own text names the path it opened on this host.
+        tf.parse_error = public_message(
+            exc, "Could not parse template. Check that it is a valid Word document.")

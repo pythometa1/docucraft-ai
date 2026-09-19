@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, TableSkeleton } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 export const CMC_DOC_TYPES: [string, string][] = [
   ["spec_ds", "Specification — drug substance"],
@@ -59,9 +60,9 @@ const STRUCTURED = new Set(["coa", "spec_ds", "spec_dp", "spec_excipient",
                             "stability_data", "bmr"]);
 
 const STATUS_LABEL: Record<string, string> = {
-  queued: "Queued", parsing: "Parsing", chunking: "Chunking",
-  extracting: "Reading values", indexing: "Indexing",
-  done: "Indexed", failed: "Failed",
+  queued: "Queued", parsing: "Reading", chunking: "Reading",
+  extracting: "Reading values", indexing: "Preparing",
+  done: "Ready", failed: "Failed",
 };
 
 const BUSY_STATES = ["queued", "parsing", "chunking", "extracting", "indexing"];
@@ -76,12 +77,9 @@ function StatusCell({ document }: { document: CmcDocument }) {
       {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
       {document.processing_status === "done" && <CheckCircle2 className="h-3.5 w-3.5" />}
       {document.processing_status === "failed" && <XCircle className="h-3.5 w-3.5" />}
-      {STATUS_LABEL[document.processing_status] ?? document.processing_status}
-      {document.processing_status === "done" && (
-        <span className="text-muted-foreground">
-          · {document.chunk_count} chunks
-          {STRUCTURED.has(document.doc_type) && `, ${document.value_count} values`}
-        </span>
+      {STATUS_LABEL[document.processing_status] ?? "Processing"}
+      {document.processing_status === "done" && STRUCTURED.has(document.doc_type) && (
+        <span className="text-muted-foreground">· {document.value_count} values</span>
       )}
     </span>
   );
@@ -156,9 +154,9 @@ export function CmcSources({ cmcProjectId, onLoaded }: {
       setStaged([]);
       if (fileInput.current) fileInput.current.value = "";
       await load();
-      toast.success("Uploaded — process them to index and read their values.");
+      toast.success("Uploaded — process them to read their values.");
     } catch (e: any) {
-      toast.error("Upload failed", { description: e?.message ?? String(e) });
+      toast.error("Upload failed", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -171,14 +169,14 @@ export function CmcSources({ cmcProjectId, onLoaded }: {
       toast.info(`Processing ${res.queued} file${res.queued === 1 ? "" : "s"}…`);
       await load();
     } catch (e: any) {
-      toast.error("Could not start processing", { description: e?.message ?? String(e) });
+      toast.error("Could not start processing", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
   }
 
   if (documents === null) return <TableSkeleton rows={4} cols={4} />;
-  if (error) return <ErrorBanner title="Sources could not be loaded" message="Try again in a moment." detail={error} />;
+  if (error) return <ErrorBanner title="Sources could not be loaded" message="Try again in a moment." detail={plainly(error)} />;
 
   const pending = documents.some((d) => ["queued", "failed"].includes(d.processing_status));
 
@@ -189,7 +187,7 @@ export function CmcSources({ cmcProjectId, onLoaded }: {
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
             CMC sources contain trade secrets and confidential business information. Files are
-            restricted to this project's members, are never used for model training, and are
+            restricted to this project's members, are never used to train AI, and are
             purged with the dossier.
           </span>
         </div>
@@ -383,7 +381,7 @@ export function CmcSources({ cmcProjectId, onLoaded }: {
             ))}
             <p className="border-t border-border pt-2 text-xs text-muted-foreground">
               {readiness.ready_to_generate
-                ? "Every required source is indexed. Check its values in Data review before drafting."
+                ? "Every required source is processed. Check its values in Data review before drafting."
                 : readiness.missing_required.length
                   ? `Still missing: ${readiness.missing_required.map((t) => DOC_LABEL[t] ?? t).join(", ")}.`
                   : "Add a deliverable to see what this dossier needs."}

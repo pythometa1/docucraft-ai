@@ -20,7 +20,8 @@ from app.audit.service import log_audit
 from app.db import get_db
 from app.downloads import redeem
 from app.generation.document_status import DOWNLOADABLE
-from app.models import DocumentVersion, GeneratedDocument, Project, User
+from app.generation.filenames import content_disposition, generated_document_filename
+from app.models import DocumentVersion, GeneratedDocument, User
 from app.rate_limit import rate_limit_by_ip
 from app.security import error
 from app.tenancy import set_current_org
@@ -75,6 +76,6 @@ def redeem_download(token: str, request: Request, db: Session = Depends(get_db))
         log_audit(db, user, "Downloaded a document", "document_version", dv.id, gd.project_id, "success")
         db.commit()
 
-    project = db.get(Project, gd.project_id)
-    filename = f"{project.name}_{project.display_id}_{gd.display_id}_{gd.language}.docx"
-    return FileResponse(str(abs_path(dv.blob_path)), filename=filename, media_type=DOCX_MEDIA_TYPE)
+    filename = generated_document_filename(db, gd, "docx")
+    return FileResponse(str(abs_path(dv.blob_path)), media_type=DOCX_MEDIA_TYPE,
+                        headers={"Content-Disposition": content_disposition(filename)})

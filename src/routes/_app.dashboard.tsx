@@ -371,7 +371,7 @@ function Dashboard() {
         <section className="relative isolate flex min-h-[300px] items-center overflow-hidden rounded-2xl surface-raised md:min-h-[360px]">
           <img
             src={aiDocumentHero}
-            alt="Pages of a template streaming into a glowing network core and leaving the other side as finished documents"
+            alt="A template becoming a stack of finished documents"
             className="pointer-events-none absolute inset-0 h-full w-full max-w-full object-cover object-[68%_50%]"
           />
           {/* Two scrims. The horizontal one carries the copy on a wide screen,
@@ -392,9 +392,8 @@ function Dashboard() {
               Welcome, {firstName}
             </h1>
             <p className="mt-3 max-w-xl text-[15px] leading-relaxed text-muted-foreground">
-              Turn a Word template and a spreadsheet into finished documents. The engine reads your
-              template, matches it against your columns and writes one document per row — you see
-              what it understood before anything is generated.
+              Turn a Word template and a spreadsheet into finished documents, one for every row.
+              You check how your data fits the template before anything is generated.
             </p>
             <div className="mt-7">
               <button

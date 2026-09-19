@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/error-banner";
 import { StageSkeleton } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const SEVERITY: Record<string, { label: string; tone: string; Icon: typeof AlertOctagon }> = {
   blocker: { label: "Blockers", tone: "border-destructive/40 bg-destructive/10 text-destructive", Icon: AlertOctagon },
@@ -36,11 +37,11 @@ function FindingRow({ finding }: { finding: CmcFinding }) {
       <div className="flex items-start gap-2">
         <tone.Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
         <div className="min-w-0">
-          <div className="text-foreground">{finding.message}</div>
-          <div className="mt-0.5 flex flex-wrap gap-2 text-[0.65rem] text-muted-foreground">
-            <span className="font-mono">{finding.code}</span>
-            {finding.section_code && <span>section {finding.section_code}</span>}
-          </div>
+          <div className="text-foreground">{plainly(finding.message)}</div>
+          {/* The finding code is an internal key; the message says what to fix. */}
+          {finding.section_code && (
+            <div className="mt-0.5 text-[0.65rem] text-muted-foreground">section {finding.section_code}</div>
+          )}
         </div>
       </div>
     </li>
@@ -54,7 +55,8 @@ export function CmcQuality({ cmcProjectId }: { cmcProjectId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [granularity, setGranularity] = useState("combined");
-  const [citations, setCitations] = useState("inline");
+  // Stripped by default: a citation marker points at a source the recipient never sees.
+  const [citations, setCitations] = useState("stripped");
   const [watermark, setWatermark] = useState(false);
 
   async function load() {
@@ -91,7 +93,7 @@ export function CmcQuality({ cmcProjectId }: { cmcProjectId: string }) {
       toast.success(`Exported ${record.files.length} file${record.files.length === 1 ? "" : "s"}.`);
       await load();
     } catch (e: any) {
-      toast.error("The export was refused", { description: e?.message ?? String(e) });
+      toast.error("The export was refused", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -111,14 +113,14 @@ export function CmcQuality({ cmcProjectId }: { cmcProjectId: string }) {
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch (e: any) {
-      toast.error("Download failed", { description: e?.message ?? String(e) });
+      toast.error("Download failed", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
   }
 
   if (findings === null) return <StageSkeleton lines={6} />;
-  if (error) return <ErrorBanner title="The checks could not be run" message="Try again in a moment." detail={error} />;
+  if (error) return <ErrorBanner title="The checks could not be run" message="Try again in a moment." detail={plainly(error)} />;
 
   const grouped = {
     blocker: findings.filter((f) => f.severity === "blocker"),
@@ -190,8 +192,8 @@ export function CmcQuality({ cmcProjectId }: { cmcProjectId: string }) {
             <label className="mb-1.5 block text-xs font-medium">Citations</label>
             <select className="h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
                     value={citations} onChange={(e) => setCitations(e.target.value)}>
-              <option value="inline">Keep inline</option>
               <option value="stripped">Strip</option>
+              <option value="inline">Keep inline (internal review copy)</option>
             </select>
           </div>
           <div className="flex items-end">
@@ -203,10 +205,9 @@ export function CmcQuality({ cmcProjectId }: { cmcProjectId: string }) {
           </div>
         </div>
         <p className="text-xs text-muted-foreground">
-          Tables are rendered from verified data at the moment of export, so a value corrected in
-          Data review reaches every deliverable without a section being regenerated. An eCTD
-          backbone is deliberately not produced — leaf files and a manifest are, and assembling
-          the submission belongs to your publishing tool.
+          Tables are filled in from your verified data when you export, so a value corrected in
+          Data review reaches every deliverable without redrafting a section. You get the leaf
+          files and a list of them; assembling the eCTD submission belongs to your publishing tool.
         </p>
         <div className="flex flex-wrap justify-end gap-2">
           {!exportable && (

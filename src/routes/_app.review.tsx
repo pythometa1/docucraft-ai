@@ -40,16 +40,36 @@ import { cn } from "@/lib/utils";
 import { FadeIn, Stagger, StaggerItem, SwapIn } from "@/components/motion";
 import { PolishedEmpty, SkeletonBar, StageSkeleton } from "@/components/skeletons";
 import { ErrorBanner } from "@/components/error-banner";
+import { plainly } from "@/components/processing-banner";
 
 export const Route = createFileRoute("/_app/review")({
   head: () => ({
     meta: [
       { title: "Review queue — DocuMind AI" },
-      { name: "description", content: "Everything waiting for a person: documents somebody objected to, and values the engine would not guess." },
+      { name: "description", content: "Everything waiting for a person: documents somebody objected to, and values that need a person to confirm." },
     ],
   }),
   component: ReviewQueue,
 });
+
+/** Customer names for the kinds of question; unknown kinds get a generic one. */
+const TASK_KIND_LABEL: Record<string, string> = {
+  calculation: "Calculated value",
+  computed: "Calculated value",
+  derived: "Calculated value",
+  condition: "Optional section",
+  branch: "Optional section",
+  narrative: "Text",
+  text: "Text",
+  field: "Text",
+  binding: "Column match",
+  mapping: "Column match",
+  column: "Column match",
+};
+
+function taskKindLabel(kind: string | null | undefined): string {
+  return (kind && TASK_KIND_LABEL[kind]) || "Needs review";
+}
 
 const KIND_TONE: Record<string, string> = {
   calculation: "text-purple border-purple/40 bg-purple/10",
@@ -119,8 +139,8 @@ function ReviewQueue() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-gradient">Review queue</h1>
           <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
-            Everything waiting for a person: documents somebody read and objected to, and values the
-            engine stopped on rather than guessed. A wrong number in a regulated document is worse
+            Everything waiting for a person: documents somebody read and objected to, and values
+            that need someone to confirm them. A wrong number in a regulated document is worse
             than a slow one.
           </p>
         </div>
@@ -146,9 +166,9 @@ function ReviewQueue() {
       <Stagger className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           ["Documents objected to", counts.reviews],
-          ["Questions from the engine", counts.tasks],
+          ["Values to confirm", counts.tasks],
           ["Answered", summary?.resolved ?? "—"],
-          ["Human-touch rate", summary && summary.open + summary.resolved > 0
+          ["Resolved by your team", summary && summary.open + summary.resolved > 0
             ? `${Math.round((summary.resolved / (summary.open + summary.resolved)) * 100)}%`
             : "—"],
         ].map(([label, value]) => (
@@ -208,7 +228,7 @@ function ReviewQueue() {
                         </Badge>
                       ) : (
                         <Badge variant="outline" className={cn("text-[10px]", KIND_TONE[item.task_kind ?? ""])}>
-                          {item.task_kind}
+                          {taskKindLabel(item.task_kind)}
                         </Badge>
                       )}
                       {/* The document's own state, so a blocked letter does not look
@@ -224,9 +244,6 @@ function ReviewQueue() {
                         <span className="rounded-full border border-border px-1.5 py-0 text-[10px] text-muted-foreground">
                           {WORKFLOW_LABELS[item.workflow_status as WorkflowStatus] ?? item.workflow_status}
                         </span>
-                      )}
-                      {item.unit_id && (
-                        <code className="text-[11px] font-mono text-muted-foreground truncate">{item.unit_id}</code>
                       )}
                     </div>
                     <div className="text-sm line-clamp-2">{item.title}</div>
@@ -263,7 +280,7 @@ function ReviewQueue() {
           <PolishedEmpty
             icon={<ClipboardCheck className="h-6 w-6" />}
             title="Nothing picked"
-            subtitle="Choose an item on the left to read what the engine stopped on, or what somebody objected to."
+            subtitle="Choose an item on the left to see what needs confirming, or what somebody objected to."
           />
         ) : (
           // Keyed on the picked item, because the two detail views are different
@@ -656,7 +673,7 @@ function TaskDetail({ task, onDone }: { task: ReviewTask; onDone: () => void | P
       toast.success("Resolved", {
         description: r.promoted?.applied
           ? "Remembered as a rule — this won't be asked again."
-          : r.promoted?.reason,
+          : r.promoted?.reason ? plainly(String(r.promoted.reason)) : undefined,
       });
       await onDone();
     } catch (e: any) {
@@ -667,14 +684,15 @@ function TaskDetail({ task, onDone }: { task: ReviewTask; onDone: () => void | P
   };
 
   const context = task.context ?? {};
+  // Plain words when the server sent them; the raw rule otherwise.
+  const plainRule: string | null = context.plain_english ?? context.description ?? null;
 
   return (
     <div className="rounded-xl surface-raised p-6 space-y-5">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <Badge variant="outline" className={cn("text-[10px] mb-2", KIND_TONE[task.kind])}>{task.kind}</Badge>
+          <Badge variant="outline" className={cn("text-[10px] mb-2", KIND_TONE[task.kind])}>{taskKindLabel(task.kind)}</Badge>
           <h2 className="text-lg font-semibold">{task.question}</h2>
-          <code className="text-xs font-mono text-muted-foreground">{task.unit_id}</code>
         </div>
         {!readOnly && (
           <Button variant="ghost" size="sm" className="text-muted-foreground"
@@ -684,12 +702,16 @@ function TaskDetail({ task, onDone }: { task: ReviewTask; onDone: () => void | P
         )}
       </div>
 
-      {context.expression && (
+      {(plainRule || context.expression) && (
         <div>
-          <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1.5">Expression</div>
-          <code className="block rounded-lg border border-border bg-background/40 p-3 text-sm font-mono break-all">
-            {context.expression}
-          </code>
+          <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1.5">Rule</div>
+          {plainRule ? (
+            <p className="rounded-lg border border-border bg-background/40 p-3 text-sm">{plainRule}</p>
+          ) : (
+            <code className="block rounded-lg border border-border bg-background/40 p-3 text-sm font-mono break-all">
+              {context.expression}
+            </code>
+          )}
         </div>
       )}
 
@@ -742,7 +764,7 @@ function TaskDetail({ task, onDone }: { task: ReviewTask; onDone: () => void | P
               rows={3}
               value={rationale}
               onChange={(e) => setRationale(e.target.value)}
-              placeholder="Why this value is correct — this is recorded in the document's lineage."
+              placeholder="Why this value is correct — this is recorded in the document's history."
             />
           </div>
 

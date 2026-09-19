@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.compile_progress import reading_state, running_readings
 from app.db import get_db
 from app.models import (
     TemplateManifest,
@@ -94,10 +95,14 @@ def _manifest_summary(db: Session, template_file_id: str) -> dict:
     # Without this the screen shows "Compiled -- 0 fields", which is what a
     # successful compile of a template with no placeholders looks like, and the
     # two are not remotely the same thing to act on.
+    #
+    # The stored note names the pipeline that failed (parts, review rounds, the
+    # model), so the reader gets `public_failure_reason` instead.
     compile_error = None
     if m.status == "failed":
-        notes = (m.prescan_summary or {}).get("notes") or []
-        compile_error = notes[0] if notes else "The compile did not produce a reading of this template."
+        from app.manifests.public import public_failure_reason
+
+        compile_error = public_failure_reason(m.prescan_summary)
 
     # The placeholders nothing will fill, named on the template's own row.
     #
@@ -173,12 +178,18 @@ def _template_file_out(tf: TemplateFile, tv: TemplateVersion | None, created_by_
 def list_templates(project_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     owned_project(db, project_id, user)
     rows = db.scalars(select(TemplateFile).where(TemplateFile.project_id == project_id, TemplateFile.deleted_at.is_(None))).all()
+    # A reading in progress, per template, so a reload can re-attach to it
+    # rather than showing "Not read yet" under a job that is still running.
+    readings = running_readings(db, project_id=project_id)
     out = []
     for tf in rows:
         tv = db.get(TemplateVersion, tf.current_version_id) if tf.current_version_id else None
-        out.append(_template_file_out(
+        row = _template_file_out(
             tf, tv, creator_name(db, tf.created_by), _manifest_summary(db, tf.id),
-            blueprint_id=_blueprint_id_for(db, tf)))
+            blueprint_id=_blueprint_id_for(db, tf))
+        job = readings.get(tf.id)
+        row["reading"] = reading_state(job) if job is not None else None
+        out.append(row)
     return {"items": out}
 
 

@@ -23,6 +23,8 @@ blueprint -- however far the editing goes, the bytes the customer sent are still
 there, which is what makes "put it back" an operation rather than a promise.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -32,9 +34,10 @@ from app.audit.service import log_audit
 from app.compile_progress import CompileProgress
 from app.compiler.agentic_compiler import compile_template as compile_agentic_template
 from app.db import get_db
-from app.llm.provider import LLMNotConfiguredError
+from app.llm.provider import LLM_NOT_CONFIGURED_MESSAGE, LLMNotConfiguredError
 from app.metrics import AGENTIC_COMPILE, timed
 from app.manifests.models import ManifestEnvelope, to_row_values
+from app.manifests.public import restore_internal, scrub
 from app.models import (
     TemplateBlueprint, TemplateBlueprintVersion, TemplateFile, TemplateManifest,
     TemplateVersion, User, now, uid,
@@ -56,6 +59,8 @@ from app.templates.lift import (
 )
 from app.templates.read_docx import read_body
 from app.tenancy import llm_policy_for
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["blueprints"])
 
@@ -81,15 +86,39 @@ def _blueprint_out(row: TemplateBlueprint, version: TemplateBlueprintVersion | N
     }
 
 
+#: Provenance that names the engine: which model read or wrote it, and how sure
+#: it was. Kept on the row for the audit trail, never sent.
+_PRIVATE_PROVENANCE = frozenset({"model", "compiled_by", "confidence"})
+
+
+def _public_objects(objects) -> list:
+    """Objects with the engine's reasoning and scores taken off.
+
+    One exception: a CONDITION keeps `compiled_from`. For a condition that is the
+    author's own instruction sentence out of the template, and the studio joins
+    runs to conditions on it -- without it the X-ray cannot say which condition a
+    red run belongs to. A FIELD's `compiled_from` is the model's reasoning and goes.
+    Anchors stay: the studio resolves objects to paragraphs through them.
+    """
+    out = []
+    for obj in objects or []:
+        clean = scrub(obj)
+        if isinstance(obj, dict) and obj.get("object_type") == "CONDITION" and "compiled_from" in obj:
+            clean["compiled_from"] = obj["compiled_from"]
+        out.append(clean)
+    return out
+
+
 def _version_out(version: TemplateBlueprintVersion) -> dict:
     return {
         "id": version.id,
         "blueprint_id": version.blueprint_id,
         "version_no": version.version_no,
         "body": version.body,
-        "objects": version.objects,
+        "objects": _public_objects(version.objects),
         "findings": version.findings,
-        "provenance": version.provenance,
+        "provenance": {k: v for k, v in (version.provenance or {}).items()
+                       if k not in _PRIVATE_PROVENANCE},
         "manifest_id": version.manifest_id,
         "change_summary": version.change_summary,
         "created_at": version.created_at,
@@ -332,17 +361,18 @@ def from_template(body: FromTemplateRequest, db: Session = Depends(get_db),
     if outcome.manifest.compiled_by == "llm_unavailable":
         raise error("LLM_NOT_CONFIGURED", NO_MODEL_MESSAGE, 503)
     if outcome.manifest.compiled_by == "llm_failed":
+        log.warning("Template reading failed: %s", outcome.reason or "no reason recorded")
         raise error(
             "TEMPLATE_NOT_READ",
-            "The model did not return a usable reading of this template "
-            f"({outcome.reason or 'no reason recorded'}). The template is still uploaded; "
-            "try again.", 502)
+            "The AI did not return a usable reading of this template. The template is still "
+            "uploaded; try again.", 502)
 
     unconverged = None
     if not outcome.ok:
-        reason = outcome.reason or "no reason recorded"
+        # The reason names parts and review rounds; it is for the log.
+        log.warning("Template reading did not settle: %s", outcome.reason or "no reason recorded")
         unconverged = (
-            f"The reading of this template did not settle ({reason}). What is here is the "
+            "The reading of this template did not settle. What is here is the "
             "best reading reached; check it before publishing.")
 
     return _blueprint_from_reading(
@@ -400,18 +430,21 @@ def from_description(body: FromDescriptionRequest, db: Session = Depends(get_db)
                 db, user.org_id, project_id=body.project_id, user_id=user.id,
                 subject_type="template_authoring", subject_id=None))
     except LLMNotConfiguredError as exc:
+        log.warning("Template authoring refused: %s", exc)
         if fallback_kit is None:
-            raise error("LLM_NOT_CONFIGURED", str(exc) or NO_MODEL_MESSAGE, 503)
+            raise error("LLM_NOT_CONFIGURED", LLM_NOT_CONFIGURED_MESSAGE, 503)
         fallback_reason = "No language model is configured, so a shipped kit stands in."
     except AuthoringFailed as exc:
+        # Its text is the validator's and the provider's account of the
+        # failure -- for the log, not for the person who asked.
+        log.warning("Template authoring failed: %s", exc)
         if fallback_kit is None:
             raise error(
                 "TEMPLATE_NOT_AUTHORED",
-                f"The model could not produce a verifiable template ({exc}). "
+                "The AI could not produce a verifiable template right now. "
                 "Try rephrasing the description, or start from a kit.", 502)
         fallback_reason = (
-            f"The model could not produce a verifiable template ({exc}), "
-            "so a shipped kit stands in.")
+            "The AI could not produce a verifiable template, so a shipped kit stands in.")
 
     if authored is not None:
         blueprint_kind = "generated"
@@ -421,7 +454,8 @@ def from_description(body: FromDescriptionRequest, db: Session = Depends(get_db)
         provenance = {"kind": "generated", "description": body.description[:2000],
                       "service": service, "model": authored.get("model")}
         change_summary = "Authored from a description."
-        generation = {"source": "model", "notes": notes, "model": authored.get("model")}
+        # No "model" here: which vendor authored it stays in the provenance row.
+        generation = {"source": "model", "notes": notes}
     else:
         from app.templates.kits import kit_objects as _kit_objects
         from app.templates.kits import load_kit as _load_kit
@@ -434,7 +468,7 @@ def from_description(body: FromDescriptionRequest, db: Session = Depends(get_db)
                       "description": body.description[:2000],
                       "fallback_reason": fallback_reason}
         change_summary = f"Started from the {kit['name']} kit ({fallback_reason})"
-        generation = {"source": "kit_fallback", "notes": [fallback_reason], "model": None}
+        generation = {"source": "kit_fallback", "notes": [fallback_reason]}
 
     row = TemplateBlueprint(
         org_id=user.org_id, project_id=body.project_id,
@@ -652,7 +686,10 @@ def save_version(blueprint_id: str, request: SaveVersionRequest,
         blueprint_id=row.id, org_id=row.org_id,
         version_no=_next_version_no(db, row.id),
         body=normalised,
-        objects=request.objects if request.objects is not None else current.objects,
+        # Objects sent back were served without their internal keys; put the
+        # stored ones back so a save cannot erase them.
+        objects=(restore_internal(request.objects, current.objects, id_key="object_id")
+                 if request.objects is not None else current.objects),
         findings=[{"code": "formatting_lost_to_span_merge", "severity": "advisory",
                    "detail": note, "object_id": None, "paragraph_index": None}
                   for note in notes],
@@ -991,11 +1028,11 @@ def _recompile_published(db: Session, user: User, row: TemplateBlueprint, path: 
         raise error("LLM_NOT_CONFIGURED", NO_MODEL_MESSAGE, 503)
 
     if outcome.manifest.compiled_by in ("llm_unavailable", "llm_failed"):
+        log.warning("Re-reading an edited template failed: %s", outcome.reason or "no reason recorded")
         raise error(
             "TEMPLATE_NOT_READ",
-            "The edited template was written, but the model did not return a usable reading of it "
-            f"({outcome.reason or 'no reason recorded'}). Nothing was published; try again, or "
-            "publish without re-reading.", 502)
+            "The edited template was written, but the AI did not return a usable reading of it. "
+            "Nothing was published; try again, or publish without re-reading.", 502)
     return outcome
 
 
@@ -1199,9 +1236,12 @@ def copilot(blueprint_id: str, request: CopilotRequest, db: Session = Depends(ge
                 .order_by(ManifestGeneration.created_at.desc()).limit(3)).all()
         ] if version.manifest_id else []
         try:
-            return {"mode": "explain", **blueprint_agent.explain(
+            explained = blueprint_agent.explain(
                 version.body, version.objects, version.findings, request.message,
-                lineage=lineage, llm_policy=policy)}
+                lineage=lineage, llm_policy=policy)
+            # The answer and its references; the model that gave it stays here.
+            explained.pop("model", None)
+            return {"mode": "explain", **explained}
         except LLMNotConfiguredError:
             raise error("LLM_NOT_CONFIGURED", NO_MODEL_MESSAGE, 503)
 
@@ -1227,7 +1267,6 @@ def copilot(blueprint_id: str, request: CopilotRequest, db: Session = Depends(ge
         "questions": proposal["questions"],
         "notes": proposal["notes"],
         "verdict": proposal["verdict"],
-        "model": proposal["model"],
         "lint_before": _lint_current(db, row, version).as_dict(),
         "lint_after": lint_after.as_dict(),
     }

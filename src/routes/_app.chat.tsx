@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { plainly } from "@/components/processing-banner";
 import { Send, Sparkles, Plus, MessageSquare, Bot, User as UserIcon, FileText, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +14,7 @@ export const Route = createFileRoute("/_app/chat")({
   head: () => ({
     meta: [
       { title: "Chat — DocuMind AI" },
-      { name: "description", content: "Ask questions about a project's source files. Answers are grounded in the uploaded documents and cite the chunks they came from." },
+      { name: "description", content: "Ask questions about a project's source files. Answers come from the uploaded documents and cite the documents they came from." },
     ],
   }),
   component: ChatPage,
@@ -37,7 +38,7 @@ function ChatPage() {
     // Swallowed, this leaves the project picker empty and the screen looks like
     // an account with no projects rather than a request that failed.
     loadProjects().catch((e: any) =>
-      toast.error("Could not load projects", { description: e?.message ?? String(e) }),
+      toast.error("Could not load projects", { description: plainly(String(e?.message ?? e)) }),
     );
   }, []);
   useEffect(() => {
@@ -52,7 +53,7 @@ function ChatPage() {
         setConversationId(r.items[0]?.id ?? "");
         if (!r.items.length) setMessages([]);
       })
-      .catch((e: any) => toast.error("Could not load conversations", { description: e?.message ?? String(e) }));
+      .catch((e: any) => toast.error("Could not load conversations", { description: plainly(String(e?.message ?? e)) }));
   }, [projectId]);
 
   useEffect(() => {
@@ -72,7 +73,7 @@ function ChatPage() {
       setConversationId(c.id);
       setMessages([]);
     } catch (e: any) {
-      toast.error("Could not start a conversation", { description: e?.message ?? String(e) });
+      toast.error("Could not start a conversation", { description: plainly(String(e?.message ?? e)) });
     }
   };
 
@@ -88,7 +89,7 @@ function ChatPage() {
         setConversationId(c.id);
         target = c.id;
       } catch (e: any) {
-        toast.error("Could not start a conversation", { description: e?.message ?? String(e) });
+        toast.error("Could not start a conversation", { description: plainly(String(e?.message ?? e)) });
         return;
       }
     }
@@ -101,7 +102,7 @@ function ChatPage() {
       const reply = await api.sendMessage(target, text);
       setMessages((m) => [...m, { id: reply.id, role: "assistant", text: reply.text, sources: reply.sources }]);
     } catch (e: any) {
-      toast.error("Could not send", { description: e?.message ?? String(e) });
+      toast.error("Could not send", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setSending(false);
     }
@@ -155,18 +156,18 @@ function ChatPage() {
           <div>
             <h1 className="text-lg font-semibold">{project?.name ?? "Chat"}</h1>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Grounded in this project's uploaded source files
+              Answers from this project's uploaded source files
             </p>
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Sparkles className="h-4 w-4 text-primary" /> Retrieval-grounded
+            <Sparkles className="h-4 w-4 text-primary" /> Answers from your documents
           </div>
         </header>
 
         <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
           {messages.length === 0 && (
             <div className="text-center text-sm text-muted-foreground pt-10">
-              Ask something about this project's sources. Every answer cites the chunks it came from.
+              Ask something about this project's sources. Every answer cites the documents it came from.
             </div>
           )}
           {messages.map((m) => (
@@ -188,7 +189,7 @@ function ChatPage() {
                   <div className="mt-2 flex flex-wrap gap-2">
                     {m.sources.map((s) => (
                       <span key={s.chunk_id} className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md bg-muted text-muted-foreground border border-border">
-                        <FileText className="h-3 w-3" /> {s.heading_path || s.chunk_id.slice(0, 8)}
+                        <FileText className="h-3 w-3" /> {s.heading_path || "Source"}
                       </span>
                     ))}
                   </div>
@@ -219,7 +220,7 @@ function ChatPage() {
             </Button>
           </div>
           <p className="text-[11px] text-muted-foreground text-center mt-2">
-            Answers are grounded in retrieved source chunks. Verify before approving a draft.
+            Answers come from your uploaded documents. Check them before approving a draft.
           </p>
         </div>
       </div>

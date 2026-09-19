@@ -19,6 +19,7 @@ wrong. Those are the mappings §13 vetoes, and an onboarding log that recorded
 only "QA passed" would send them on to a reviewer with nothing marking them.
 """
 
+import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -30,6 +31,8 @@ from app.generation.docx_renderer import fill_template
 from app.llm.provider import get_llm_provider, llm_configured
 from app.compiler.llm_compiler import compile_manifest_llm, choose_compiler, rules_fell_short
 from app.compiler.rule_compiler import CompiledManifest, compile_manifest, refine_with_llm
+
+log = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 3
 
@@ -130,7 +133,9 @@ def _test_fill(template_path: str, manifest: CompiledManifest, records: list[dic
                 result = fill_template(template_path, out, manifest_dict, apply_binding(record, bindings))
             except Exception as exc:
                 passed = False
-                notes.append(f"Fill raised {type(exc).__name__}: {exc}")
+                # Logged in full; the notes are returned to the client.
+                log.warning("Probe fill raised during mapping", exc_info=exc)
+                notes.append("Filling a sample row failed before it produced a document.")
                 continue
             if not result.qa_passed:
                 passed = False

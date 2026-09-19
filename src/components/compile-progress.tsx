@@ -1,25 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { CompileReveal } from "@/components/compile-reveal";
+import { useBackgroundTasks } from "@/lib/background-tasks";
 
 /**
  * The progress feed behind the processing banner.
  *
  * This module owns the polling and the stage shape; `CompileReveal` owns how it
- * looks. Splitting them that way is what let the display grow a nested stage
- * tree, a document scan and a set of finishing figures without any of the three
- * screens that mount it changing a line -- they all render
- * `CompileProgressList`, which is a thin adaptor onto the reveal.
+ * looks. The three screens that mount it all render `CompileProgressList`, a
+ * thin adaptor onto the reveal.
+ *
+ * The server reports three plain steps -- reading, understanding, finishing --
+ * and nothing about how each is done. That is deliberate: the engine's own
+ * stage list describes the pipeline, and stays on the server.
  */
 
-export type StageKind = "deterministic" | "retrieval" | "model" | "embedding";
+export type StageKey = "read" | "analyse" | "finish";
 
 export interface Stage {
-  key: string;
+  key: StageKey | string;
   label: string;
-  kind: StageKind;
-  status: "running" | "done" | "failed";
-  detail?: string | null;
+  status: "pending" | "running" | "done" | "failed";
+  /** Seconds the step has taken so far, or took. Null before it starts. */
+  elapsed_seconds?: number | null;
 }
 
 /**
@@ -64,6 +67,18 @@ export function useCompileProgress(active: boolean) {
   }, [active]);
 
   return { token: tokenRef.current, newToken, stages, failed };
+}
+
+/**
+ * The same feed for a reading that runs in the background.
+ *
+ * `useCompileProgress` polls from the component, which is right for a request
+ * the component itself is holding open. A background reading outlives any one
+ * component -- the dialog closes, the route changes -- so its polling is owned
+ * by `useBackgroundTasks`, and this is the read side of it.
+ */
+export function useReadingTask(token: string | null | undefined) {
+  return useBackgroundTasks((s) => (token ? s.tasks[token] : undefined));
 }
 
 /**

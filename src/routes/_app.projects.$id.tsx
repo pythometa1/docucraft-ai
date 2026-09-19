@@ -4,7 +4,8 @@ import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { CompileProgressList, useCompileProgress } from "@/components/compile-progress";
+import { TemplateUploadDialog } from "@/components/template-upload-dialog";
+import { currentStepIndex, useBackgroundTasks } from "@/lib/background-tasks";
 import { DocumentMapping } from "@/components/document-mapping";
 import { BatchProgressPanel, useBatchWatch, type BatchWatch } from "@/components/batch-progress";
 import { motion } from "framer-motion";
@@ -17,6 +18,7 @@ import { SafetyWorkspace } from "@/components/safety-workspace";
 import { InvoiceStudio } from "@/components/invoice-studio";
 import { PolishedEmpty, SkeletonBar, StageSkeleton } from "@/components/skeletons";
 import { plainly } from "@/components/processing-banner";
+import { qaNoteLines, qaNoteText } from "@/lib/friendly";
 import { SETTABLE_WORKFLOW, WORKFLOW_LABELS } from "@/lib/types";
 import type { SettableWorkflowStatus, WorkflowStatus } from "@/lib/types";
 import {
@@ -74,10 +76,10 @@ export const Route = createFileRoute("/_app/projects/$id")({
 });
 
 const STAGES = [
-  { key: "template", n: 1, title: "Template", short: "Blueprint", icon: UploadCloud, hint: "Upload the document to fill" },
-  { key: "source", n: 2, title: "Sources", short: "Inputs", icon: FolderTree, hint: "Upload the spreadsheet of rows" },
-  { key: "mapping2", n: 3, title: "Document Mapping", short: "Fill", icon: Network, hint: "Map the columns, then generate" },
-  { key: "drafts", n: 4, title: "Documents", short: "Output", icon: FileText, hint: "Everything this project has produced" },
+  { key: "template", n: 1, title: "Template", short: "Template", icon: UploadCloud, hint: "Upload the document to fill" },
+  { key: "source", n: 2, title: "Sources", short: "Data", icon: FolderTree, hint: "Upload the spreadsheet of rows" },
+  { key: "mapping2", n: 3, title: "Document Mapping", short: "Match", icon: Network, hint: "Map the columns, then generate" },
+  { key: "drafts", n: 4, title: "Documents", short: "Documents", icon: FileText, hint: "Everything this project has produced" },
 ] as const;
 
 type StageKey = typeof STAGES[number]["key"];
@@ -143,6 +145,13 @@ function ProjectDetail() {
     // the original bug, because that is the value that moves.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id]);
+
+  // "View template" / the toast's Open: land on the Template stage, where the
+  // row is, whatever stage this project was showing.
+  const focus = useBackgroundTasks((s) => s.focus);
+  useEffect(() => {
+    if (focus?.projectId === id && project) setActive("template");
+  }, [focus, id, project?.id]);
 
   if (loadError) {
     return (
@@ -403,7 +412,7 @@ function ShareButton() {
       await navigator.clipboard.writeText(window.location.href);
       toast.success("Project link copied", { description: "Anyone who can sign in to this workspace can open it." });
     } catch (e: any) {
-      toast.error("Couldn't copy the link", { description: e?.message ?? String(e) });
+      toast.error("Couldn't copy the link", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setCopying(false);
     }
@@ -441,7 +450,7 @@ function ProjectActions({ project }: { project: any }) {
       toast.success("Project renamed", { description: next });
       setRenameOpen(false);
     } catch (e: any) {
-      toast.error("Rename failed", { description: e?.message ?? String(e) });
+      toast.error("Rename failed", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(null);
     }
@@ -454,7 +463,7 @@ function ProjectActions({ project }: { project: any }) {
       await loadProjectDetail(project.id);
       toast.success("Project archived", { description: project.name });
     } catch (e: any) {
-      toast.error("Archive failed", { description: e?.message ?? String(e) });
+      toast.error("Archive failed", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(null);
     }
@@ -470,7 +479,7 @@ function ProjectActions({ project }: { project: any }) {
       // and let the dashboard reload the list.
       navigate({ to: "/dashboard" });
     } catch (e: any) {
-      toast.error("Delete failed", { description: e?.message ?? String(e) });
+      toast.error("Delete failed", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(null);
     }
@@ -647,6 +656,28 @@ function Step1Template({ project }: { project: any }) {
   const [uploadOpen, setUploadOpen] = useState(false);
   const loadProjectDetail = useStore((s) => s.loadProjectDetail);
   const count = project.templates.length;
+  // Live readings for this project, by template. The store's copy is fresher
+  // than the list's `reading` field, which is only as new as the last reload.
+  const tasks = useBackgroundTasks((s) => s.tasks);
+  const liveByTemplate = useMemo(() => {
+    const out: Record<string, (typeof tasks)[string]> = {};
+    for (const t of Object.values(tasks)) if (t.projectId === project.id) out[t.templateId] = t;
+    return out;
+  }, [tasks, project.id]);
+  // "View template" lands here: bring the row into view and mark it briefly.
+  const focus = useBackgroundTasks((s) => s.focus);
+  const setFocus = useBackgroundTasks((s) => s.setFocus);
+  const [highlight, setHighlight] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focus || focus.projectId !== project.id) return;
+    const row = document.querySelector(`[data-template-row="${focus.templateId}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    setHighlight(focus.templateId);
+    setFocus(null);
+    const id = setTimeout(() => setHighlight(null), 2400);
+    return () => clearTimeout(id);
+  }, [focus, project.id, project.templates, setFocus]);
   return (
     <StepCard
       n={1}
@@ -679,7 +710,13 @@ function Step1Template({ project }: { project: any }) {
         <Stagger className="space-y-2">
           {project.templates.map((t: any, i: number) => (
             <StaggerItem key={t.id} index={i}>
-              <div className="rounded-lg border border-border bg-background/40 p-3 transition-colors hover:border-border-strong">
+              <div
+                data-template-row={t.id}
+                className={cn(
+                  "rounded-lg border border-border bg-background/40 p-3 transition-[border-color,box-shadow] duration-500 hover:border-border-strong",
+                  highlight === t.id && "border-brand/60 glow-brand",
+                )}
+              >
                 <div className="flex items-center gap-3">
                   <FileText className="h-5 w-5 text-info shrink-0" />
                   <div className="flex-1 min-w-0">
@@ -700,7 +737,9 @@ function Step1Template({ project }: { project: any }) {
                         stopped" are the same two colours here as they are on
                         every other screen. */}
                     <div className="mt-1 text-xs">
-                      {t.manifestId && t.manifestStatus === "failed" ? (
+                      {readingOf(t, liveByTemplate[t.id]) ? (
+                        <ReadingBadge step={readingOf(t, liveByTemplate[t.id])!.step} />
+                      ) : t.manifestId && t.manifestStatus === "failed" ? (
                         <span className="text-ai-blocked">
                           <StateDot />
                           Could not read this template — nothing was mapped.
@@ -724,7 +763,12 @@ function Step1Template({ project }: { project: any }) {
                       button on a template that has already been read is an offer
                       to pay for a model call to learn what is already known. */}
                   {(!t.manifestId || t.manifestStatus === "failed") && (
-                    <CompileTemplateButton templateId={t.id} projectId={project.id} />
+                    <CompileTemplateButton
+                      templateId={t.id}
+                      templateName={t.name}
+                      projectId={project.id}
+                      readingToken={readingOf(t, liveByTemplate[t.id])?.token ?? null}
+                    />
                   )}
                   <EditTemplateButton
                     templateId={t.id}
@@ -760,6 +804,34 @@ function Step1Template({ project }: { project: any }) {
         projectId={project.id}
       />
     </StepCard>
+  );
+}
+
+/** The reading under way on a template row, if any: the live task first, then
+ *  the list's own `reading` field (a reload before the first poll lands). */
+function readingOf(t: any, live: any): { token: string; step: number } | null {
+  if (live) return live.status === "running" ? { token: live.token, step: currentStepIndex(live) + 1 } : null;
+  if (t.reading?.status === "running") return { token: t.reading.progressToken, step: (t.reading.stepIndex ?? 0) + 1 };
+  return null;
+}
+
+function ReadingBadge({ step }: { step: number }) {
+  return (
+    <span className="inline-flex items-center gap-2 text-ai-live">
+      <Loader2 className="h-3 w-3 animate-spin" />
+      Reading · step {step} of 3
+      <span className="inline-flex gap-0.5" aria-hidden>
+        {[1, 2, 3].map((n) => (
+          <span
+            key={n}
+            className={cn(
+              "h-1 w-4 rounded-full",
+              n < step ? "bg-ai-confident" : n === step ? "live-stripe" : "bg-muted-foreground/20",
+            )}
+          />
+        ))}
+      </span>
+    </span>
   );
 }
 
@@ -813,14 +885,13 @@ function UnfillablePanel({ template, projectId }: { template: any; projectId: st
         </Link>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
-        Generating now produces documents that fail their checks with “Leftover placeholder
-        brackets” — the literal text stays where the value should be.
+        Generating now leaves these placeholders unfilled in every document.
         {split.length > 0 && (
           <>
             {" "}
-            {split.length === items.length ? "These are" : `${split.length} of these are`} split
-            across runs by Word, so no field can be attached: retype the placeholder in one go and
-            read the template again.
+            {split.length === items.length ? "These were" : `${split.length} of these were`} typed
+            in pieces, so they cannot be filled: retype the placeholder in one go and read the
+            template again.
           </>
         )}
       </p>
@@ -834,7 +905,7 @@ function UnfillablePanel({ template, projectId }: { template: any; projectId: st
               <span className="text-muted-foreground">paragraph {w.paragraph_index}</span>
             )}
             {w.code === "W-SPLIT-PLACEHOLDER" && (
-              <span className="text-muted-foreground opacity-70">· split across runs</span>
+              <span className="text-muted-foreground opacity-70">· typed in pieces</span>
             )}
           </li>
         ))}
@@ -848,121 +919,6 @@ function UnfillablePanel({ template, projectId }: { template: any; projectId: st
         </button>
       )}
     </div>
-  );
-}
-
-/**
- * Upload a template and watch it being read.
- *
- * One dialog for what used to be two steps. It stays open while the compile
- * runs, because that is the part worth watching: a template read by the colour
- * rules costs nothing and finishes instantly, while one handed to a model costs
- * real money and takes minutes, and a single spinner cannot tell those apart --
- * or tell either from a request that has hung.
- *
- * A compile that fails does not undo the upload. The file is stored, the row is
- * on the screen, and the reason is here with a retry next to it.
- */
-function TemplateUploadDialog({ open, onOpenChange, projectId }: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  projectId: string;
-}) {
-  const add = useStore((s) => s.addTemplate);
-  const [dragging, setDragging] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const { newToken, stages, failed } = useCompileProgress(busy != null);
-
-  const handle = async (files: FileList | null) => {
-    const file = files?.[0];
-    if (!file || busy) return;
-    setError(null);
-    // Minted before the request, not after: the server writes progress against
-    // this token while it works, and an id the client learns from the response
-    // is an id it learns when there is nothing left to watch.
-    const token = newToken();
-    setBusy(file.name);
-    try {
-      await add(projectId, file, token);
-      toast.success("Template read", {
-        description: `${file.name} — the project now knows what data it needs.`,
-      });
-      onOpenChange(false);
-    } catch (e: any) {
-      setError(
-        e?.code === "LLM_NOT_CONFIGURED"
-          ? "Reading a template needs a language model, and none is configured. The file was uploaded and can be read once one is."
-          : e?.message ?? String(e),
-      );
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={(v) => { if (!busy) { setError(null); onOpenChange(v); } }}>
-      <DialogContent className="bg-surface border-border">
-        <DialogHeader>
-          <DialogTitle>Upload template</DialogTitle>
-          <DialogDescription>
-            It is read as soon as it lands — placeholders, author instructions and conditional
-            sections are worked out for you.
-          </DialogDescription>
-        </DialogHeader>
-
-        {busy ? (
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-sm">
-              <Loader2 className="h-4 w-4 animate-spin text-ai-active" />
-              <span className="truncate font-medium">{busy}</span>
-            </div>
-            {/* No time estimate. An uncoloured template goes to a model and can
-                take a couple of minutes; a colour-coded one is read by the rules
-                almost instantly. Promising a duration we cannot predict is worse
-                than naming the stage that is running.
-
-                And no `result`: on this path the compile is issued inside
-                `addTemplate`, which uploads, compiles and reloads as one action
-                and answers `void`. The body never reaches this component, so the
-                panel narrates the stages and stops -- which is the honest end of
-                what this screen knows. Reaching around the store to re-request
-                it would be a second compile of the same template. */}
-            <CompileProgressList stages={stages} failed={failed} />
-          </div>
-        ) : (
-          <label
-            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(e) => { e.preventDefault(); setDragging(false); void handle(e.dataTransfer.files); }}
-            className={cn(
-              "flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-10 cursor-pointer transition-colors",
-              dragging ? "border-brand bg-brand/5" : "border-border hover:border-border-strong",
-            )}
-          >
-            <UploadCloud className="h-8 w-8 text-muted-foreground mb-2" />
-            <div className="text-sm font-medium">Drag and drop your file here</div>
-            <div className="text-xs text-muted-foreground mt-1">or click to browse (.docx, .dotx)</div>
-            <input
-              type="file" accept=".docx,.dotx" className="hidden"
-              onChange={(e) => void handle(e.target.files)}
-            />
-          </label>
-        )}
-
-        {/* `plainly` runs over the server's own sentence on its way to the
-            screen: the stage labels it is built from are read by the transcript
-            and the audit row as well, so they are reworded here rather than at
-            the source, where renaming them would have changed a record somebody
-            may have to defend later. */}
-        {error && (
-          <ErrorBanner
-            title="Couldn't read this template"
-            message={`${plainly(error)} The file itself was uploaded — use “Read again” on its row to try once more.`}
-          />
-        )}
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -1005,7 +961,7 @@ function Step2Source({ project }: { project: any }) {
                     <RowDeleteButton
                       label="Delete source"
                       title={`Delete "${s.name}"?`}
-                      description="The source is removed from this project. Column mappings already saved against it are kept, and so is anything already generated. The uploaded file and the embeddings built from it are destroyed later by the retention sweep, on the schedule your organisation set."
+                      description="The source is removed from this project. Column mappings already saved against it are kept, and so is anything already generated. The uploaded file and anything prepared from it are deleted on your organisation's retention schedule."
                       confirmLabel="Delete source"
                       successMessage="Source deleted"
                       errorMessage="Couldn't delete the source"
@@ -1036,7 +992,7 @@ function Step2Source({ project }: { project: any }) {
         onUpload={(file) => {
           add(project.id, file)
             .then(() => toast.success("Source uploaded", { description: file.name }))
-            .catch((e: any) => toast.error("Upload failed", { description: e?.message ?? String(e) }));
+            .catch((e: any) => toast.error("Upload failed", { description: plainly(String(e?.message ?? e)) }));
         }}
       />
     </StepCard>
@@ -1129,7 +1085,7 @@ function DownloadDocButton({ documentId, filename, allowed, status, reasons = []
     } catch (e: any) {
       // The server's own message, not a generic one: "LibreOffice is not
       // installed on this host" is something the reader can act on.
-      toast.error("Download failed", { description: e?.message ?? String(e) });
+      toast.error("Download failed", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(null);
     }
@@ -1148,7 +1104,7 @@ function DownloadDocButton({ documentId, filename, allowed, status, reasons = []
         )}
         title={lockedByQa
           ? reasons.length
-            ? `Locked — ${plainly(String(reasons[0]))}`
+            ? `Locked — ${qaNoteText(reasons[0])}`
             : "Locked — this document failed its checks when it was generated."
           : allowed
             ? "Download"
@@ -1165,16 +1121,15 @@ function DownloadDocButton({ documentId, filename, allowed, status, reasons = []
           {lockedByQa ? (
             <div className="absolute right-0 z-20 mt-1 w-72 rounded-lg border border-ai-blocked/40 bg-popover p-3 shadow-md">
               <p className="text-[12px] font-semibold leading-snug text-ai-blocked">
-                Locked by the QA checks
+                Locked until its checks pass
               </p>
               {reasons.length > 0 ? (
                 <ul className="mt-2 space-y-1.5">
-                  {reasons.map((r, i) => (
+                  {qaNoteLines(reasons).map((r, i) => (
                     <li key={i} className="flex items-start gap-1.5 text-[11.5px] leading-relaxed text-muted-foreground">
                       <span aria-hidden className="mt-[6px] h-1 w-1 shrink-0 rounded-full bg-ai-blocked/70" />
-                      {/* The checker's own sentence, scrubbed of internal
-                          vocabulary on its way to the screen. */}
-                      <span>{plainly(String(r))}</span>
+                      {/* Customer wording for the note; the raw text stays in the API. */}
+                      <span>{r}</span>
                     </li>
                   ))}
                 </ul>
@@ -1218,7 +1173,7 @@ function DownloadAllButton({ documents, total }: { documents: any[]; total: numb
         description: "Any that could not be converted are listed in _FAILED.txt inside the archive.",
       });
     } catch (e: any) {
-      toast.error("Download failed", { description: e?.message ?? String(e) });
+      toast.error("Download failed", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(null);
     }
@@ -1532,7 +1487,7 @@ function WorkflowSelect({ document, onDone }: { document: any; onDone: () => voi
       <span
         title={document.workflowStatus === "approved"
           ? "Somebody has signed this off. Withdraw the approval to move it again."
-          : "This failed its QA checks when it was generated. Fix the template or the source row and generate again — or cancel it."}
+          : "This failed its checks when it was generated. Fix the template or the source row and generate again — or cancel it."}
         className={cn(
           "inline-flex h-8 items-center rounded-lg border px-2.5 text-xs font-medium",
           document.workflowStatus === "approved"
@@ -1556,7 +1511,7 @@ function WorkflowSelect({ document, onDone }: { document: any; onDone: () => voi
           await api.setDocumentWorkflow(document.id, next);
           await onDone();
         } catch (err: any) {
-          toast.error("Could not move this document", { description: err?.message ?? String(err) });
+          toast.error("Could not move this document", { description: plainly(String(err?.message ?? err)) });
         } finally {
           setBusy(false);
         }
@@ -1608,7 +1563,7 @@ function RequestChangesButton({ versionId, filename, hasOpenReview, onDone }: {
         onConfirm={() => {
           api.requestChanges(versionId, { reason })
             .then(async () => { setOpen(false); toast.success("Changes requested"); await onDone(); })
-            .catch((e: any) => toast.error("Could not request changes", { description: e?.message ?? String(e) }));
+            .catch((e: any) => toast.error("Could not request changes", { description: plainly(String(e?.message ?? e)) }));
         }}
       />
     </>
@@ -1654,7 +1609,7 @@ function EditTemplateButton({ templateId, projectId, blueprintId, readable }: {
       });
     } catch (e: any) {
       toast.error("Could not open this template for editing", {
-        description: e?.message ?? String(e),
+        description: plainly(String(e?.message ?? e)),
       });
     } finally {
       setBusy(false);
@@ -1732,59 +1687,54 @@ function ConfirmDialog({
 
 /** Trash icon + confirmation for one row. `onDelete` should perform the request
  *  and refresh; it throws on failure and this reports it. */
-function CompileTemplateButton({ templateId, projectId }: { templateId: string; projectId: string }) {
-  const loadProjectDetail = useStore((s) => s.loadProjectDetail);
-  const [busy, setBusy] = useState(false);
-  // The response body, kept so the reveal can close its own loop.
-  //
-  // The stage list and the compile's answer are two separate arrivals: the
-  // stages come off a poll against the progress token, the counts come off the
-  // request that started it. Without this the panel could narrate the work and
-  // then had nothing to say about what was found -- it was the caller holding
-  // the answer and dropping it on the floor.
-  const [compiled, setCompiled] = useState<any>(null);
-  const { newToken, stages, failed } = useCompileProgress(busy);
+function CompileTemplateButton({ templateId, templateName, projectId, readingToken }: {
+  templateId: string;
+  templateName: string;
+  projectId: string;
+  /** A reading already under way on this template; the button re-opens it. */
+  readingToken: string | null;
+}) {
+  const track = useBackgroundTasks((s) => s.track);
+  const [starting, setStarting] = useState(false);
+  const [openToken, setOpenToken] = useState<string | null>(null);
+  // Read in the background, like an upload: the dialog is a window onto the
+  // task, and closing it leaves the reading running.
   const run = async () => {
-    const progressToken = newToken();
-    setCompiled(null);
-    setBusy(true);
-    // No toast up front and no time estimate: an uncoloured template goes to a
-    // model and can take a couple of minutes, while a colour-coded one is read
-    // by the rules almost instantly. Promising a duration we cannot predict is
-    // worse than a spinner that plainly means "working".
+    if (readingToken) {
+      setOpenToken(readingToken);
+      return;
+    }
+    const progressToken = crypto.randomUUID();
+    setStarting(true);
     try {
-      const manifest = await api.compileManifest(templateId, { progressToken });
-      setCompiled(manifest);
-      await loadProjectDetail(projectId);
-      toast.success("Template read", {
-        description: "Download the data template to get a spreadsheet with the right columns.",
-      });
+      await api.compileManifestBackground(templateId, progressToken);
+      track({ token: progressToken, templateName, projectId, templateId, startedAt: Date.now() });
+      setOpenToken(progressToken);
     } catch (e: any) {
       toast.error("Could not read this template", { description: plainly(String(e?.message ?? e)) });
     } finally {
-      setBusy(false);
+      setStarting(false);
     }
   };
+  const busy = starting || !!readingToken;
   return (
-    <div className="flex flex-col items-end gap-2">
+    <>
       <button
         onClick={run}
-        disabled={busy}
-        title="Read this template again and work out what data it needs"
+        disabled={starting}
+        title={readingToken ? "Show the reading in progress" : "Read this template again and work out what data it needs"}
         className="h-8 px-3 rounded-lg bg-gradient-brand text-white text-xs inline-flex items-center gap-1.5 hover:opacity-90 disabled:opacity-60"
       >
         {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <WandIcon className="h-3.5 w-3.5" />}
-        {busy ? "Reading…" : "Read again"}
+        {readingToken ? "Show progress" : starting ? "Starting…" : "Read again"}
       </button>
-      {/* Only while it runs. A finished compile is described by the row itself
-          -- "Compiled · 25 fields, 5 conditions" -- and leaving the stage list
-          behind would say the same thing twice. */}
-      {busy && (
-        <div className="w-full min-w-[22rem]">
-          <CompileProgressList stages={stages} failed={failed} result={compiled} />
-        </div>
-      )}
-    </div>
+      <TemplateUploadDialog
+        open={openToken != null}
+        onOpenChange={(v) => { if (!v) setOpenToken(null); }}
+        projectId={projectId}
+        attachToken={openToken}
+      />
+    </>
   );
 }
 
@@ -1806,7 +1756,7 @@ function TemplateDataButton({ manifestId }: { manifestId: string }) {
         description: "Fill it in, then upload it under Sources — its columns already match this template.",
       });
     } catch (e: any) {
-      toast.error("Could not build the data template", { description: e?.message ?? String(e) });
+      toast.error("Could not build the data template", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(false);
     }
@@ -1855,7 +1805,7 @@ function RowDeleteButton({
       toast.success(successMessage);
       setOpen(false);
     } catch (e: any) {
-      toast.error(errorMessage, { description: e?.message ?? String(e) });
+      toast.error(errorMessage, { description: plainly(String(e?.message ?? e)) });
     } finally {
       setBusy(false);
     }

@@ -1,13 +1,13 @@
 import hashlib
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import internal_endpoints_enabled, settings
 from app.db import get_db
 from app.models import User
 from app.redis_client import redis_client
@@ -51,6 +51,19 @@ def error(code: str, message: str, status_code: int = 400, details: dict | None 
         status_code=status_code,
         detail={"error": {"code": code, "message": message, "details": details or {}}},
     )
+
+
+def require_internal_endpoints(request: Request) -> None:
+    """404 an operator-only route where internal endpoints are switched off.
+
+    A 404 rather than a 403: a refusal confirms the route exists, and what it
+    would return (scoring weights, vendor prices) is the thing being withheld.
+    The environment is read off the app so `create_app(env)` can build either
+    shape in one process.
+    """
+    env = getattr(request.app.state, "env", None)
+    if not internal_endpoints_enabled(settings, env):
+        raise error("NOT_FOUND", "Not Found", 404)
 
 
 def get_current_user(

@@ -26,6 +26,7 @@ import threading
 
 from sqlalchemy import func, select
 
+from app.public_errors import public_message
 from app.db import SessionLocal
 from app.models import (
     PvCase, PvCaseDrug, PvCaseEvent, PvCaseNarrative, PvCaseOriginal, PvChunk,
@@ -313,7 +314,7 @@ def ingest_document(document_id: str, *, mapping: dict | None = None) -> None:
     where one is malformed is thirty-nine loaded listings and one that says
     why.
     """
-    from app.docgen.extraction import ExtractorUnavailable, UnsupportedSource
+    from app.docgen.extraction import UnsupportedSource
 
     db = SessionLocal()
     try:
@@ -331,13 +332,12 @@ def ingest_document(document_id: str, *, mapping: dict | None = None) -> None:
                 count = _parse_text_source(db, document, path)
             else:
                 count = _parse_document(db, document, path)
-        except (IngestFailed, e2b.E2bUnreadable, UnsupportedSource,
-                ExtractorUnavailable) as exc:
-            _set_status(db, document, FAILED, error=str(exc))
-            return
         except Exception as exc:  # noqa: BLE001 - a parser bug is this file's failure
-            _set_status(db, document, FAILED,
-                        error=f"the source could not be read: {exc}")
+            # The first three are written for the uploader. ExtractorUnavailable
+            # names a package and an install command, which is for the operator.
+            _set_status(db, document, FAILED, error=public_message(
+                exc, "the source could not be read",
+                user_facing=(IngestFailed, e2b.E2bUnreadable, UnsupportedSource)))
             return
 
         document.case_count = count

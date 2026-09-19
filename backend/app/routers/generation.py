@@ -17,6 +17,7 @@ from app.models import (
 )
 from app.security import error, get_current_user
 from app.audit.service import log_audit
+from app.compile_progress import public_job_extras
 from app.downloads import GRANT_TTL_SECONDS, issue as issue_download_grant, redeem as redeem_download_grant
 from app.metrics import record_qa_overrides
 from app.retention import delete_generated_document
@@ -25,13 +26,17 @@ from app.generation.document_status import APPROVED, BLOCKED, DOWNLOADABLE, refr
 from app.generation.workflow_status import (
     CANCELLED, COMPLETED, SETTABLE, WORK_IN_PROGRESS, effective as effective_workflow,
 )
+from app.generation.filenames import content_disposition, generated_document_filename, unique_name
 from app.generation.legacy_assembly import assemble_from_html
+from app.generation.reproducibility import write_fixed
 from app.generation.text_edit import EditRejected, apply_edits, read_document, structural_diff
 from app.generation.narrative_engine import build_fact_sheet, resolve_token_unit
+from app.generation.single import _next_display_id
 from app.llm.provider import get_llm_provider
 from app.tenancy import llm_policy_for
 from app.generation.renderers import DOCX_TEMPLATE_ASSEMBLY, HTML_ASSEMBLY, is_html_editable
 from app.expressions.token_parser import fact_sheet_fields, parse_tokens, render_content_html
+from app.public_errors import public_message
 from app.storage import abs_path
 
 log = logging.getLogger(__name__)
@@ -101,9 +106,21 @@ def get_job(job_id: str, db: Session = Depends(get_db), user: User = Depends(get
     if not job or job.org_id != user.org_id:
         raise error("JOB_NOT_FOUND", "Job not found", 404)
     outputs = db.scalars(select(SectionOutput).where(SectionOutput.job_id == job_id)).all()
+    # No token usage and no model: what a job cost and which vendor ran it are
+    # ours to know. `error` and the row errors in `progress` are written as
+    # user-facing sentences by the runners; the detail is in the server log.
+    progress = job.progress
+    extras: dict = {}
+    if isinstance(progress, dict) and "stages" in progress:
+        # A compile's stage list is the pipeline; the poller gets three steps,
+        # the counts known so far and the result -- each allow-listed, so a key
+        # written to the row for our own use is not published by default.
+        extras = public_job_extras(job)
+        progress = {"stages": extras["stages"]}
     return {
-        "id": job.id, "status": job.status, "progress": job.progress, "token_usage": job.token_usage,
+        "id": job.id, "status": job.status, "progress": progress,
         "error": job.error,
+        **extras,
         "sections": [{"section_id": o.section_id, "status": o.status, "grounding_score": o.grounding_score, "error": o.error} for o in outputs],
     }
 
@@ -529,11 +546,13 @@ def suggest_edit(version_id: str, body: EditSuggestion, db: Session = Depends(ge
         purpose="generate",
     )
     if result.data is None:
-        raise error("SUGGESTION_UNAVAILABLE", f"The model could not answer: {result.error}", 502)
+        log.warning("Edit suggestion failed: %s", result.error)
+        raise error("SUGGESTION_UNAVAILABLE",
+                    "The AI could not suggest an edit right now. Please try again.", 502)
     return {
         "replacement": result.data.get("replacement", ""),
         "note": result.data.get("note", ""),
-        "model": result.model,
+        # No "model": the vendor behind a suggestion is not the reader's concern.
     }
 
 
@@ -817,8 +836,8 @@ MAX_BULK_DOCUMENTS = 100
 
 
 def _download_filename(db: Session, gd: GeneratedDocument, ext: str = "docx") -> str:
-    project = db.get(Project, gd.project_id)
-    return f"{project.name}_{project.display_id}_{gd.display_id}_{gd.language}.{ext}"
+    """Named after the document, not the workspace (`generation.filenames`)."""
+    return generated_document_filename(db, gd, ext)
 
 
 def _as_pdf(docx_path: str, language: str) -> str:
@@ -834,11 +853,12 @@ def _as_pdf(docx_path: str, language: str) -> str:
     try:
         result = render_pdf(docx_path, os.path.dirname(docx_path), language=language)
     except PreviewUnavailable as exc:
+        # Written for the user, and raised without the converter's own output.
         raise error("PDF_UNAVAILABLE", str(exc), 503) from exc
     except Exception as exc:  # noqa: BLE001 - a converter failure is not a bug in the letter
         raise error(
             "PDF_CONVERSION_FAILED",
-            f"The document could not be converted to PDF: {exc}. The .docx is unaffected.",
+            public_message(exc, "The document could not be converted to PDF. The .docx is unaffected."),
             502,
         ) from exc
     return result.pdf_path
@@ -926,7 +946,8 @@ def download_document_version(version_id: str, format: str = "docx", db: Session
 
     log_audit(db, user, f"Downloaded a document ({ext})", "document_version", dv.id, gd.project_id, "success")
     db.commit()
-    return FileResponse(path, filename=_download_filename(db, gd, ext), media_type=media)
+    return FileResponse(path, media_type=media, headers={
+        "Content-Disposition": content_disposition(_download_filename(db, gd, ext))})
 
 
 class BulkDownload(BaseModel):
@@ -972,7 +993,8 @@ def download_documents(body: BulkDownload, db: Session = Depends(get_db), user: 
             gd = owned_document(db, document_id, user)
             dv = db.get(DocumentVersion, gd.current_version_id) if gd.current_version_id else None
             if dv is None or not dv.blob_path:
-                failed.append(f"{document_id}: no saved version to download")
+                failed.append(f"{_download_filename(db, gd, body.format)}: no saved version "
+                              "to download")
                 continue
             # Skipped and listed, not refused whole -- the same call the bulk
             # delete above makes, for the same reason. A selection of forty where
@@ -987,31 +1009,35 @@ def download_documents(body: BulkDownload, db: Session = Depends(get_db), user: 
                 continue
             source = str(abs_path(dv.blob_path))
             if not os.path.exists(source):
-                failed.append(f"{document_id}: the file is no longer on disk")
+                failed.append(f"{_download_filename(db, gd, body.format)}: the file is no "
+                              "longer on disk")
                 continue
             try:
                 path = _as_pdf(source, gd.language or "en") if body.format == "pdf" else source
             except Exception as exc:  # noqa: BLE001 - recorded in the archive, not raised
-                detail = getattr(exc, "detail", None) or str(exc)
+                # `_as_pdf` raises only `error(...)`, whose message is already
+                # written for users; anything else is logged, not archived.
+                fallback = "it could not be converted to PDF"
+                detail = getattr(exc, "detail", None)
                 if isinstance(detail, dict):
-                    detail = detail.get("error", {}).get("message", str(exc))
+                    detail = detail.get("error", {}).get("message") or fallback
+                elif not isinstance(detail, str) or not detail:
+                    detail = public_message(exc, fallback)
                 failed.append(f"{_download_filename(db, gd, body.format)}: {detail}")
                 continue
 
-            name = _download_filename(db, gd, body.format)
-            # Two documents in one project can share a display name; a zip with
-            # duplicate entries silently keeps one of them.
-            if name in seen:
-                stem, _dot, ext = name.rpartition(".")
-                name = f"{stem}_{gd.display_id}.{ext}"
-            seen.add(name)
-            archive.write(path, arcname=name)
+            # A zip with duplicate entries silently keeps one of them, and the
+            # same document can be selected twice.
+            name = unique_name(_download_filename(db, gd, body.format), seen)
+            # Fixed header clock and attributes: `archive.write` would copy the
+            # server's file mtime and Unix permissions into every entry.
+            write_fixed(archive, name, path=path)
             written += 1
 
         if failed:
-            archive.writestr(
-                "_FAILED.txt",
-                "These documents are not in this archive:\n\n" + "\n".join(failed) + "\n",
+            write_fixed(
+                archive, "_FAILED.txt",
+                data="These documents are not in this archive:\n\n" + "\n".join(failed) + "\n",
             )
 
     if not written:

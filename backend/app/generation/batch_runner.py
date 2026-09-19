@@ -13,13 +13,14 @@ A row that needs human input completes as `pending_review` rather than failing,
 and never blocks the rest of the batch.
 """
 
+import logging
 import os
-import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.generation.filenames import document_filename
 from app.db import SessionLocal
 from app.tenancy import adopt_org_of_user, release_org_scope
 from app.metrics import SINGLE_DOCX_RENDER, record_qa_findings, timed
@@ -35,6 +36,13 @@ from app.generation.source_ingestion import extract_records
 from app.generation.renderers import OOXML_FILL
 from app.generation.resolution_engine import CyclicDependencyError, resolve_manifest
 from app.generation.value_format import resolve_locale, resolved_locale
+
+log = logging.getLogger(__name__)
+
+#: What a client sees when a row or a whole batch fails for a reason nobody
+#: wrote a message for. The exception is logged; these are what the job keeps.
+ROW_FAILED_MESSAGE = "This document could not be generated."
+BATCH_FAILED_MESSAGE = "The batch stopped unexpectedly."
 
 
 @dataclass
@@ -144,7 +152,9 @@ def run_row(
                 locale=locale, condition_verdicts=resolution.condition_verdicts,
             )
     except Exception as exc:
-        return RowOutcome(row_index, "failed", error=f"{type(exc).__name__}: {exc}")
+        # The row's error is returned by the job endpoint; the exception is not.
+        log.error("Row %s failed to render (manifest %s)", row_index, manifest.id, exc_info=exc)
+        return RowOutcome(row_index, "failed", error=ROW_FAILED_MESSAGE)
 
     if not persist:
         return RowOutcome(
@@ -154,7 +164,6 @@ def run_row(
         )
 
     display_id = _next_display_id(db, "generated_doc_display_id", 50000)
-    filename = f"{project.name}_{project.display_id}_{display_id}_{language}.docx"
     # A QA failure outranks a review flag: `pending_review` means a person has
     # a decision to make, `blocked` means the document is defective and cannot
     # be approved until it is regenerated.
@@ -187,6 +196,9 @@ def run_row(
     db.add(version)
     db.flush()
     gen_doc.current_version_id = version.id
+    filename = document_filename(
+        document_type=project.document_type, created_at=gen_doc.created_at,
+        document_id=gen_doc.id, language=language, ext="docx")
 
     generation = ManifestGeneration(
         org_id=manifest.org_id, manifest_id=manifest.id, source_record=resolved,
@@ -366,6 +378,9 @@ def run_batch(
         job.finished_at = datetime.now(timezone.utc)
         db.commit()
     except Exception:
+        # The traceback goes to the log, not to `job.error`: that column is
+        # returned by GET /jobs/{id}, and a traceback there is our source tree.
+        log.exception("Batch job %s stopped unexpectedly", job_id)
         db.rollback()
         # PostgreSQL reverts a session SET when its transaction aborts, so the
         # rollback above has just thrown away the tenant scope. Without
@@ -375,7 +390,7 @@ def run_batch(
         job = db.get(GenerationJob, job_id)
         if job:
             job.status = "failed"
-            job.error = traceback.format_exc(limit=4)
+            job.error = BATCH_FAILED_MESSAGE
             job.finished_at = datetime.now(timezone.utc)
             db.commit()
     finally:

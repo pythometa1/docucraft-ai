@@ -6,7 +6,6 @@ import {
   MessageSquare,
   FileText,
   BarChart3,
-  Gauge,
   Users,
   Shield,
   Settings,
@@ -30,6 +29,7 @@ import { useTheme } from "@/lib/theme";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { CommandPalette } from "@/components/command-palette";
 import { ModelBoundaryChip } from "@/components/model-boundary-chip";
+import { BackgroundTray } from "@/components/background-tray";
 
 const NAV = [
   { to: "/dashboard", label: "Projects", icon: FolderKanban },
@@ -37,14 +37,10 @@ const NAV = [
   { to: "/templates", label: "Templates", icon: FileText },
   { to: "/review", label: "Review", icon: ClipboardCheck },
   { to: "/analytics", label: "Analytics", icon: BarChart3 },
-  // §22's numbers, which were measured continuously and shown nowhere. A
-  // role without READ_AUDIT gets a plain explanation rather than a 403 toast,
-  // so this is not hidden from the nav.
-  { to: "/quality", label: "Quality", icon: Gauge },
   { to: "/team", label: "Team", icon: Users },
   { to: "/audit-log", label: "Audit Log", icon: Shield },
   { to: "/settings", label: "Settings", icon: Settings },
-  { to: "/docs", label: "Docs", icon: BookOpen },
+  { to: "/guide", label: "Guide", icon: BookOpen },
 ];
 
 function initials(name: string): string {
@@ -212,10 +208,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           {/* Was a button with no handler; the destination it implied already
               exists in the nav, so it goes there. */}
           <Link
-            to="/docs"
+            to="/guide"
             className="p-2 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground"
-            aria-label="Documentation"
-            title="Documentation"
+            aria-label="Guide"
+            title="Guide"
           >
             <HelpCircle className="h-4 w-4" />
           </Link>
@@ -247,6 +243,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         <footer className="border-t border-border py-3 px-6 text-xs text-muted-foreground text-center">
           © 2026 DocuMind AI | All rights reserved.
         </footer>
+        {/* Readings sent to the background keep reporting from here, on
+            every screen, until they finish. */}
+        <BackgroundTray />
       </div>
     </div>
   );

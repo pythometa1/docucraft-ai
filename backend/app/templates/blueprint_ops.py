@@ -21,6 +21,7 @@ cannot come back through a different door.
 
 from dataclasses import dataclass, field as dataclass_field
 
+from app.public_errors import public_message
 from app.templates import blueprint as bp
 
 #: The vocabulary. Anything else is rejected by name rather than ignored, so a
@@ -376,7 +377,8 @@ def apply_operations(body: dict, objects, ops) -> OperationResult:
             _reject(result.rejected, op, str(exc))
             continue
         except (ValueError, TypeError, KeyError) as exc:      # pragma: no cover - defensive
-            _reject(result.rejected, op, f"{type(exc).__name__}: {exc}")
+            _reject(result.rejected, op, public_message(
+                exc, "This change could not be applied to the template."))
             continue
 
         result.applied.append(op)

@@ -33,6 +33,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, StageSkeleton } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const SELECT_CLASS =
   "h-8 rounded-md border border-input bg-transparent px-2 text-xs";
@@ -90,7 +91,7 @@ export function SafetyEditor({ reports }: { reports: PvReportInstance[] }) {
   if (sections === null) return <StageSkeleton lines={6} />;
   if (error) {
     return <ErrorBanner title="The report could not be opened"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
 
   const active = sections.find((s) => s.id === activeId) ?? null;
@@ -169,7 +170,7 @@ function DeltaStrip({ delta }: { delta: PvDelta }) {
   const socs = Object.entries(delta.events_by_soc).slice(0, 3);
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
-         title={delta.note}>
+         title={delta.note ? plainly(delta.note) : undefined}>
       <span className="inline-flex items-center gap-1">
         <ArrowRightLeft className="h-3 w-3" /> {delta.interval_cases} case(s) this interval
       </span>
@@ -202,7 +203,7 @@ function SectionPane({ reportId, section, onChanged }: {
     api.pvGetDraft(section.id)
       .then((res) => { if (live) { setDraft(res.draft); setVersions(res.versions); } })
       .catch((e: any) => { if (live) { setDraft(null); toast.error("The draft could not be loaded",
-                                                                   { description: e?.message ?? String(e) }); } });
+                                                                   { description: plainly(e?.message ?? String(e)) }); } });
     return () => { live = false; };
   }, [section.id]);
 
@@ -216,7 +217,7 @@ function SectionPane({ reportId, section, onChanged }: {
       setInstruction("");
       onChanged();
     } catch (e: any) {
-      toast.error("The section could not be drafted", { description: e?.message ?? String(e) });
+      toast.error("The section could not be drafted", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -238,7 +239,7 @@ function SectionPane({ reportId, section, onChanged }: {
         });
       }
     } catch (e: any) {
-      toast.error("The draft could not be saved", { description: e?.message ?? String(e) });
+      toast.error("The draft could not be saved", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -251,7 +252,7 @@ function SectionPane({ reportId, section, onChanged }: {
       onChanged();
       toast.success(`${section.section_code} is ${status.replace("_", " ")}.`);
     } catch (e: any) {
-      toast.error("The status could not be changed", { description: e?.message ?? String(e) });
+      toast.error("The status could not be changed", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -266,7 +267,7 @@ function SectionPane({ reportId, section, onChanged }: {
       setDraft(res.draft);
     } catch (e: any) {
       toast.error(`Version ${version} could not be opened`,
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     }
   }
 
@@ -319,8 +320,8 @@ function SectionPane({ reportId, section, onChanged }: {
             <DraftView content={draft.content} reportId={reportId} />
             <div className="flex flex-wrap items-center justify-between gap-2 text-[0.65rem] text-muted-foreground">
               <span>
-                v{draft.version} · {draft.origin.replace("_", " ")}
-                {draft.model && ` · ${draft.model}`}
+                {/* "AI draft", never the model's name: the server no longer sends it. */}
+                v{draft.version} · {draft.origin === "model" ? "AI draft" : draft.origin.replace("_", " ")}
               </span>
               <Button variant="outline" size="sm" className="h-7"
                       onClick={() => setEditing(draft.content)}>
@@ -331,7 +332,7 @@ function SectionPane({ reportId, section, onChanged }: {
         ) : (
           <PolishedEmpty icon={<Sparkles className="h-8 w-8 text-muted-foreground" />}
                          title="Not drafted yet"
-                         subtitle="Generate a first draft from the masked sources and the confirmed figures, or write it yourself." />
+                         subtitle="Get a first draft from your de-identified sources and confirmed figures, or write it yourself." />
         )}
 
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border p-2">
@@ -438,13 +439,13 @@ function LockedTable({ reportId, tableKey }: { reportId: string; tableKey: strin
     <div className="rounded-lg border border-brand/30 bg-brand/5">
       <div className="flex items-center gap-1.5 border-b border-brand/20 px-3 py-1.5 text-[0.65rem] text-brand">
         <Lock className="h-3 w-3" />
-        Rendered from confirmed case data — edit in Case review · {tableKey}
+        From your confirmed case data — edit in Case review
       </div>
       {table === undefined ? (
         <div className="p-3"><StageSkeleton lines={2} /></div>
       ) : table === null ? (
         <p className="p-3 text-xs text-warning">
-          This table cannot be built yet: {reason}
+          This table cannot be filled in yet: {plainly(reason ?? "")}
         </p>
       ) : (
         <div className="max-h-64 overflow-auto">
@@ -492,7 +493,8 @@ function IssuesTab({ draft, section, leakage }: {
       {missingTable && (
         <p className="flex items-start gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-2">
           <Table2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
-          This section's table [TABLE: {section.table_key}] is not in the text.
+          This section's table is missing from the text. Put the line
+          [TABLE: {section.table_key}] back where the table belongs.
         </p>
       )}
       {leakage.map((hit, i) => (
@@ -518,7 +520,7 @@ function IssuesTab({ draft, section, leakage }: {
 
 function SourcesTab({ draft }: { draft: PvDraft | null }) {
   if (!draft?.source_map?.length) {
-    return <p className="text-xs text-muted-foreground">No sources were retrieved for this version.</p>;
+    return <p className="text-xs text-muted-foreground">No sources are cited in this version.</p>;
   }
   return (
     <ul className="space-y-1 text-xs">
@@ -547,8 +549,8 @@ function DataTab({ reportId, section }: { reportId: string; section: PvSection }
 
   if (!section.table_key) {
     return <p className="text-xs text-muted-foreground">
-      This section carries no computed table. It may quote the report's case counts, which
-      the model is given already split into interval and cumulative.
+      This section has no table. It can quote the report's case counts, which are
+      available here split into interval and cumulative.
     </p>;
   }
   if (!table) return <p className="text-xs text-muted-foreground">No data for this table yet.</p>;
@@ -631,7 +633,7 @@ function CaseBinding({ report }: { report: PvReportInstance }) {
         ...l, ...Object.fromEntries(res.items.map((c) => [c.id, c.worldwide_case_id ?? c.id])),
       }));
     } catch (e: any) {
-      toast.error("Search failed", { description: e?.message ?? String(e) });
+      toast.error("Search failed", { description: plainly(e?.message ?? String(e)) });
     }
   }
 
@@ -641,7 +643,7 @@ function CaseBinding({ report }: { report: PvReportInstance }) {
       const res = await api.pvUpdateReport(report.id, { case_ids: next });
       setBound(res.case_ids ?? []);
     } catch (e: any) {
-      toast.error("Cases not saved", { description: e?.message ?? String(e) });
+      toast.error("Cases not saved", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }

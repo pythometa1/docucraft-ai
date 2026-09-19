@@ -11,6 +11,13 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 
+class SourceUnreadable(ValueError):
+    """A source this module declines to read, with a message written for the
+    person who uploaded it. A ValueError so existing callers still catch it;
+    a class of its own so they can tell it from a library's ValueError, whose
+    text is not for users."""
+
+
 @dataclass
 class RawChunk:
     text: str
@@ -72,7 +79,7 @@ def extract_pdf(path: str) -> list[RawChunk]:
         for part in _split_paragraph(text):
             chunks.append(RawChunk(text=part, element_type="paragraph", heading_path=f"page {page_no}"))
     if not chunks:
-        raise ValueError("No extractable text found (the PDF may be a scanned image without OCR support in this build).")
+        raise SourceUnreadable("No extractable text found (the PDF may be a scanned image without OCR support in this build).")
     return chunks
 
 
@@ -127,7 +134,7 @@ def extract(path: str, file_type: str) -> list[RawChunk]:
         return extract_csv(open(path, "rb").read())
     if file_type in ("txt", "html", "json"):
         return extract_txt(open(path, "rb").read())
-    raise ValueError(f"Unsupported source file type for ingestion: {file_type}")
+    raise SourceUnreadable(f"Unsupported source file type for ingestion: {file_type}")
 
 
 def content_sha256(text: str) -> str:
@@ -218,7 +225,7 @@ def extract_records(path: str, file_type: str, sheet: str | None = None) -> tupl
         text = open(path, "rb").read().decode("utf-8", errors="ignore")
         return _rows_to_records(list(csv.reader(io.StringIO(text))))
 
-    raise ValueError(
+    raise SourceUnreadable(
         f"Cannot read tabular records from a {file_type} file. "
         f"Supported: {', '.join(sorted(RECORD_FILE_TYPES))}."
     )

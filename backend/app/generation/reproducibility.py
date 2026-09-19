@@ -94,6 +94,27 @@ TIMESTAMP_ELEMENTS = (
     f"{{{_COREPROPS_NS}}}lastPrinted",
 )
 
+_DC_NS = "http://purl.org/dc/elements/1.1/"
+
+#: What a template records about its own life in the sending organisation --
+#: owner notes, catalogue keywords, the master it was cut from, who edited it
+#: last. None of it is about the document a recipient holds. Removed, not
+#: blanked: an empty `<cp:keywords/>` still says a keyword field was in use.
+#: (`dc:description` is what Word shows as "Comments".)
+INTERNAL_ELEMENTS = (
+    f"{{{_DC_NS}}}description",
+    f"{{{_DC_NS}}}subject",
+    f"{{{_COREPROPS_NS}}}keywords",
+    f"{{{_COREPROPS_NS}}}category",
+    f"{{{_COREPROPS_NS}}}contentStatus",
+    f"{{{_COREPROPS_NS}}}lastModifiedBy",
+)
+
+#: The revision counter says how many times the template was saved; a
+#: generated document is on its first.
+REVISION_ELEMENT = f"{{{_COREPROPS_NS}}}revision"
+FIXED_REVISION = "1"
+
 #: OPC readers locate parts through the central directory, so entry order is
 #: free to be anything -- but `[Content_Types].xml` first is what Word writes and
 #: what streaming readers expect to find without seeking, so the declared order
@@ -117,14 +138,26 @@ def entry_order(names) -> list:
 
 
 def normalise_core_properties(raw: bytes) -> bytes:
-    """`docProps/core.xml` with every clock pinned to the fixed instant.
+    """`docProps/core.xml` with every clock pinned and the template's internal
+    bookkeeping removed.
 
-    Only the timestamp elements are touched: author, title and revision are
-    document content that came from the approved template, and a normaliser that
-    quietly erased them would be destroying evidence rather than removing noise.
+    Two kinds of change, and nothing else:
+
+      * every timestamp is pinned to the fixed instant (`TIMESTAMP_ELEMENTS`);
+      * the fields that describe the *template's* life inside the customer's
+        organisation -- its description, keywords, category, subject, status,
+        last editor -- are removed, and the revision counter reset to 1. A
+        master template carries "HR-TPL-ANZ-014", its owner's notes and "revision
+        14"; the letter cut from it is a new document, and handing those to its
+        recipient discloses the sender's internal process (`INTERNAL_ELEMENTS`).
+
+    Title and author are kept: they are the document's own identity, and a
+    normaliser that erased them would be destroying content rather than noise.
 
     Idempotent, which is what makes it usable as a comparison key -- the QA gate
-    applies it to the template and to the output and compares the results.
+    applies it to the template and to the output and compares the results, so
+    the static-region check still refuses a render that rewrote the title or the
+    author, and forgives exactly what this function sets.
     """
     try:
         root = etree.fromstring(raw)
@@ -138,6 +171,11 @@ def normalise_core_properties(raw: bytes) -> bytes:
     for tag in TIMESTAMP_ELEMENTS:
         for element in root.iter(tag):
             element.text = FIXED_DOCPROPS_TIMESTAMP
+    for tag in INTERNAL_ELEMENTS:
+        for element in list(root.iter(tag)):
+            element.getparent().remove(element)
+    for element in root.iter(REVISION_ELEMENT):
+        element.text = FIXED_REVISION
 
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
@@ -147,7 +185,9 @@ def _read_entries(path: str) -> list:
         with zipfile.ZipFile(path) as archive:
             return [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
     except (zipfile.BadZipFile, OSError) as exc:
-        raise NotAPackage(f"{path} is not a readable Office package: {exc}") from exc
+        # The name only: this message can reach a document's QA notes, and the
+        # full path is a location on this host. The cause stays chained.
+        raise NotAPackage(f"{os.path.basename(str(path))} is not a readable Office package") from exc
 
 
 def normalise_docx(path: str) -> str:
@@ -249,5 +289,36 @@ def normalisation_failures(path: str) -> list:
                 ):
                     failures.append(f"{part} still carries a real clock")
     except (zipfile.BadZipFile, OSError) as exc:
-        raise NotAPackage(f"{path} is not a readable Office package: {exc}") from exc
+        # The name only: this message can reach a document's QA notes, and the
+        # full path is a location on this host. The cause stays chained.
+        raise NotAPackage(f"{os.path.basename(str(path))} is not a readable Office package") from exc
     return failures
+
+
+def fixed_zip_entry(name: str) -> zipfile.ZipInfo:
+    """A zip entry header that says nothing about the host that wrote it.
+
+    For archives handed to a person (a batch of letters, a bulk download, eCTD
+    leaves): `ZipFile.write` copies each file's mtime and Unix permission bits
+    into its header, which records when and on what kind of machine the server
+    produced the file. The same constants `normalise_docx` uses inside a
+    package are used here. (`zipfile` turns an external_attr of 0 into a fixed
+    `?rw-------` on write, so every entry carries that one constant rather than
+    the source file's real permissions.)
+    """
+    info = zipfile.ZipInfo(filename=name, date_time=FIXED_ZIP_TIMESTAMP)
+    info.compress_type = COMPRESSION
+    info.create_system = CREATE_SYSTEM
+    info.external_attr = EXTERNAL_ATTR
+    return info
+
+
+def write_fixed(archive: zipfile.ZipFile, name: str, *, path=None, data=None) -> None:
+    """Add one entry to `archive` under a `fixed_zip_entry` header."""
+    if path is not None:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    archive.writestr(fixed_zip_entry(name), data or b"", compress_type=COMPRESSION,
+                     compresslevel=COMPRESS_LEVEL)

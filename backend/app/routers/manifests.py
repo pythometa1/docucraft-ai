@@ -5,46 +5,52 @@ literal engine for legacy colour-coded templates like the Hospira/Pfizer
 offer letter this was built and verified against.
 """
 
+import contextlib
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit.service import log_audit
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.metrics import (
     AGENTIC_COMPILE, FAMILY_MATCH_LOOKUP, PDF_OVERLAY_RENDER, SINGLE_DOCX_RENDER,
     record_qa_findings, timed,
 )
 from app.models import (
-    Counter, DocumentVersion, GeneratedDocument, ManifestGeneration, Project,
+    Counter, DocumentVersion, GeneratedDocument, GenerationJob, ManifestGeneration, Organization, Project,
     SuggestionLog, TemplateCluster, TemplateClusterMember, TemplateFamily,
     TemplateFile, TemplateManifest, TemplateVersion, User, uid,
 )
+from app.public_errors import public_message
 from app.security import error, get_current_user
 from app.retrieval.hybrid import EvidenceDocument, retrieve_evidence
 from app.retrieval.indexing import index_manifest_fields
 from app.retrieval.store import SqlVectorStore
 from app.retrieval.vector import SOURCE_COLUMN_DESCRIPTION, InMemoryVectorStore, VectorIndex
-from app.tenancy import llm_policy_for
+from app.tenancy import adopt_org_of_user, llm_policy_for, release_org_scope
 from app.ownership import owned_manifest, owned_project, owned_template_file
 from app.templates.ingest import parse_template_version
 from app.templates.parsers.docx_prescan import prescan
 from app.generation.docx_renderer import fill_template
 from app.generation.single import FillFailed, generate_one
 from app.generation.pdf_fill import fill_pdf_template
+from app.generation.filenames import content_disposition
 from app.generation.source_template import build_workbook, filename_for
-from app.compile_progress import DETERMINISTIC, EMBEDDING, MODEL, RETRIEVAL, CompileProgress
+from app.compile_progress import (
+    DETERMINISTIC, EMBEDDING, MODEL, RETRIEVAL, CompileProgress, running_readings, valid_token,
+)
 from app.compiler.agentic_compiler import compile_template as compile_agentic_template
 from app.compiler.mapping_agent import _paragraph_texts
 from app.authz import APPROVE_MANIFEST, check_manifest_approval, has_capability, require
 from app.compiler.confidence import Band
-from app.expressions.plain_english import annotate_conditions, strip_derived
+from app.expressions.plain_english import strip_derived
 from app.manifests.validator import validate_manifest
 from app.generation.renderers import OOXML_FILL
 from app.templates.family_matcher import cluster_templates
@@ -55,6 +61,9 @@ from app.templates.inheritance import (
 )
 from app.manifests.diff import diff_manifests
 from app.manifests.models import envelope_from_row, to_row_values
+from app.manifests.public import (
+    NEW, REUSED, REVIEW, public_decision, public_diff, public_manifest, restore_internal,
+)
 from app.storage import abs_path, save_upload
 
 log = logging.getLogger(__name__)
@@ -155,19 +164,8 @@ def _all_warnings(db: Session, m: TemplateManifest) -> list[dict]:
 
 
 def _manifest_out(m: TemplateManifest) -> dict:
-    return {
-        "id": m.id, "template_file_id": m.template_file_id, "template_version_id": m.template_version_id,
-        "version_no": m.version_no, "status": m.status, "fields": m.fields,
-        # §7: the approver signs the meaning, not the syntax. Rendered from the
-        # stored expression on every read so it cannot drift from what will run.
-        "conditions": annotate_conditions(m.conditions),
-        "blocks": m.blocks, "compiled_by": m.compiled_by, "confidence": m.confidence,
-        "prescan_summary": m.prescan_summary, "created_at": m.created_at,
-        "approved_by": m.approved_by, "approved_at": m.approved_at,
-        # The reviewer's job is these two. They were computed at compile time
-        # and never left the process.
-        "warnings": m.warnings or [], "warning_dispositions": m.warning_dispositions or {},
-    }
+    # An allow-list: see `manifests.public` for what stays in and why.
+    return public_manifest(m)
 
 
 #: How many columns the compiler is shown. §10 caps evidence at
@@ -388,11 +386,17 @@ def try_auto_approve(
 @router.post("/templates/{template_file_id}/compile-manifest", status_code=201)
 def compile_manifest_endpoint(
     template_file_id: str,
+    background_tasks: BackgroundTasks,
+    response: Response,
     # A token the caller chose before making the request, so it can poll
     # `GET /jobs/{token}` while this is still running. Server-generated ids are
     # useless here: the client cannot learn one until the response arrives, and
     # by then there is nothing left to watch.
     progress_token: str | None = None,
+    # Answer 202 at once and read on the server's own time. A reading takes
+    # minutes; held inside the request it dies with a closed tab, a reload or a
+    # proxy timeout, and the person watching it cannot do anything else.
+    background: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -403,6 +407,103 @@ def compile_manifest_endpoint(
     if not tv:
         raise error("TEMPLATE_NOT_PARSED", "Template has no parsed version yet", 400)
 
+    if not background:
+        progress = CompileProgress(
+            progress_token, org_id=user.org_id, project_id=tf.project_id, user_id=user.id,
+            template_file_id=tf.id,
+        )
+        return run_compile(db, user, tf, tv, progress)
+
+    # One reading per template at a time. Two would race to write version N+1
+    # and each would auto-approve over the other.
+    if tf.id in running_readings(db, project_id=tf.project_id):
+        raise error("COMPILE_IN_PROGRESS",
+                    "This template is already being read. Wait for it to finish.", 409)
+    if progress_token is not None and not valid_token(progress_token):
+        raise error("INVALID_PROGRESS_TOKEN", "The progress token must be a UUID.", 422)
+    token = progress_token or str(uuid.uuid4())
+    if db.get(GenerationJob, token) is not None:
+        # A reused token would hand this reading somebody else's progress row.
+        raise error("INVALID_PROGRESS_TOKEN", "This progress token has already been used.", 409)
+
+    # Written before the 202, so the first poll finds a running job rather than
+    # a 404 and the templates list can already show it.
+    CompileProgress(token, org_id=user.org_id, project_id=tf.project_id, user_id=user.id,
+                    template_file_id=tf.id).start()
+    background_tasks.add_task(run_compile_in_background, token, tf.id, user.id)
+    response.status_code = 202
+    return {"progress_token": token, "status": "running"}
+
+
+#: What a reader sees when a background reading stops for a reason nobody wrote
+#: a sentence for. The exception goes to the log.
+READ_FAILED_MESSAGE = "Could not read this template. Please try again."
+
+
+def run_compile_in_background(token: str, template_file_id: str, user_id: str) -> None:
+    """Background entry point. Owns its session because the request that
+    scheduled it has already returned and closed its own -- the batch runner's
+    pattern, tenant scope included."""
+    from app.llm.metering import drain_pending, write_pending
+
+    db = SessionLocal()
+    pending: list[dict] = []
+    progress = None
+    try:
+        # §16: nothing has told this session which tenant it speaks for, and on
+        # PostgreSQL every read below would otherwise come back empty.
+        adopt_org_of_user(db, user_id)
+        user = db.get(User, user_id)
+        tf = db.get(TemplateFile, template_file_id)
+        tv = db.get(TemplateVersion, tf.current_version_id) if tf and tf.current_version_id else None
+        progress = CompileProgress(token, org_id=user.org_id, project_id=tf.project_id,
+                                   user_id=user.id, template_file_id=template_file_id)
+        if tv is None:
+            progress.fail(READ_FAILED_MESSAGE)
+            return
+        run_compile(db, user, tf, tv, progress)
+    except Exception:
+        # A traceback in `job.error` would be our source tree on the poller's
+        # screen. The log has it; the row gets a sentence.
+        log.exception("Background reading %s stopped unexpectedly", token)
+        with contextlib.suppress(Exception):
+            db.rollback()
+        if progress is None:
+            progress = _orphan_progress(db, token, user_id, template_file_id)
+        if progress is not None:
+            progress.fail(READ_FAILED_MESSAGE)
+    finally:
+        # Model calls this reading paid for are recorded even when it failed --
+        # the same harvest `get_db` does for a request.
+        with contextlib.suppress(Exception):
+            pending = drain_pending(db)
+        release_org_scope(db)
+        db.close()
+        if pending:
+            write_pending(pending)
+
+
+def _orphan_progress(db: Session, token: str, user_id: str, template_file_id: str):
+    """A progress writer for a run that failed before it could build its own."""
+    try:
+        adopt_org_of_user(db, user_id)
+        job = db.get(GenerationJob, token)
+        if job is None:
+            return None
+        return CompileProgress(token, org_id=job.org_id, project_id=job.project_id,
+                               user_id=user_id, template_file_id=template_file_id)
+    except Exception:  # noqa: BLE001 - nothing left to report it on
+        return None
+
+
+def run_compile(db: Session, user: User, tf: TemplateFile, tv: TemplateVersion,
+                progress: CompileProgress) -> dict:
+    """Read one template and store what was found. Shared by the request-bound
+    and the background mode, so the two cannot drift into different readings.
+
+    Raises COMPILE_FAILED when the reading itself fails; commits otherwise.
+    """
+    template_file_id = tf.id
     path = str(abs_path(tv.blob_path))
     # §16 residency, resolved once for the whole compile. Every model call below
     # is handed this policy, so a compile for an EU-pinned organisation refuses
@@ -411,12 +512,16 @@ def compile_manifest_endpoint(
     policy = llm_policy_for(db, user.org_id, project_id=tf.project_id, user_id=user.id,
                             subject_type="template_file", subject_id=tf.id)
     agent_log: list = []
-    progress = CompileProgress(
-        progress_token, org_id=user.org_id, project_id=tf.project_id, user_id=user.id,
-    )
     try:
         with progress.stage("parse", "Reading the document", DETERMINISTIC):
             scan = prescan(path)
+            # The counts the reader can check against their own document, as
+            # soon as they exist -- not after the minutes the next step takes.
+            progress.fact(
+                placeholders_found=sum(1 for s in scan.spans if s.color == "blue" and s.text.strip()),
+                instructions_found=sum(1 for s in scan.spans if s.color == "red" and s.text.strip()),
+                word_fields_found=len(scan.mergefields),
+            )
             progress.note(
                 f"{len(scan.paragraphs)} paragraphs, "
                 f"{sum(1 for s in scan.spans if s.color in ('red', 'blue') and s.text.strip())} marked runs, "
@@ -443,12 +548,16 @@ def compile_manifest_endpoint(
                     path, llm_policy=policy, evidence=evidence, progress=progress,
                 )
             compiled, agent_log = outcome.manifest, outcome.transcript_dicts()
+            if outcome.ok:
+                progress.fact(values_found=len(compiled.fields or []),
+                              optional_sections_found=len(compiled.conditions or []))
             progress.note(
                 f"{len(compiled.fields)} field(s) and {len(compiled.conditions)} condition(s) read"
                 if outcome.ok else f"compile did not converge: {outcome.reason[:160]}"
             )
     except Exception as exc:
-        raise error("COMPILE_FAILED", f"Could not compile manifest: {exc}", 422)
+        raise error("COMPILE_FAILED", public_message(
+            exc, "Could not compile the manifest. Please try again."), 422)
 
     existing = db.scalars(select(TemplateManifest).where(TemplateManifest.template_file_id == template_file_id)).all()
     version_no = max((m.version_no for m in existing), default=0) + 1
@@ -535,8 +644,25 @@ def compile_manifest_endpoint(
     )
     db.commit()
     db.refresh(manifest)
-    progress.finish()
-    return {**_manifest_out(manifest), "approval_blocked_reason": approval_blocked_reason}
+    out = {**_manifest_out(manifest), "approval_blocked_reason": approval_blocked_reason}
+    progress.set_result({
+        "manifest_id": manifest.id,
+        "status": manifest.status,
+        "document_summary": out["document_summary"],
+        "field_count": len(manifest.fields or []),
+        "condition_count": len(manifest.conditions or []),
+        "warning_count": len(manifest.warnings or []),
+        "approval_blocked_reason": approval_blocked_reason,
+        "failure_reason": out["failure_reason"],
+    })
+    if manifest.status == "failed":
+        # Stored and shown, not raised: the reading did not converge. To the
+        # person watching that is a failed reading, told in the words
+        # `public_failure_reason` allows.
+        progress.fail(out["failure_reason"] or READ_FAILED_MESSAGE, keep_stage_error=False)
+    else:
+        progress.finish()
+    return out
 
 
 @router.get("/template-manifests/{manifest_id}")
@@ -569,15 +695,18 @@ def patch_manifest(manifest_id: str, body: ManifestPatch, db: Session = Depends(
         raise error("MANIFEST_NOT_FOUND", "Manifest not found", 404)
     if m.status == "approved":
         raise error("MANIFEST_APPROVED", "Approved manifests are immutable -- compile a new version instead", 409)
+    # The screen was sent items with the internal keys taken off, and sends them
+    # back that way; `restore_internal` puts the stored ones back so a review
+    # edit cannot erase what the engine recorded about each item.
     if body.fields is not None:
-        m.fields = body.fields
+        m.fields = restore_internal(body.fields, m.fields)
     if body.conditions is not None:
         # The read path adds rendered sentences to every condition; this is the
         # write path that would store them. Stripped rather than trusted to be
         # absent -- the reviewer's screen sends back what it was given.
-        m.conditions = strip_derived(body.conditions)
+        m.conditions = restore_internal(strip_derived(body.conditions), m.conditions)
     if body.blocks is not None:
-        m.blocks = body.blocks
+        m.blocks = restore_internal(body.blocks, m.blocks)
     m.status = "in_review"
     db.commit()
     db.refresh(m)
@@ -602,16 +731,18 @@ def download_source_template(manifest_id: str, db: Session = Depends(get_db), us
     """
     m = owned_manifest(db, manifest_id, user)
     tf = db.get(TemplateFile, m.template_file_id)
+    org = db.get(Organization, user.org_id)
     workbook = build_workbook(
         {"fields": m.fields, "conditions": m.conditions, "blocks": m.blocks},
         template_name=tf.name if tf else "",
+        author=org.name if org else "",
     )
     log_audit(db, user, "Downloaded source template", "template_manifest", manifest_id)
     db.commit()
     return Response(
         content=workbook,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename_for(tf.name if tf else "")}"'},
+        headers={"Content-Disposition": content_disposition(filename_for(tf.name if tf else ""))},
     )
 
 
@@ -748,7 +879,9 @@ def diff_manifest(manifest_id: str, against: str, db: Session = Depends(get_db),
     left = owned_manifest(db, manifest_id, user)
     right = owned_manifest(db, against, user)
     result = diff_manifests(_envelope(left), _envelope(right))
-    return result.as_dict()
+    # Changed objects carry their attributes, and those include the engine's
+    # scores and reasoning; the reviewer needs what changed, not those.
+    return public_diff(result.as_dict())
 
 
 class InheritManifestRequest(BaseModel):
@@ -807,7 +940,8 @@ def _family_records(db: Session, org_id: str) -> list:
             # that is quietly wrong rather than absent.
             raise error(
                 "FAMILY_FINGERPRINT_UNREADABLE",
-                f"Template family {family.id} carries a fingerprint this build cannot read: {exc}",
+                public_message(exc, f"Template family {family.id} carries a fingerprint that "
+                                    "cannot be read."),
                 500,
             )
     return records
@@ -837,7 +971,8 @@ def inherit_manifest_endpoint(template_file_id: str, body: InheritManifestReques
         fingerprint = fingerprint_file(path)
         scan = prescan(path)
     except Exception as exc:
-        raise error("FINGERPRINT_FAILED", f"Could not read the template structure: {exc}", 422)
+        raise error("FINGERPRINT_FAILED", public_message(
+            exc, "Could not read the template structure."), 422)
 
     request = body or InheritManifestRequest()
     records = _family_records(db, user.org_id)
@@ -955,15 +1090,23 @@ def inherit_manifest_endpoint(template_file_id: str, body: InheritManifestReques
     if manifest_row is not None:
         db.refresh(manifest_row)
 
+    # What happened, in words. The branch, the similarity and the thresholds
+    # behind them are the matching method; they stay in the audit row above.
+    if manifest_row is None:
+        outcome = NEW
+    elif decision.branch is InheritanceBranch.REUSE_MANIFEST:
+        outcome = REUSED
+    else:
+        outcome = REVIEW
     return {
         "template_file_id": tf.id,
         "template_version_id": tv.id,
-        "decision": decision.as_dict(),
+        "decision": public_decision(decision, outcome=outcome),
         "family_id": family_id,
         "family_created": family_created,
         "manifest": _manifest_out(manifest_row) if manifest_row is not None else None,
         "inheritance": summary,
-        "diff": diff_out,
+        "diff": public_diff(diff_out),
     }
 
 
@@ -1023,7 +1166,9 @@ def generate_from_manifest(manifest_id: str, body: GenerateFromManifestRequest, 
             source_record=body.source_record, language=body.language,
         )
     except FillFailed as exc:
-        raise error("FILL_FAILED", f"Could not generate document: {exc}", 422)
+        # FillFailed wraps whatever the renderer raised, so its text is the
+        # renderer's -- logged, not returned.
+        raise error("FILL_FAILED", public_message(exc, "Could not generate the document."), 422)
     db.commit()
 
     return {
@@ -1148,13 +1293,15 @@ def bulk_onboard(project_id: str, files: list[UploadFile] = File(...), auto_comp
                 cluster_row.manifest_id = manifest.id
                 manifest_out = _manifest_out(manifest)
             except Exception as exc:
-                manifest_out = {"error": str(exc)}
+                manifest_out = {"error": public_message(
+                    exc, "This family's template could not be compiled.")}
 
         report.append({
             "cluster_id": cluster_row.id, "family_id": family_row.id,
             "label": c.label, "member_count": len(c.members),
             "representative_template_file_id": c.representative_template_file_id,
-            "members": [{"template_file_id": mem.template_file_id, "name": mem.name, "similarity": mem.similarity_to_representative, "is_representative": mem.is_representative} for mem in c.members],
+            # No similarity: how alike two templates scored is the matcher's working.
+            "members": [{"template_file_id": mem.template_file_id, "name": mem.name, "is_representative": mem.is_representative} for mem in c.members],
             "manifest": manifest_out,
         })
 
@@ -1182,6 +1329,7 @@ def list_clusters(project_id: str, db: Session = Depends(get_db), user: User = D
         out.append({
             "id": c.id, "label": c.label, "manifest_id": c.manifest_id,
             "representative_template_file_id": c.representative_template_file_id,
-            "members": [{"template_file_id": m.template_file_id, "name": m.template_name, "similarity": m.similarity_score, "is_representative": m.is_representative} for m in members],
+            # No similarity: how alike two templates scored is the matcher's working.
+            "members": [{"template_file_id": m.template_file_id, "name": m.template_name, "is_representative": m.is_representative} for m in members],
         })
     return {"items": out}

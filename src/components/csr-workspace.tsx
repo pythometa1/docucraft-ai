@@ -32,6 +32,7 @@ import { StudyDialog } from "@/components/clinical-studio";
 import { CsrSources } from "@/components/csr-sources";
 import { CsrEditor } from "@/components/csr-editor";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const BLINDING_OPTIONS = [
   ["open_label", "Open label"],
@@ -70,7 +71,7 @@ export function CsrWorkspace({ project }: { project: { id: string; name: string 
   }, [project.id, refresh]);
 
   if (csr === undefined) return <StageSkeleton lines={4} />;
-  if (error) return <ErrorBanner title="The CSR could not be loaded" message="Try again in a moment." detail={error} />;
+  if (error) return <ErrorBanner title="The CSR could not be loaded" message="Try again in a moment." detail={plainly(error)} />;
 
   return (
     <div className="space-y-4">
@@ -140,7 +141,7 @@ function CsrWizard({ projectId, onCreated }: { projectId: string; onCreated: () 
       toast.success("CSR project created — the ICH E3 section tree is ready.");
       onCreated();
     } catch (e: any) {
-      toast.error("The CSR project could not be created", { description: e?.message ?? String(e) });
+      toast.error("The CSR project could not be created", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -173,7 +174,7 @@ function CsrWizard({ projectId, onCreated }: { projectId: string; onCreated: () 
             <div>
               <h2 className="text-base font-semibold text-foreground">Which study is this report about?</h2>
               <p className="text-sm text-muted-foreground">
-                Everything entered here becomes generation metadata for every section.
+                Every section draws on what you enter here.
               </p>
             </div>
             <div className="flex flex-wrap items-end gap-3">
@@ -274,8 +275,8 @@ function CsrWizard({ projectId, onCreated }: { projectId: string; onCreated: () 
                   <FileText className="h-4 w-4" /> Upload sponsor template
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Parse a sponsor DOCX's heading tree into the section list — arrives in a
-                  later milestone.
+                  Use the headings of your own DOCX template as the section list — coming
+                  soon.
                 </p>
               </div>
             </div>
@@ -334,7 +335,7 @@ function CsrOverview({ csr, onChanged }: { csr: CsrProject; onChanged: () => voi
       const updated = await api.csrToggleSection(section.id, !section.enabled);
       setSections((prev) => (prev ?? []).map((s) => (s.id === section.id ? updated : s)));
     } catch (e: any) {
-      toast.error("Could not toggle this section", { description: e?.message ?? String(e) });
+      toast.error("Could not toggle this section", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -342,7 +343,7 @@ function CsrOverview({ csr, onChanged }: { csr: CsrProject; onChanged: () => voi
 
   async function purge() {
     if (!window.confirm(
-      "Delete this CSR project? Its uploaded sources, their index, every draft and "
+      "Delete this CSR project? Its uploaded sources, every draft and "
       + "its section tree are purged. The portal project itself remains.")) return;
     setBusy("purge");
     try {
@@ -350,7 +351,7 @@ function CsrOverview({ csr, onChanged }: { csr: CsrProject; onChanged: () => voi
       toast.success("CSR project purged.");
       onChanged();
     } catch (e: any) {
-      toast.error("Could not delete this CSR project", { description: e?.message ?? String(e) });
+      toast.error("Could not delete this CSR project", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -421,7 +422,7 @@ function CsrOverview({ csr, onChanged }: { csr: CsrProject; onChanged: () => voi
               <div className="space-y-3 rounded-xl border border-border bg-card p-6 text-center">
                 <AlertTriangle className="mx-auto h-6 w-6 text-warning" />
                 <p className="text-sm text-foreground">
-                  The required sources are not indexed yet.
+                  The required sources are not processed yet.
                 </p>
                 <p className="text-xs text-muted-foreground">
                   Every section is written only from what you upload. Add the protocol,

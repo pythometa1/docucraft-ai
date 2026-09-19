@@ -106,6 +106,13 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["*"]
 
+    # Operator-only endpoints: the §22 metrics, the calibration log and the
+    # vendor price catalogue. They describe how the product scores and what it
+    # runs on, which is ours to know and not a customer's. None means "on in
+    # development, off in any PRODUCTION_ENVS environment"; set it to force
+    # either way (an internal staging box that wants them, say).
+    internal_endpoints_enabled: bool | None = None
+
     # Rate limiting (spec §15.5) -- token bucket, keyed per org via Redis
     rate_limit_per_minute: int = 300
     rate_limit_burst: int = 60
@@ -157,6 +164,14 @@ def _production_failures(config: "Settings") -> list[str]:
             "concurrency this service assumes all need PostgreSQL."
         )
     return failures
+
+
+def internal_endpoints_enabled(config: "Settings", env: str | None = None) -> bool:
+    """Whether the operator-only endpoints answer, for `env` (default: the
+    configured one). An explicit setting wins; otherwise production hides them."""
+    if config.internal_endpoints_enabled is not None:
+        return config.internal_endpoints_enabled
+    return (env if env is not None else config.env).strip().lower() not in PRODUCTION_ENVS
 
 
 def verify_production_config(config: "Settings") -> None:

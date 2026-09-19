@@ -59,7 +59,12 @@ CITATION_MODES = ("strip", "keep")
 #: A citation, and the spaces in front of it -- never the newline. A pattern
 #: that ate the line break pulled the next line up onto a `[TABLE: key]`
 #: marker, which then stopped matching and was printed as text (CMC, G8).
-_CITATION_RE = re.compile(r"[ \t]*\[S\d+(?:,[^\]]*)?\]")
+#: Any bracket that opens `[S<digits>`: "[S3]", "[S3, p.12]" and the
+#: multi-source "[S5; S1, p.2]" the older pattern missed, which is how those
+#: reached a stripped export. Never across a newline or another "[", so an
+#: unclosed "[S7" cannot swallow the `[TABLE: key]` line below it.
+_CITATION_RE = re.compile(r"[ \t]*\[S\d+[^\]\[\n]*\]")
+_CITATION_LEFT_RE = re.compile(r"\[S\d")
 
 #: The paragraph `write` turns into a table-of-contents field. Word fills the
 #: field when the document is opened; until then this is what shows.
@@ -581,6 +586,23 @@ def document_text(path: str) -> str:
                 if text:
                     lines.append(text)
     return "\n".join(lines)
+
+
+def internal_markers(text: str, *, citations: str = "strip") -> list:
+    """What in a finished report's text is the drafting process showing through.
+
+    A citation left in a stripped copy, and a drafting label the model copied
+    from its brief. QC blocks the second on the drafts; this reads the file
+    that was actually written, because the export is the last point anything
+    can be caught before somebody downloads it.
+    """
+    from app.safety.drafting import prompt_artifacts
+
+    found = [{"kind": "prompt_label", "text": hit} for hit in prompt_artifacts(text)]
+    if citations == "strip":
+        found.extend({"kind": "citation", "text": m.group(0)}
+                     for m in _CITATION_LEFT_RE.finditer(text or ""))
+    return found
 
 
 def leaks(text: str, identifiers=()) -> list:

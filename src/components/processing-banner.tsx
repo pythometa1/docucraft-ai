@@ -1,82 +1,19 @@
 import { motion } from "framer-motion";
-import {
-  BrainCircuit,
-  CheckCircle2,
-  Cpu,
-  Database,
-  FileSearch,
-  Sparkles,
-  XCircle,
-} from "lucide-react";
+import { CheckCircle2, Sparkles, XCircle } from "lucide-react";
 
 import { usePageVisible } from "@/components/motion";
 import { cn } from "@/lib/utils";
-import type { Stage, StageKind } from "@/components/compile-progress";
+import type { Stage } from "@/components/compile-progress";
 
 /**
  * The shared vocabulary for "the engine is working", and the mark that says so.
  *
  * Rendering the run itself belongs to `CompileReveal`; what lives here is the
- * part more than one screen needs to agree on. Two things:
- *
- *  - **What a stage is called, and what sort of work it is.** A template read by
- *    the colour rules costs nothing and finishes instantly; one handed to a model
- *    costs real money and takes minutes. Which of those a run is sitting in
- *    should never be a guess, and the answer must not differ between a dialog
- *    and a table row -- a stage that reads "Reading each part" in one place and
- *    something else in another is two products.
- *  - **Plain language on the way to the screen.** The person watching uploaded a
- *    Word file and is waiting for a Word file; the intermediate structure the
- *    engine builds is our implementation detail, not their vocabulary.
+ * part more than one screen needs to agree on: what a step is called, and plain
+ * language on the way to the screen. The person watching uploaded a Word file
+ * and is waiting for a Word file; how the engine reads it is our business, so
+ * no step says what kind of work it is.
  */
-
-const KIND: Record<StageKind, { icon: typeof Cpu; label: string; hue: string; ring: string }> = {
-  deterministic: {
-    icon: Cpu,
-    label: "On this machine",
-    hue: "text-ai-confident",
-    ring: "border-ai-confident/45 bg-ai-confident/12",
-  },
-  retrieval: {
-    icon: FileSearch,
-    label: "Searching your data",
-    hue: "text-purple",
-    ring: "border-purple/45 bg-purple/12",
-  },
-  model: {
-    icon: BrainCircuit,
-    label: "AI model",
-    hue: "text-ai-uncertain",
-    ring: "border-ai-uncertain/45 bg-ai-uncertain/12",
-  },
-  embedding: {
-    icon: Database,
-    label: "Building the index",
-    hue: "text-ai-active",
-    ring: "border-ai-active/45 bg-ai-active/12",
-  },
-};
-
-/**
- * Short verbs for the stages the engine publishes, keyed on the stage id rather
- * than matched against its sentence -- a key is a contract, a label is prose and
- * will be reworded the first time somebody improves it.
- *
- * Anything unrecognised falls through to the label the server sent, run past
- * `plainly()` first so a phrase written for an engineer is not shown to a
- * customer verbatim.
- */
-const VERB: Record<string, string> = {
-  parse: "Reading the document",
-  scan: "Scanning the layout",
-  chunk: "Chunking the template",
-  write: "Reading each part",
-  reconcile: "Reconciling the parts",
-  review: "Reviewing what it found",
-  retrieval: "Matching your column names",
-  agentic: "Processing the template",
-  embedding: "Indexing for next time",
-};
 
 /** Strips internal vocabulary out of any text on its way to the screen.
  *
@@ -86,17 +23,31 @@ const VERB: Record<string, string> = {
  *  of a banner would have changed a record somebody may have to defend later.
  *  Presentation is the right place for a presentation problem. */
 export function plainly(text: string): string {
-  return text
+  return String(text ?? "")
     .replace(/compil(e|ing|ed|ation)\s+the\s+manifest/gi, "reading the template")
     .replace(/manifest\s+generation/gi, "processing")
     .replace(/generat(e|ing)\s+(the\s+)?manifest/gi, "processing the template")
-    .replace(/\bmanifests?\b/gi, "reading")
-    .replace(/\bcompil(e|ing)\b/gi, "processing")
+    .replace(/\bmanifests?\b/gi, "template")
+    .replace(/\b(re-?)?compil(e|ing|ed|er|ation)s?\b/gi, "processing")
+    // Section references point at an internal spec nobody outside can read.
+    .replace(/\s*\(?§\s*\d+(\.\d+)*\)?/g, "")
+    .replace(/\b(in |after |on )?(round|pass|attempt) \d+( of \d+)?\b/gi, "")
+    .replace(/\b(the )?(language )?model'?s?\b|\bLLMs?\b|\bAI model\b/gi, "the service")
+    .replace(/\bcosine( similarity)?\b|\bsimilarity score\b/gi, "match")
+    .replace(/\bembeddings?\b|\bembedded\b|\bvectors?\b/gi, "search index")
+    .replace(/\bchunks?\b|\bchunked\b|\bchunking\b/gi, "passages")
+    .replace(/\bfingerprints?\b/gi, "check")
+    .replace(/\b(the )?engine's\b/gi, "our")
+    .replace(/\b(the )?engine\b/gi, "we")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([.,;:])/g, "$1")
+    .trim()
     .replace(/^(.)/, (m) => m.toUpperCase());
 }
 
+/** The server already names each step for a reader; `plainly()` is a guard. */
 function label(stage: Stage): string {
-  return VERB[stage.key] ?? plainly(stage.label ?? "Processing");
+  return plainly(stage.label ?? "Processing");
 }
 
 /** The mark at the top-left of a run: a rounded tile with a soft halo, three
@@ -154,10 +105,5 @@ export function ProcessingMark({ state, reduced }: { state: string; reduced: boo
   );
 }
 
-/* The stage vocabulary, shared.
- *
- * `CompileReveal` renders the stages and imports the naming from here, alongside
- * `plainly`, which five other screens import as well. Exported from here rather
- * than moved: the dependency runs one way, reveal -> vocabulary, and there is no
- * cycle to reason about. */
-export { KIND as STAGE_KIND, label as stageLabel };
+/* The step naming, shared with `CompileReveal`. */
+export { label as stageLabel };

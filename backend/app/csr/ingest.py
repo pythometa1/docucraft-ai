@@ -18,8 +18,9 @@ import threading
 
 from sqlalchemy import select
 
+from app.public_errors import public_message
 from app.docgen.chunking import chunk_extraction
-from app.docgen.extraction import ExtractorUnavailable, UnsupportedSource, extract
+from app.docgen.extraction import UnsupportedSource, extract
 from app.db import SessionLocal
 from app.models import CsrChunk, CsrDocument
 from app.storage import abs_path
@@ -70,12 +71,11 @@ def ingest_document(document_id: str) -> None:
             extraction = extract(str(abs_path(document.storage_path)),
                                  mime_type=document.mime_type,
                                  source_name=document.original_filename)
-        except (UnsupportedSource, ExtractorUnavailable) as exc:
-            _set_status(db, document, "failed", error=str(exc))
-            return
         except Exception as exc:  # noqa: BLE001 - a broken file is data, not a bug
-            _set_status(db, document, "failed",
-                        error=f"The file could not be read: {exc}")
+            # UnsupportedSource is written for the uploader; ExtractorUnavailable
+            # names a package and an install command, which is for the operator.
+            _set_status(db, document, "failed", error=public_message(
+                exc, "The file could not be read.", user_facing=(UnsupportedSource,)))
             return
 
         document.page_count = extraction.page_count
@@ -85,8 +85,8 @@ def ingest_document(document_id: str) -> None:
                                     page_local_types=PAGE_LOCAL_TYPES,
                                     table_label=TABLE_LABEL)
         except Exception as exc:  # noqa: BLE001
-            _set_status(db, document, "failed",
-                        error=f"The file could not be split into sources: {exc}")
+            _set_status(db, document, "failed", error=public_message(
+                exc, "The file could not be split into sources."))
             return
         if not rows:
             _set_status(db, document, "failed",

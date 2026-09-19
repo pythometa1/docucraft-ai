@@ -550,6 +550,88 @@ def test_stripping_citations_does_not_swallow_the_table_marker(
     assert any("95.0 - 105.0 % of label claim" in c for c in cells), cells
 
 
+def _only_spec_section(app_client, token, sections, reply, stub_model):
+    spec_section = next(s for s in sections if s["section_code"] == "P.5.1")
+    stub_model(reply)
+    app_client.post(f"/api/v1/cmc/sections/{spec_section['id']}/generate",
+                    headers=_auth(token), json={})
+    app_client.patch(f"/api/v1/cmc/sections/{spec_section['id']}/status",
+                     headers=_auth(token), json={"status": "approved"})
+    for section in sections:
+        if section["is_container"] or section["id"] == spec_section["id"]:
+            continue
+        app_client.patch(f"/api/v1/cmc/sections/{section['id']}",
+                         headers=_auth(token), json={"enabled": False})
+
+
+def test_the_default_export_strips_every_citation_form_and_is_named_for_people(
+        app_client, loaded, stub_model):
+    """"[S5; S1, p.2]" and "[S6; S9]" survived the old pattern, and "inline"
+    was the default -- so every citation reached the dossier."""
+    import zipfile
+
+    import docx
+
+    from app.generation.reproducibility import FIXED_ZIP_TIMESTAMP
+    from app.storage import abs_path
+
+    token, cmc_id, deliverable_id, sections = loaded
+    app_client.post(f"/api/v1/cmc/projects/{cmc_id}/results:verify",
+                    headers=_auth(token), json={"all_unverified": True})
+    _only_spec_section(app_client, token, sections,
+                       "P.5.1 Specification(s)\n\nThe limits hold [S5; S1, p.2]. "
+                       "Methods are validated [S6; S9]. Assay [S1].\n\n[TABLE: spec_table]",
+                       stub_model)
+    exported = app_client.post(f"/api/v1/cmc/projects/{cmc_id}/export",
+                               headers=_auth(token),
+                               json={"deliverable_id": deliverable_id, "granularity": "both"})
+    assert exported.status_code == 201, exported.text
+    record = exported.json()
+    names = [f["filename"] for f in record["files"]]
+    assert names == ["CTD Module 3.2.P - Drug Product.docx",
+                     "CTD Module 3.2.P - Drug Product (eCTD leaves).zip"]
+
+    combined = abs_path(record["files"][0]["storage_path"])
+    text = "\n".join(p.text for p in docx.Document(str(combined)).paragraphs)
+    assert "[S" not in text and "The limits hold." in text
+    with zipfile.ZipFile(str(combined)) as archive:
+        core = archive.read("docProps/core.xml").decode()
+        assert "python-docx" not in core
+        assert not any(n.startswith("customXml/") for n in archive.namelist())
+    with zipfile.ZipFile(str(abs_path(record["files"][1]["storage_path"]))) as archive:
+        for info in archive.infolist():
+            assert info.date_time == FIXED_ZIP_TIMESTAMP
+            assert info.external_attr == 0o600 << 16 and info.create_system == 0
+
+    got = app_client.get(f"/api/v1/cmc/exports/{record['id']}/download",
+                         headers=_auth(token))
+    assert "filename*=UTF-8''CTD%20Module%203.2.P" in got.headers["content-disposition"]
+
+
+def test_a_citation_the_strip_cannot_remove_refuses_the_export(
+        app_client, loaded, stub_model):
+    """An unclosed "[S7" is not a citation the pattern can take off, and it is
+    still one to a reader. The written file is checked, and it is refused."""
+    token, cmc_id, deliverable_id, sections = loaded
+    app_client.post(f"/api/v1/cmc/projects/{cmc_id}/results:verify",
+                    headers=_auth(token), json={"all_unverified": True})
+    _only_spec_section(app_client, token, sections,
+                       "P.5.1 Specification(s)\n\nThe limits hold [S7 unclosed.\n\n"
+                       "[TABLE: spec_table]", stub_model)
+    for granularity in ("combined", "ectd_leaves"):
+        refused = app_client.post(f"/api/v1/cmc/projects/{cmc_id}/export",
+                                  headers=_auth(token),
+                                  json={"deliverable_id": deliverable_id,
+                                        "granularity": granularity,
+                                        "override_approval": True})
+        assert refused.status_code == 409, refused.text
+        codes = {b["code"] for b in refused.json()["detail"]["error"]["details"]["blockers"]}
+        assert "CITATION_MARKERS_REMAIN" in codes
+    kept = app_client.post(f"/api/v1/cmc/projects/{cmc_id}/export", headers=_auth(token),
+                           json={"deliverable_id": deliverable_id, "citations": "inline"})
+    assert kept.status_code == 201, kept.text
+
+
 def test_deleting_a_dossier_removes_the_documents_it_exported(
         app_client, loaded, stub_model):
     """Purging a project has to take the exported files with it.

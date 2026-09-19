@@ -27,6 +27,7 @@ stays the only thing that decides where anything is.
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass, field as dc_field
 
 from app.compiler import assertions as A
@@ -40,8 +41,10 @@ from app.compiler.llm_compiler import (
 )
 from app.compiler.rule_compiler import CompiledManifest, compile_manifest
 from app.config import settings
-from app.llm.provider import LLMNotConfiguredError, get_llm_provider
+from app.llm.provider import LLM_NOT_CONFIGURED_MESSAGE, LLMNotConfiguredError, get_llm_provider
 from app.templates.parsers.docx_prescan import PreScanResult, prescan
+
+log = logging.getLogger(__name__)
 
 # How many rounds may pass without the assertion count falling before the loop
 # accepts that it is not converging. One is too eager -- a round that adds a
@@ -615,11 +618,14 @@ def compile_template(
     try:
         get_llm_provider("Compiling a template", policy=llm_policy)
     except LLMNotConfiguredError as exc:
-        reason = f"No model is configured to read this template: {exc}"
+        # The exception names the key and the vendor; the stored notes and
+        # transcript are returned to clients, so they carry the neutral text.
+        log.warning("Compile refused: %s", exc)
+        reason = f"No AI is available to read this template. {LLM_NOT_CONFIGURED_MESSAGE}"
         return CompileOutcome(
             manifest=empty_manifest(scan, compiled_by="llm_unavailable", notes=[reason]),
             ok=False, reason=reason,
-            transcript=[{"stage": "provider", "error": str(exc)}],
+            transcript=[{"stage": "provider", "error": LLM_NOT_CONFIGURED_MESSAGE}],
         )
 
     def _stage(key, label, kind="model"):
@@ -774,4 +780,6 @@ def _notes_from(test_fill, manifest: CompiledManifest) -> list[str]:
     try:
         return list(test_fill(_as_dict(manifest)) or [])
     except Exception as exc:  # noqa: BLE001 - surfaced to the reviewer, not swallowed
-        return [f"Filling this manifest against sample data raised {type(exc).__name__}: {exc}"]
+        # Logged in full; the note is stored in a transcript clients can read.
+        log.warning("Test fill raised during compile", exc_info=exc)
+        return ["Filling this manifest against sample data failed before it produced a document."]

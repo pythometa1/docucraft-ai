@@ -33,6 +33,7 @@ from app.models import (
 )
 from app.numbering import allocate
 from app.ownership import owned_manifest, owned_project
+from app.public_errors import public_message
 from app.security import error, get_current_user
 
 router = APIRouter(tags=["clinical"])
@@ -441,7 +442,7 @@ def generate_clinical_document(body: ClinicalGenerateRequest,
             change_summary=f"{label} {number}",
         )
     except FillFailed as exc:
-        raise error("FILL_FAILED", f"Could not generate the document: {exc}", 422)
+        raise error("FILL_FAILED", public_message(exc, "Could not generate the document."), 422)
 
     # A document the person just generated from values they typed, that passed
     # every QA gate, is approved in the same act -- same shape and same

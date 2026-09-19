@@ -1,0 +1,191 @@
+{
+  "title": "Guide",
+  "intro": "How to prepare a template, fill it from your data, and connect DocuMind AI to your own systems.",
+  "sections": [
+    {
+      "id": "start",
+      "eyebrow": "Start here",
+      "title": "What this does",
+      "blocks": [
+        {"type": "p", "text": "You have a document you send often (an offer, a contract, a change of terms) and a spreadsheet of people to send it to. DocuMind AI produces one for each row, keeping your letterhead, tables and formatting exactly as they are."},
+        {"type": "p", "text": "Your template decides the wording and your data decides the values. Every document is checked before it reaches anybody, and nothing can be downloaded until a person has approved it."}
+      ]
+    },
+    {
+      "id": "workflow",
+      "eyebrow": "Using it",
+      "title": "The five steps",
+      "blocks": [
+        {"type": "steps", "items": [
+          {"title": "Create a project", "text": "A project is one document type for one purpose. Its templates, data and documents all live inside it."},
+          {"title": "Upload your template", "text": "Upload a `.docx`. Within moments you see how many values and optional sections were found, and anything that needs fixing before you go on."},
+          {"title": "Get the spreadsheet and fill it in", "text": "Download the data spreadsheet made for your template. It has one column per value, named after it, and a fixed list of choices on any column that decides which sections appear. Fill in one row per person and upload it."},
+          {"title": "Match the columns, then generate", "text": "Columns are matched to values for you; confirm them and start the batch. A few documents are checked first, and the rest continue once they pass."},
+          {"title": "Review, approve, download", "text": "Documents appear as they are produced. Move each through your own workflow, send any you disagree with to review, and approve the ones that are right. Only an approved document can be downloaded."}
+        ]}
+      ]
+    },
+    {
+      "id": "authoring",
+      "eyebrow": "Templates",
+      "title": "Marking up a template",
+      "blocks": [
+        {"type": "p", "text": "Every piece of text in your template is one of three things, and you say which by its font colour."},
+        {"type": "swatches", "items": [
+          {"colour": "#0070C0", "name": "Blue: a value", "means": "Replaced with your data. Each blue item becomes one spreadsheet column.", "hexes": "0000FF · 0070C0 · 0563C1"},
+          {"colour": "#FF0000", "name": "Red: an instruction", "means": "A note for whoever prepares the document. Removed before sending.", "hexes": "FF0000 · C00000 · E00000"},
+          {"colour": "#3C3C3C", "name": "Black: the document", "means": "Kept exactly as written.", "hexes": "everything else"}
+        ]},
+        {"type": "p", "text": "Write a value as its name in angle brackets and colour it blue, for example `<Base Salary>`. Type each placeholder in one go: a placeholder whose formatting changes halfway through cannot be filled."},
+        {"type": "highlights", "items": [
+          {"colour": "#FFFF00", "label": "Yellow highlight", "means": "works like blue (a value)"},
+          {"colour": "#00FF00", "label": "Bright green highlight", "means": "works like red (an instruction)"}
+        ], "text": "If your documents already use the highlighter instead of font colour, that works too."},
+        {"type": "note", "tone": "warning", "title": "Never draw a blank.", "text": "A gap written as `__/__/____` or `XX months` has nothing to attach data to, so it stays exactly as you typed it. Give it a name instead. One date is one placeholder, not three."}
+      ]
+    },
+    {
+      "id": "conditions",
+      "eyebrow": "Templates",
+      "title": "Optional sections",
+      "blocks": [
+        {"type": "p", "text": "Text that should appear only sometimes goes between markers. Colour the markers red so they are removed either way."},
+        {"type": "code", "lang": "template", "text": "[[IF employment_basis == 'Part Time']]\nYou will work on a part-time basis as set out in Schedule 1.\n[[ELSE]]\nYou will work on a full-time basis.\n[[ENDIF]]"},
+        {"type": "p", "text": "`[[ELSE]]` is optional, and markers can sit inline within a sentence. What you can write in a condition:"},
+        {"type": "table", "columns": ["Condition", "Meaning"], "rows": [
+          ["name == 'Value'", "equals"],
+          ["name != 'Value'", "does not equal"],
+          ["salary > 100000, hours <= 38", "greater than, less than or equal to (also >= and <)"],
+          ["country in ('AU','NZ')", "is one of"],
+          ["country not in ('AU','NZ')", "is none of"],
+          ["bonus is blank", "has no value"],
+          ["address_line_2 is not blank", "has a value"],
+          ["type == 'Fixed' AND country == 'NZ'", "both must hold (OR also works)"]
+        ]},
+        {"type": "p", "text": "On the left, use the name of a blue value in lower case with underscores instead of spaces. Angle brackets are for values only, never for optional wording: a phrase like `<on a part time basis>` is a condition, not a value, and will be rejected."}
+      ]
+    },
+    {
+      "id": "states",
+      "eyebrow": "Using it",
+      "title": "Document states",
+      "blocks": [
+        {"type": "p", "text": "A document carries two states at once, because they answer different questions."},
+        {"type": "cards", "items": [
+          {"title": "Its review status", "text": "Draft, awaiting a decision, changes requested, failed checks, approved. Set by the checks and by reviewers, not by hand."},
+          {"title": "Where you have put it", "text": "Work in progress, completed, cancelled. Yours to set. Approved and blocked appear here too but cannot be chosen: one is a signature, the other a failed check."}
+        ]},
+        {"type": "note", "tone": "info", "title": "Only an approved document can be downloaded.", "text": "This is enforced on every route, not just hidden in the interface."}
+      ]
+    },
+    {
+      "id": "api-intro",
+      "eyebrow": "API",
+      "title": "Getting started",
+      "blocks": [
+        {"type": "p", "text": "Everything the interface does is available over HTTP. The base URL is your deployment followed by `/api/v1`."},
+        {"type": "code", "lang": "bash", "text": "# 1: get a token\ncurl -X POST https://your-host/api/v1/auth/token \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"email\":\"you@example.com\",\"password\":\"…\"}'\n\n# → {\"access_token\":\"eyJ…\",\"token_type\":\"bearer\"}\n\n# 2: use it on every call\ncurl https://your-host/api/v1/projects \\\n  -H \"Authorization: Bearer $TOKEN\""},
+        {"type": "note", "tone": "info", "title": "Tokens expire.", "text": "Long jobs can outlive one, so request a fresh token per job rather than holding one for the life of a run."},
+        {"type": "p", "text": "Uploads are `multipart/form-data` with the file under the field name `file`. Everything else is JSON, and times are ISO 8601. Every response is scoped to your organisation."}
+      ]
+    },
+    {
+      "id": "api-errors",
+      "eyebrow": "API",
+      "title": "Errors",
+      "blocks": [
+        {"type": "p", "text": "Failures carry a stable code and a sentence written for a person."},
+        {"type": "code", "lang": "json", "text": "{\n  \"error\": {\n    \"code\": \"DOCUMENT_NOT_APPROVED\",\n    \"message\": \"This document has not been approved, so it cannot be downloaded…\",\n    \"details\": {}\n  }\n}"},
+        {"type": "p", "text": "Branch on `code`, never on the message: the wording improves over time, the code does not. The ones you can act on:"},
+        {"type": "table", "columns": ["Code", "Status", "What to do"], "rows": [
+          ["DOCUMENT_NOT_APPROVED", "409", "Approve the document before downloading it."],
+          ["DOCUMENT_BLOCKED", "409", "The document failed its checks. Fix the data or template and generate it again."],
+          ["SOURCE_HAS_NO_ROWS", "422", "The spreadsheet has headers but no data. Add rows and upload it again."],
+          ["CAPABILITY_REQUIRED", "403", "Your role cannot do this. Ask an administrator."],
+          ["TOKEN_EXPIRED", "401", "Request a new token."],
+          ["RATE_LIMITED", "429", "Too many requests. Wait a moment and try again."],
+          ["NOT_FOUND", "404", "The item does not exist or belongs to another organisation."]
+        ]}
+      ]
+    },
+    {
+      "id": "api-reference",
+      "eyebrow": "API",
+      "title": "API reference",
+      "blocks": [
+        {"type": "endpoints", "title": "Authentication", "items": [
+          ["POST", "/auth/token", "Exchange an email and password for an access token."],
+          ["GET", "/me", "The signed-in user and their organisation."],
+          ["POST", "/auth/logout", "Sign out and revoke the current token."]
+        ]},
+        {"type": "endpoints", "title": "Projects", "items": [
+          ["GET", "/projects", "List projects."],
+          ["POST", "/projects", "Create a project."],
+          ["GET", "/projects/{id}", "One project."],
+          ["PATCH", "/projects/{id}", "Rename a project or change its date and number format."],
+          ["DELETE", "/projects/{id}", "Remove a project and everything in it."],
+          ["GET", "/lookups?kind=region", "Valid values for region, function and document type."]
+        ]},
+        {"type": "endpoints", "title": "Templates", "items": [
+          ["POST", "/projects/{id}/templates", "Upload a .docx template."],
+          ["GET", "/projects/{id}/templates", "List a project's templates."],
+          ["POST", "/templates/{id}/compile-manifest", "Read a template again after editing it."],
+          ["GET", "/templates/{id}/manifests", "The template's versions, newest first."],
+          ["DELETE", "/templates/{id}", "Remove a template."]
+        ]},
+        {"type": "endpoints", "title": "Data", "items": [
+          ["GET", "/template-manifests/{id}/source-template", "Download the spreadsheet a template needs."],
+          ["POST", "/projects/{id}/sources", "Upload a filled spreadsheet."],
+          ["GET", "/projects/{id}/sources", "List uploaded spreadsheets."],
+          ["GET", "/source-versions/{id}/records", "Read back the rows as uploaded."]
+        ]},
+        {"type": "endpoints", "title": "Matching and generation", "items": [
+          ["GET", "/template-manifests/{id}/binding-suggestions", "Suggested columns for each value."],
+          ["POST", "/template-manifests/{id}/bindings", "Save the column matches."],
+          ["POST", "/template-manifests/{id}/generate-batch", "Start a batch; returns a job id."],
+          ["GET", "/jobs/{id}", "Check a batch's progress."],
+          ["POST", "/template-manifests/{id}/preview-row", "Preview one row without saving it."]
+        ]},
+        {"type": "endpoints", "title": "Documents", "items": [
+          ["GET", "/projects/{id}/documents", "Every document a project has produced."],
+          ["GET", "/documents/{id}", "One document and its status."],
+          ["PATCH", "/documents/{id}/workflow", "Set where a document sits in your workflow."],
+          ["POST", "/document-versions/{id}:approve", "Approve a document."],
+          ["GET", "/document-versions/{id}/download", "Download a document as .docx or .pdf."],
+          ["POST", "/documents:download", "Download several documents as a zip."]
+        ]},
+        {"type": "endpoints", "title": "Review", "items": [
+          ["GET", "/review-queue", "Everything waiting for a person."],
+          ["POST", "/document-versions/{id}:request-changes", "Send a document back with a reason."],
+          ["POST", "/reviews/{id}/comments", "Comment on an open review."],
+          ["POST", "/reviews/{id}:approve", "Resolve a review."],
+          ["GET", "/review-tasks", "Values waiting for a person to decide."]
+        ]},
+        {"type": "endpoints", "title": "Invoices", "items": [
+          ["GET", "/customers", "Your client list."],
+          ["POST", "/customers", "Save a customer for reuse."],
+          ["POST", "/invoices:generate", "Create a numbered invoice from line items."],
+          ["GET", "/invoices", "Every invoice, newest first."],
+          ["POST", "/invoices/{id}:void", "Void an invoice; its number is kept."]
+        ]},
+        {"type": "endpoints", "title": "Clinical", "items": [
+          ["GET", "/studies", "Your study list."],
+          ["POST", "/studies", "Save a study for reuse."],
+          ["POST", "/clinical-documents:generate", "Create a numbered study document."],
+          ["GET", "/clinical-documents", "Every study document, newest first."],
+          ["POST", "/clinical-documents/{id}:void", "Void a study document; its number is kept."]
+        ]}
+      ]
+    },
+    {
+      "id": "recipe",
+      "eyebrow": "API",
+      "title": "End-to-end example",
+      "blocks": [
+        {"type": "p", "text": "Documents from your own system, start to finish. Each step waits for the one before, so check a batch's progress rather than assuming it has finished."},
+        {"type": "code", "lang": "bash", "text": "BASE=https://your-host/api/v1\nAUTH=\"Authorization: Bearer $TOKEN\"\n\n# 1: a project\nPID=$(curl -s -X POST $BASE/projects -H \"$AUTH\" -H 'Content-Type: application/json' \\\n  -d '{\"name\":\"Offer letters\",\"region\":\"Asia Pacific\",\n       \"function\":\"Human Resources\",\"document_type\":\"HR Letters\"}' | jq -r .id)\n\n# 2: upload the template\nTID=$(curl -s -X POST $BASE/projects/$PID/templates -H \"$AUTH\" \\\n  -F file=@offer-letter.docx | jq -r .id)\nTV=$(curl -s $BASE/templates/$TID/manifests -H \"$AUTH\" | jq -r '.items[0].id')\n\n# 3: the spreadsheet this template needs, then fill it in and upload it\ncurl -s $BASE/template-manifests/$TV/source-template -H \"$AUTH\" -o data.xlsx\n#    … one row per person …\nSV=$(curl -s -X POST $BASE/projects/$PID/sources -H \"$AUTH\" \\\n  -F file=@data.xlsx | jq -r .current_version_id)\n\n# 4: match the columns and save\ncurl -s \"$BASE/template-manifests/$TV/binding-suggestions?source_version_id=$SV\" \\\n  -H \"$AUTH\" | jq '{source_version_id:\"'$SV'\",\n      field_bindings:[.suggestions[]|select(.column)|{key:.field_id,value:.column}]|from_entries}' \\\n  > matches.json\ncurl -s -X POST $BASE/template-manifests/$TV/bindings -H \"$AUTH\" \\\n  -H 'Content-Type: application/json' -d @matches.json\n\n# 5: generate, then wait for the batch\nJOB=$(curl -s -X POST $BASE/template-manifests/$TV/generate-batch -H \"$AUTH\" \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"source_version_id\":\"'$SV'\",\"language\":\"en\"}' | jq -r .job_id)\nuntil [ \"$(curl -s $BASE/jobs/$JOB -H \"$AUTH\" | jq -r .status)\" != \"running\" ]; do sleep 2; done\n\n# 6: approve, then download\nfor V in $(curl -s $BASE/projects/$PID/documents -H \"$AUTH\" | jq -r '.items[].current_version_id'); do\n  curl -s -X POST $BASE/document-versions/$V:approve -H \"$AUTH\" > /dev/null\n  curl -s \"$BASE/document-versions/$V/download?format=docx\" -H \"$AUTH\" -o \"$V.docx\"\ndone"},
+        {"type": "note", "tone": "info", "title": "Step 3 is worth keeping.", "text": "Using the spreadsheet made for your template means every column name matches a value exactly. With your own export, check the suggested matches before generating."}
+      ]
+    }
+  ]
+}

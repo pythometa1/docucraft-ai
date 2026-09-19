@@ -530,7 +530,10 @@ def test_a_builder_that_trips_over_the_store_is_reported_not_raised(dossier, mon
 
     finding = _only(d.findings(), TABLE_UNRESOLVED)
     assert finding.severity == BLOCKER
-    assert "material_id" in finding.detail["reason"]
+    # A KeyError's text is a key out of our store, not a sentence for the
+    # reviewer: the finding says what is wrong and the log has the key.
+    assert finding.detail["reason"] == "a value this table needs is missing from the store"
+    assert "material_id" not in finding.detail["reason"]
 
 
 # ------------------------------------------------------------------ stability

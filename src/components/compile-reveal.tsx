@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { Sparkles, XCircle } from "lucide-react";
 
 import {
   CAP,
@@ -15,7 +16,7 @@ import {
   useReducedMotionFlag,
 } from "@/components/motion";
 import { ErrorBanner } from "@/components/error-banner";
-import { ProcessingMark, STAGE_KIND, plainly, stageLabel } from "@/components/processing-banner";
+import { ProcessingMark, plainly, stageLabel } from "@/components/processing-banner";
 import type { Stage } from "@/components/compile-progress";
 import { cn } from "@/lib/utils";
 
@@ -28,80 +29,15 @@ import { cn } from "@/lib/utils";
  * response body when it lands -- and nothing here is derived from a guess. Two
  * consequences of that rule shaped the whole component:
  *
- *  - **The stage rows are the server's stages, verbatim.** No invented
- *    "classifying runs" or "indexing merge fields" steps. The compiler already
- *    reports those numbers as the *result* of the parse stage, so they are
- *    rendered as that row's result instead of being staged as fiction.
+ *  - **The step rows are the server's steps, verbatim.** Three of them --
+ *    reading, understanding, finishing -- and nothing about how each is done:
+ *    which kind of work ran, how the template was split and how many times it
+ *    was reviewed are the engine's business and are not sent.
  *  - **Nothing renders before its data exists.** The document strip has no bars
  *    until a paragraph count has actually been reported, the figures do not
  *    exist until the response body does, and a figure with no measurement prints
  *    the reason rather than a zero.
- *
- * The shape of the feed is worth stating because it is not a timeline. `agentic`
- * is appended while its children (`chunk`, `write`, `reconcile`, `review`) are
- * still to come, and stays `running` until after they have all finished -- so a
- * flat list ordered by arrival shows a parent that never completes above
- * children that already have. They are nested here because that is the true
- * structure, and `review` repeats up to twelve times, which is also why rows are
- * keyed on their position in the feed rather than on `key`.
  */
-
-/* ------------------------------- the feed ------------------------------- */
-
-/** Stages the compiler appends *underneath* `agentic` rather than after it. */
-const AGENTIC_CHILDREN = new Set(["chunk", "write", "reconcile", "review"]);
-
-interface StageNode {
-  stage: Stage;
-  /** Position in the feed. The React key: `key` repeats, position does not. */
-  index: number;
-  children: StageNode[];
-}
-
-function buildStageTree(stages: Stage[]): StageNode[] {
-  const roots: StageNode[] = [];
-  let parent: StageNode | null = null;
-
-  for (let index = 0; index < stages.length; index += 1) {
-    const stage = stages[index];
-    const node: StageNode = { stage, index, children: [] };
-    // Only nest under an `agentic` that has actually been published. If the feed
-    // ever drops it, its children stay top-level rather than disappearing.
-    if (parent !== null && AGENTIC_CHILDREN.has(stage.key)) {
-      parent.children.push(node);
-      continue;
-    }
-    roots.push(node);
-    if (stage.key === "agentic") parent = node;
-  }
-
-  return roots;
-}
-
-/**
- * The parse stage reports `"{N} paragraphs, {M} marked runs, {K} merge fields"`.
- * Pulling the three numbers out lets them be set as figures instead of a
- * sentence -- but the format is the server's prose, not a contract, so a miss
- * falls back to printing the string it was given.
- */
-const PARSE_DETAIL =
-  /^\s*(\d+)\s+paragraphs?\s*,\s*(\d+)\s+marked runs?\s*,\s*(\d+)\s+merge fields?\s*$/i;
-
-interface ParseCounts {
-  paragraphs: number;
-  markedRuns: number;
-  mergeFields: number;
-}
-
-function readParseDetail(detail: string | null | undefined): ParseCounts | null {
-  const match = detail ? PARSE_DETAIL.exec(detail) : null;
-  if (!match) return null;
-  return {
-    paragraphs: Number(match[1]),
-    markedRuns: Number(match[2]),
-    mergeFields: Number(match[3]),
-  };
-}
 
 /* ------------------------------ the response ----------------------------- */
 
@@ -118,26 +54,27 @@ function readParseDetail(detail: string | null | undefined): ParseCounts | null 
 interface Compiled {
   fields: number | null;
   conditions: number | null;
-  /** Paragraphs in the document, as counted by the scan. */
+  /** Paragraphs in the document, as the reading counted them. */
   paragraphs: number | null;
+  /** Placeholders the reading found in the document. */
+  placeholders: number | null;
   /** Distinct paragraphs inside at least one conditional block. */
   governed: number | null;
-  /** Distinct MERGEFIELD codes the reading resolved to a field. */
+  /** Distinct Word merge fields the reading resolved to a field. */
   mergefieldsResolved: number | null;
-  /** MERGEFIELDs the scan saw in the document. */
+  /** Word merge fields found in the document. */
   mergefieldsSeen: number | null;
   placeholderRows: Set<number>;
   conditionalRows: Set<number>;
   failedReason: string | null;
   didFail: boolean;
-  /** The compiler's own answer to "did this need a model?". */
-  efficiency: { fellShort: boolean; reason: string | null } | null;
 }
 
 function readCompiled(result: any): Compiled | null {
   if (!result || typeof result !== "object" || !Array.isArray(result.fields)) return null;
 
-  const prescan = (result.prescan_summary ?? {}) as Record<string, any>;
+  // Neutral counts, named for the document rather than for how it was read.
+  const summary = (result.document_summary ?? {}) as Record<string, unknown>;
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
   const placeholderRows = new Set<number>();
@@ -163,36 +100,20 @@ function readCompiled(result: any): Compiled | null {
     for (let p = Math.min(start, end); p <= Math.max(start, end); p += 1) conditionalRows.add(p);
   }
 
-  const log = Array.isArray(prescan.agent_log) ? (prescan.agent_log as any[]) : [];
-  const scan = log.find((entry) => entry?.stage === "scan");
-  const efficiency =
-    scan && typeof scan.rules_would_have_fallen_short === "boolean"
-      ? {
-          fellShort: scan.rules_would_have_fallen_short as boolean,
-          reason:
-            typeof scan.rule_shortfall_reason === "string" ? scan.rule_shortfall_reason : null,
-        }
-      : null;
-
-  const notes = Array.isArray(prescan.notes)
-    ? (prescan.notes as any[]).filter(
-        (n): n is string => typeof n === "string" && n.trim().length > 0,
-      )
-    : [];
   const didFail = result.status === "failed";
 
   return {
     fields: result.fields.length,
     conditions: Array.isArray(result.conditions) ? result.conditions.length : null,
-    paragraphs: num(prescan.paragraph_count),
+    paragraphs: num(summary.paragraph_count),
+    placeholders: num(summary.placeholder_count),
     governed: blocks ? conditionalRows.size : null,
     mergefieldsResolved: codes.size,
-    mergefieldsSeen: num(prescan.mergefields),
+    mergefieldsSeen: num(summary.word_field_count),
     placeholderRows,
     conditionalRows,
-    failedReason: didFail ? (notes[0] ?? null) : null,
+    failedReason: didFail && typeof result.failure_reason === "string" ? result.failure_reason : null,
     didFail,
-    efficiency,
   };
 }
 
@@ -220,25 +141,19 @@ export function CompileReveal({
   const visible = usePageVisible();
 
   const compiled = useMemo(() => readCompiled(result), [result]);
-  const tree = useMemo(() => buildStageTree(stages), [stages]);
 
-  const running = stages.some((s) => s.status === "running");
+  // A pending step after a finished one is still work to come: the server
+  // reports all three steps from the start, so "nothing running right now" is
+  // not "finished" until the reading has landed.
+  const running = !compiled && stages.some((s) => s.status === "running" || s.status === "pending");
   const finished = stages.filter((s) => s.status === "done").length;
   const elapsed = useElapsed(running);
-  // The deepest thing in flight, not the first: children are appended after
-  // their parent, so the last running row is the one actually doing work.
-  const active = [...stages].reverse().find((s) => s.status === "running");
+  const active = stages.find((s) => s.status === "running")
+    ?? stages.find((s) => s.status === "pending");
 
-  const parse = useMemo(
-    () => readParseDetail(stages.find((s) => s.key === "parse")?.detail),
-    [stages],
-  );
-
-  // The paragraph count arrives twice from two real places: the parse stage says
-  // it while the compile is still running, and the response repeats it at the
-  // end. Taking the live one first is what lets the document strip exist during
-  // the scan rather than appearing after it is over. Neither is derived.
-  const paragraphs = compiled?.paragraphs ?? parse?.paragraphs ?? null;
+  // Only the finished reading reports a paragraph count, so the document strip
+  // appears when the reading lands rather than being estimated before it.
+  const paragraphs = compiled?.paragraphs ?? null;
 
   const failure = failed ?? compiled?.failedReason ?? null;
   const didFail = Boolean(failed) || Boolean(compiled?.didFail);
@@ -315,9 +230,7 @@ export function CompileReveal({
 
         <div className="mt-4 flex items-stretch gap-4 sm:gap-5">
           <StageOrFigures
-            tree={tree}
             stages={stages}
-            parse={parse}
             compiled={found}
             reduced={reduced}
           />
@@ -359,15 +272,11 @@ export function CompileReveal({
  * shunt everything below it up the page mid-fade.
  */
 function StageOrFigures({
-  tree,
   stages,
-  parse,
   compiled,
   reduced,
 }: {
-  tree: StageNode[];
   stages: Stage[];
-  parse: ParseCounts | null;
   compiled: Compiled | null;
   reduced: boolean;
 }) {
@@ -420,7 +329,7 @@ function StageOrFigures({
             transition={{ duration: DUR.base, ease: EASE_OUT }}
           >
             <StageSegments stages={stages} reduced={reduced} />
-            <StageTree nodes={tree} parse={parse} reduced={reduced} className="mt-3.5" />
+            <StageList stages={stages} reduced={reduced} className="mt-3.5" />
           </motion.div>
         )}
       </AnimatePresence>
@@ -456,44 +365,28 @@ function StageSegments({ stages, reduced }: { stages: Stage[]; reduced: boolean 
   );
 }
 
-function StageTree({
-  nodes,
-  parse,
+/** The three steps, flat. There is nothing nested under any of them: how a
+ *  step is carried out is not published. */
+function StageList({
+  stages,
   reduced,
   className,
-  nested = false,
 }: {
-  nodes: StageNode[];
-  parse: ParseCounts | null;
+  stages: Stage[];
   reduced: boolean;
   className?: string;
-  nested?: boolean;
 }) {
   return (
     <ol className={cn("space-y-2.5", className)}>
       <AnimatePresence initial={false}>
-        {nodes.map((node) => (
+        {stages.map((stage, index) => (
           <motion.li
-            key={node.index}
+            key={stage.key ?? index}
             initial={reduced ? { opacity: 0 } : { opacity: 0, x: -4 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: DUR.base, ease: EASE_OUT }}
           >
-            <StageRow node={node} parse={parse} reduced={reduced} nested={nested} />
-
-            {node.children.length > 0 && (
-              // The indent is the parent/child relationship made visible. The
-              // guide rail runs the height of the children so an `agentic` row
-              // that is still running reads as "these are what it is doing",
-              // not as "this one is stuck".
-              <StageTree
-                nodes={node.children}
-                parse={parse}
-                reduced={reduced}
-                nested
-                className="ml-2.5 mt-2.5 border-l border-border/70 pl-3.5"
-              />
-            )}
+            <StageRow stage={stage} reduced={reduced} />
           </motion.li>
         ))}
       </AnimatePresence>
@@ -501,125 +394,58 @@ function StageTree({
   );
 }
 
-function StageRow({
-  node,
-  parse,
-  reduced,
-  nested,
-}: {
-  node: StageNode;
-  parse: ParseCounts | null;
-  reduced: boolean;
-  nested: boolean;
-}) {
-  const { stage } = node;
-  const kind = STAGE_KIND[stage.kind] ?? STAGE_KIND.deterministic;
-  const Icon = kind.icon;
-  const counts = stage.key === "parse" ? parse : null;
+function StageRow({ stage, reduced }: { stage: Stage; reduced: boolean }) {
+  const elapsed = typeof stage.elapsed_seconds === "number" && stage.status !== "pending"
+    ? stage.elapsed_seconds : null;
 
   return (
     <div className="flex items-start gap-2.5">
       <span
         className={cn(
-          "mt-px flex shrink-0 items-center justify-center rounded-full border",
-          nested ? "h-4 w-4" : "h-5 w-5",
+          "mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
           stage.status === "done"
             ? "border-ai-confident/50 bg-ai-confident/15 text-ai-confident"
             : stage.status === "failed"
               ? "border-ai-blocked/50 bg-ai-blocked/15 text-ai-blocked"
-              : cn(kind.ring, kind.hue),
+              : stage.status === "running"
+                ? "border-ai-active/45 bg-ai-active/12 text-ai-active"
+                : "border-border bg-transparent text-muted-foreground/60",
         )}
       >
         {stage.status === "done" ? (
-          <DrawnCheck reduced={reduced} className={nested ? "h-2.5 w-2.5" : "h-3 w-3"} />
+          <DrawnCheck reduced={reduced} className="h-3 w-3" />
+        ) : stage.status === "failed" ? (
+          <XCircle className="h-3 w-3" />
         ) : (
-          <Icon
-            className={cn(
-              nested ? "h-2.5 w-2.5" : "h-3 w-3",
-              stage.status === "running" && !reduced && "animate-pulse",
-            )}
+          <Sparkles
+            className={cn("h-3 w-3", stage.status === "running" && !reduced && "animate-pulse")}
           />
         )}
       </span>
 
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-          <span
-            className={cn(
-              "leading-snug",
-              nested ? "text-[12px]" : "text-[12.5px]",
-              stage.status === "running"
-                ? "font-medium text-foreground"
-                : stage.status === "done"
-                  ? "text-muted-foreground"
-                  : "text-foreground",
-            )}
-          >
-            {stageLabel(stage)}
-          </span>
-
-          {/* Naming the kind is the point of the list. The model rows are the
-              ones that cost money and minutes, and which one a run is sitting
-              in should never be a guess. */}
-          <span
-            className={cn(
-              "inline-flex items-center gap-1 text-[10px] uppercase tracking-wide",
-              stage.status === "done" ? "text-muted-foreground/70" : kind.hue,
-            )}
-          >
-            <Icon className="h-2.5 w-2.5" />
-            {kind.label}
-          </span>
-        </div>
-
-        {/* The row's own result, underneath it. This is what makes the list
-            narrate rather than tick: the compiler already answers "what did that
-            step find?" and the answer belongs against the step that found it. */}
-        {counts ? (
-          <ParseFigures counts={counts} reduced={reduced} />
-        ) : (
-          stage.detail && (
-            <div className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
-              {plainly(stage.detail)}
-            </div>
-          )
-        )}
+        <span
+          className={cn(
+            "text-[12.5px] leading-snug",
+            stage.status === "running"
+              ? "font-medium text-foreground"
+              : stage.status === "pending"
+                ? "text-muted-foreground/70"
+                : "text-muted-foreground",
+          )}
+        >
+          {stageLabel(stage)}
+        </span>
       </div>
 
+      {elapsed != null && stage.status !== "running" && (
+        <span className="mt-0.5 shrink-0 font-mono text-[10.5px] tabular-nums text-muted-foreground">
+          {clock(Math.round(elapsed))}
+        </span>
+      )}
       {stage.status === "running" && (
         <span className="ai-skeleton mt-1.5 h-1 w-12 shrink-0 rounded-full" />
       )}
-    </div>
-  );
-}
-
-/** The parse stage's three numbers, set as figures. Rendered only when the
- *  sentence matched; the caller prints the raw string when it did not. */
-function ParseFigures({ counts, reduced }: { counts: ParseCounts; reduced: boolean }) {
-  const items: [string, number][] = [
-    ["paragraphs", counts.paragraphs],
-    ["marked runs", counts.markedRuns],
-    ["merge fields", counts.mergeFields],
-  ];
-
-  return (
-    <div className="mt-1.5 flex flex-wrap gap-x-5 gap-y-1.5">
-      {items.map(([label, value], i) => (
-        <motion.span
-          key={label}
-          className="inline-flex items-baseline gap-1.5"
-          initial={reduced ? { opacity: 0 } : { opacity: 0, y: 3 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: DUR.base, ease: EASE_OUT, delay: staggerDelay(i) }}
-        >
-          <span className="font-mono text-[13px] font-medium tabular-nums text-foreground">
-            {value}
-          </span>
-          <span className="text-[10.5px] uppercase tracking-wide text-muted-foreground">
-            {label}
-          </span>
-        </motion.span>
-      ))}
     </div>
   );
 }
@@ -672,7 +498,7 @@ function Figures({ compiled, reduced }: { compiled: Compiled; reduced: boolean }
         <Figure
           reduced={reduced}
           index={3}
-          label="Merge fields resolved"
+          label="Word fields resolved"
           value={compiled.mergefieldsResolved}
           total={mergefieldTotal}
           // "None resolved" and "none there to resolve" are different facts and
@@ -681,9 +507,7 @@ function Figures({ compiled, reduced }: { compiled: Compiled; reduced: boolean }
         />
       </div>
 
-      {compiled.efficiency && (
-        <EfficiencyBadge efficiency={compiled.efficiency} reduced={reduced} />
-      )}
+      <DocumentCounts compiled={compiled} reduced={reduced} />
     </div>
   );
 }
@@ -750,54 +574,27 @@ function Figure({
 }
 
 /**
- * Whether the colour rules alone could have read this document.
- *
- * The badge people ask for here is "read without a model" -- and on this path
- * that state does not exist: every template goes to a model, so a badge claiming
- * otherwise would be decoration with a lie inside it. The compiler does record
- * the honest version of the same question, as a diagnostic on the scan: it runs
- * the deterministic rules anyway and notes whether they would have fallen short.
- * That is the figure worth showing, and it is the one below.
+ * What was found in the document, in its own terms: paragraphs, placeholders,
+ * Word fields. Only the counts the reading reported are printed; a missing one
+ * is left out rather than shown as a zero.
  */
-function EfficiencyBadge({
-  efficiency,
-  reduced,
-}: {
-  efficiency: { fellShort: boolean; reason: string | null };
-  reduced: boolean;
-}) {
+function DocumentCounts({ compiled, reduced }: { compiled: Compiled; reduced: boolean }) {
+  const parts = [
+    compiled.paragraphs != null ? `${compiled.paragraphs} paragraph${compiled.paragraphs === 1 ? "" : "s"}` : null,
+    compiled.placeholders != null ? `${compiled.placeholders} placeholder${compiled.placeholders === 1 ? "" : "s"} found` : null,
+    compiled.mergefieldsSeen != null ? `${compiled.mergefieldsSeen} Word field${compiled.mergefieldsSeen === 1 ? "" : "s"}` : null,
+  ].filter(Boolean) as string[];
+  if (!parts.length) return null;
+
   return (
-    <motion.div
+    <motion.p
       initial={reduced ? { opacity: 0 } : { opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ ...SPRING_PROGRESS, delay: reduced ? 0 : staggerDelay(4) }}
-      className="mt-2.5"
+      className="mt-2.5 text-[11px] tabular-nums text-muted-foreground"
     >
-      <span
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium",
-          efficiency.fellShort
-            ? "border-border bg-surface/60 text-muted-foreground"
-            : "border-ai-confident/40 bg-ai-confident/10 text-ai-confident",
-        )}
-      >
-        <span
-          className={cn(
-            "h-1.5 w-1.5 rounded-full",
-            efficiency.fellShort ? "bg-muted-foreground/70" : "bg-ai-confident",
-          )}
-        />
-        {efficiency.fellShort
-          ? "Needed a model to read"
-          : "Colour rules alone would have read this template"}
-      </span>
-
-      {efficiency.fellShort && efficiency.reason && (
-        <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-          {plainly(efficiency.reason)}
-        </p>
-      )}
-    </motion.div>
+      {parts.join(" · ")}
+    </motion.p>
   );
 }
 

@@ -49,7 +49,7 @@ from app.tenancy import release_org_scope, set_current_org
 
 FUNCTIONS = [
     "Clinical", "Quality-CMC", "Safety", "Medical Affairs", "Marketing",
-    "Quality", "Human Resources", "Legal", "Regulatory Affairs", "Finance",
+    "Quality", "Human Resources", "Legal", "Regulatory Affairs", "Finance", "Other",
 ]
 
 REGIONS = ["Europe", "North America", "Asia Pacific", "Latin America", "Middle East & Africa", "Global"]
@@ -69,6 +69,8 @@ DOCUMENT_TYPES = {
     # The invoice service's vertical. Existing installs get these rows from the
     # a9d4f7e21c85 migration's backfill; this seed covers fresh databases.
     "Finance": ["Invoice", "Quotation", "Purchase Order"],
+    # Any document the functions above do not cover; it runs the HR flow.
+    "Other": ["General Document", "Letter", "Certificate", "Agreement", "Form", "Notice", "Report"],
 }
 
 MIN_PASSWORD_LEN = 12

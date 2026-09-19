@@ -164,9 +164,9 @@ function TemplateGeneratedDocument({ projectId, versionId, filename }: { project
       <div className="flex items-start gap-2 rounded-lg border border-brand/40 bg-brand/5 px-3 py-2 text-sm">
         <AlertTriangle className="h-4 w-4 mt-0.5 text-brand shrink-0" />
         <span>
-          This letter's layout comes from your Word template, so it is edited by its words rather
-          than as HTML. Text changes are written back into the same runs and everything else — the
-          letterhead, tables, headers and numbering — is left exactly as the template made it.
+          This letter's layout comes from your Word template, so you edit its words here. Your
+          changes keep their formatting, and everything else — the letterhead, tables, headers and
+          numbering — stays exactly as the template made it.
           To restructure the document, download it and open it in Word.
         </span>
       </div>

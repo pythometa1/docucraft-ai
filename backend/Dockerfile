@@ -67,4 +67,6 @@ EXPOSE 8000
 # Migrations are NOT run here. A container that migrates on start races every
 # other replica of itself during a rolling deploy; run `alembic upgrade head`
 # as a pre-deploy job and let the app assume the schema is current.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+#
+# --no-server-header: no response needs to say which server produced it.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--no-server-header"]

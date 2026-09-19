@@ -45,6 +45,7 @@ import { SafetyEditor } from "@/components/safety-editor";
 import { SafetyQc } from "@/components/safety-qc";
 import { SafetySignals } from "@/components/safety-signals";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const SELECT_CLASS =
   "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm";
@@ -101,7 +102,7 @@ export function SafetyWorkspace({ project }: { project: { id: string; name: stri
   if (product === undefined) return <StageSkeleton lines={4} />;
   if (error) {
     return <ErrorBanner title="The safety profile could not be loaded"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
   return product === null
     ? <SafetySetup projectId={project.id} onCreated={() => setRefresh((n) => n + 1)} />
@@ -152,7 +153,7 @@ function SafetySetup({ projectId, onCreated }: {
       onCreated();
     } catch (e: any) {
       toast.error("The safety profile could not be created",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -249,7 +250,7 @@ const TABS: [Tab, string, typeof ListTree][] = [
   ["reports", "Reporting intervals", FileText],
   ["sources", "Sources", Upload],
   ["deid", "De-identification", ShieldAlert],
-  ["cases", "Case store", Database],
+  ["cases", "Cases", Database],
   ["review", "Case review", ShieldQuestion],
   ["tables", "Tables", Table2],
   ["write", "Write", PenLine],
@@ -385,7 +386,7 @@ function ProfileTab({ product, onChanged }: {
       onChanged();
       toast.success("RSI version added.");
     } catch (e: any) {
-      toast.error("The version could not be added", { description: e?.message ?? String(e) });
+      toast.error("The version could not be added", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -408,7 +409,7 @@ function ProfileTab({ product, onChanged }: {
         toast.success(`${version.rsi_type.toUpperCase()} ${version.version_label} is now current.`);
       }
     } catch (e: any) {
-      toast.error("The version could not be pinned", { description: e?.message ?? String(e) });
+      toast.error("The version could not be pinned", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -417,7 +418,7 @@ function ProfileTab({ product, onChanged }: {
   if (versions === null || approvals === null) return <StageSkeleton lines={5} />;
   if (error) {
     return <ErrorBanner title="The profile could not be loaded"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
 
   return (
@@ -520,7 +521,7 @@ function ApprovalStatusSection({ product, approvals, onChanged }: {
       setForm({ country: "", approval_date: "", status: form.status });
       onChanged();
     } catch (e: any) {
-      toast.error("The row could not be added", { description: e?.message ?? String(e) });
+      toast.error("The row could not be added", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -533,7 +534,7 @@ function ApprovalStatusSection({ product, approvals, onChanged }: {
         <h3 className="font-medium">Worldwide marketing approval status</h3>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
-        Rendered into the report as a computed table, so it is recorded once here rather
+        Appears in the report as a table, so it is recorded once here rather
         than retyped into every interval.
       </p>
 
@@ -600,7 +601,7 @@ function ReportsTab({ product, onChanged }: {
     api.pvReportTypes()
       .then((res) => { if (live) setTypes(res.items); })
       .catch((e: any) => { if (live) toast.error("Report types could not be loaded",
-                                                 { description: e?.message ?? String(e) }); });
+                                                 { description: plainly(e?.message ?? String(e)) }); });
     return () => { live = false; };
   }, []);
 
@@ -613,14 +614,14 @@ function ReportsTab({ product, onChanged }: {
       setSections((s) => ({ ...s, [report.id]: res.items }));
     } catch (e: any) {
       toast.error("The section tree could not be loaded",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     }
   }
 
   async function remove(report: PvReportInstance) {
     if (!window.confirm(
       `Delete the ${report.doc_type_name} for ${report.period_start} to ` +
-      `${report.period_end}? Its sections and drafts go with it. The case store does not.`
+      `${report.period_end}? Its sections and drafts go with it. Your case data stays.`
     )) return;
     setBusy(report.id);
     try {
@@ -628,7 +629,7 @@ function ReportsTab({ product, onChanged }: {
       toast.success("Report instance deleted.");
       onChanged();
     } catch (e: any) {
-      toast.error("The report could not be deleted", { description: e?.message ?? String(e) });
+      toast.error("The report could not be deleted", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -701,8 +702,8 @@ function ReportsTab({ product, onChanged }: {
                           </span>
                           {s.table_key && (
                             <span className="shrink-0 rounded bg-brand/10 px-1.5 text-[0.65rem] text-brand"
-                                  title="This section carries a computed table; the model writes the prose around it, never the table.">
-                              {s.table_key}
+                                  title="The table is filled in from your confirmed case data; the narrative around it is drafted for you to review.">
+                              table
                             </span>
                           )}
                           <span className={cn("shrink-0 rounded px-1.5 text-[0.65rem]",
@@ -786,7 +787,7 @@ function NewReportForm({ product, types, onCreated }: {
       onCreated();
     } catch (e: any) {
       toast.error("The report instance could not be created",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -877,7 +878,7 @@ function ScopePreview({ preview, error, complete }: {
     return (
       <div className="mt-4 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs">
         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
-        <span>{error}</span>
+        <span>{plainly(error)}</span>
       </div>
     );
   }
@@ -904,7 +905,7 @@ function ScopePreview({ preview, error, complete }: {
             <p className="flex items-start gap-1.5">
               <Info className="mt-0.5 h-3 w-3 shrink-0" />
               {preview.undated} case(s) carry no receipt date and are counted in neither
-              column. They are in the store and need a date before they can appear anywhere.
+              column. They are saved and need a date before they can appear anywhere.
             </p>
           )}
           {preview.cumulative_unavailable && (
@@ -984,7 +985,7 @@ function CalendarTab({ product }: { product: PvProduct }) {
 
   if (error) {
     return <ErrorBanner title="The calendar could not be loaded"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
   if (!data) return <StageSkeleton lines={4} />;
 
@@ -994,7 +995,7 @@ function CalendarTab({ product }: { product: PvProduct }) {
           this screen, so the dates cannot be rendered without it. */}
       <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
         <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
-        <span>{data.disclaimer}</span>
+        <span>{plainly(data.disclaimer)}</span>
       </div>
 
       {data.items.length === 0 ? (
@@ -1068,7 +1069,7 @@ function AddDueDate({ reportId, onAdded }: { reportId: string; onAdded: () => vo
       setForm({ region: "EU", submission_due_date: "", basis_note: "" });
       onAdded();
     } catch (e: any) {
-      toast.error("The date could not be recorded", { description: e?.message ?? String(e) });
+      toast.error("The date could not be recorded", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -1116,7 +1117,7 @@ function RolesTab({ product, onChanged }: { product: PvProduct; onChanged: () =>
       onChanged();
       toast.success(`${member.user_email ?? "That user"} is now a ${pv_role.replace("_", " ")}.`);
     } catch (e: any) {
-      toast.error("The role could not be changed", { description: e?.message ?? String(e) });
+      toast.error("The role could not be changed", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -1124,7 +1125,7 @@ function RolesTab({ product, onChanged }: { product: PvProduct; onChanged: () =>
 
   if (error) {
     return <ErrorBanner title="Roles could not be loaded"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
   if (!data) return <StageSkeleton lines={4} />;
 
@@ -1132,8 +1133,8 @@ function RolesTab({ product, onChanged }: { product: PvProduct; onChanged: () =>
     <div className="space-y-4">
       <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
         Pharmacovigilance judgment is human-owned and nobody holds a role by inference.
-        Only a qualified person may confirm expectedness, seriousness or causality, clear
-        the de-identification gate, or sign a report off — and naming the first qualified
+        Only a qualified person may confirm expectedness, seriousness or causality, release
+        sources held for de-identification, or sign a report off — and naming the first qualified
         person on a product needs the ability to manage users in this organisation.
       </div>
 

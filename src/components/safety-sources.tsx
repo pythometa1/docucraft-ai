@@ -30,16 +30,17 @@ import { Input } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, TableSkeleton } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const SELECT_CLASS =
   "h-8 rounded-md border border-input bg-transparent px-2 text-xs";
 
 const STATUS_LABEL: Record<string, string> = {
   queued: "Queued",
-  parsing: "Parsing",
-  deidentifying: "De-identifying",
-  awaiting_deid: "Held — detections need an answer",
-  indexing: "Indexing",
+  parsing: "Reading",
+  deidentifying: "Hiding personal details",
+  awaiting_deid: "Held — personal details need an answer",
+  indexing: "Preparing",
   done: "Done",
   failed: "Failed",
 };
@@ -153,7 +154,7 @@ export function SafetySources({ productId, onCases }: {
       await load();
       toast.success(`${staged.length} source(s) uploaded.`);
     } catch (e: any) {
-      toast.error("Upload failed", { description: e?.message ?? String(e) });
+      toast.error("Upload failed", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -166,7 +167,7 @@ export function SafetySources({ productId, onCases }: {
       await load();
       toast.success(`${res.queued} source(s) queued.`);
     } catch (e: any) {
-      toast.error("Processing could not start", { description: e?.message ?? String(e) });
+      toast.error("Processing could not start", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -187,7 +188,7 @@ export function SafetySources({ productId, onCases }: {
                       : undefined);
     } catch (e: any) {
       toast.error("The source could not be removed",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -200,7 +201,7 @@ export function SafetySources({ productId, onCases }: {
       await load();
     } catch (e: any) {
       toast.error("The tag could not be changed",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -209,7 +210,7 @@ export function SafetySources({ productId, onCases }: {
   if (sources === null) return <TableSkeleton rows={4} cols={5} />;
   if (error) {
     return <ErrorBanner title="Sources could not be loaded"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
 
   const needMapping = sources.filter(
@@ -224,9 +225,9 @@ export function SafetySources({ productId, onCases }: {
           <div>
             <span className="font-medium text-foreground">
               {gate.documents_waiting} source(s) and {gate.cases_pending} case(s) are
-              at the de-identification gate.
+              waiting for personal details to be checked.
             </span>{" "}
-            <span className="text-muted-foreground">{gate.note}</span>
+            <span className="text-muted-foreground">{plainly(gate.note ?? "")}</span>
           </div>
         </div>
       )}
@@ -285,7 +286,7 @@ export function SafetySources({ productId, onCases }: {
             <PolishedEmpty
               icon={<Upload className="h-8 w-8 text-muted-foreground" />}
               title="No sources yet"
-              subtitle="An E2B export or a line listing becomes the case store. Supporting documents are what the prose sections will cite."
+              subtitle="An E2B export or a line listing becomes your case data. Supporting documents are what the written sections will cite."
             />
           ) : (
             <div className="overflow-x-auto rounded-xl border border-border">
@@ -369,7 +370,7 @@ export function SafetySources({ productId, onCases }: {
               <span className="text-xs text-muted-foreground">
                 {needMapping.length > 0
                   ? `${needMapping.length} line listing(s) need their columns mapped first.`
-                  : "Sources are parsed into the case store and then stop for de-identification."}
+                  : "Cases are read from your sources, and personal details are hidden before anything is used."}
               </span>
               <Button onClick={process}
                       disabled={busy !== null || needMapping.length > 0}>
@@ -419,14 +420,14 @@ function StatusCell({ source }: { source: PvSource }) {
   if (status === "awaiting_deid") {
     return (
       <span className="inline-flex items-center gap-1 text-xs text-warning"
-            title="Parsed. Nothing has been indexed, embedded or sent to a model: de-identification runs first, and it is not built yet.">
+            title="Read, but not used yet: personal details are hidden before anything is used.">
         <Lock className="h-3.5 w-3.5" /> {STATUS_LABEL[status]}
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-1 text-xs text-success">
-      <CheckCircle2 className="h-3.5 w-3.5" /> {STATUS_LABEL[status] ?? status}
+      <CheckCircle2 className="h-3.5 w-3.5" /> {STATUS_LABEL[status] ?? "Done"}
     </span>
   );
 }
@@ -520,7 +521,7 @@ function ColumnMapper({ productId, documentId, initial, onClose, onSaved }: {
       setProfileName("");
     } catch (e: any) {
       toast.error("The mapping could not be saved",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -544,7 +545,7 @@ function ColumnMapper({ productId, documentId, initial, onClose, onSaved }: {
         {error && (
           <div className="mt-4">
             <ErrorBanner title="The columns could not be read"
-                         message="Check the file has a header row." detail={error} />
+                         message="Check the file has a header row." detail={plainly(error)} />
           </div>
         )}
 
@@ -676,8 +677,8 @@ export function SafetyCases({ productId, reportInstanceId }: {
 
   if (rows === null) return <TableSkeleton rows={5} cols={6} />;
   if (error) {
-    return <ErrorBanner title="The case store could not be read"
-                        message="Try again in a moment." detail={error} />;
+    return <ErrorBanner title="The cases could not be loaded"
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
   if (!rows.length && !query) {
     return (
@@ -768,7 +769,7 @@ export function SafetyCases({ productId, reportInstanceId }: {
                 <td className="px-3 py-1.5">
                   <span className="text-xs text-muted-foreground">
                     {row.confirmed_by ? "confirmed" : "unconfirmed"}
-                    {row.deidentification_status === "pending" && " · not masked"}
+                    {row.deidentification_status === "pending" && " · not de-identified"}
                   </span>
                 </td>
               </tr>
@@ -849,11 +850,11 @@ export function SafetyDeidQueue({ productId, onCleared }: {
       });
       setReload((n) => n + 1);
       if (res.documents_indexed) {
-        toast.success(`${res.documents_indexed} source(s) released and indexed.`);
+        toast.success(`${res.documents_indexed} source(s) released and ready to use.`);
       }
     } catch (e: any) {
       toast.error("The answer could not be recorded",
-                  { description: e?.message ?? String(e) });
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -861,18 +862,18 @@ export function SafetyDeidQueue({ productId, onCleared }: {
 
   async function override() {
     const reason = window.prompt(
-      "Clearing the gate without answering it lets unchecked text reach the "
-      + "index. This is recorded against your name. Why?");
+      "Releasing these sources without answering lets unchecked personal details "
+      + "be used. This is recorded against your name. Why?");
     if (!reason?.trim()) return;
     setBusy("override");
     try {
       const res = await api.pvOverrideDeidQueue(productId, reason.trim());
       setReload((n) => n + 1);
-      toast.warning(`${res.overridden} detection(s) left unmasked.`,
-                    { description: `${res.documents_indexed} source(s) indexed. Recorded.` });
+      toast.warning(`${res.overridden} possible personal detail(s) left visible.`,
+                    { description: `${res.documents_indexed} source(s) released. Recorded.` });
     } catch (e: any) {
-      toast.error("The gate could not be overridden",
-                  { description: e?.message ?? String(e) });
+      toast.error("The sources could not be released",
+                  { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -883,7 +884,7 @@ export function SafetyDeidQueue({ productId, onCleared }: {
     try {
       setScan(await api.pvLeakageScan(productId));
     } catch (e: any) {
-      toast.error("The scan could not run", { description: e?.message ?? String(e) });
+      toast.error("The scan could not run", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -892,7 +893,7 @@ export function SafetyDeidQueue({ productId, onCleared }: {
   if (items === null) return <TableSkeleton rows={4} cols={3} />;
   if (error) {
     return <ErrorBanner title="The queue could not be loaded"
-                        message="Try again in a moment." detail={error} />;
+                        message="Try again in a moment." detail={plainly(error)} />;
   }
 
   return (
@@ -905,13 +906,12 @@ export function SafetyDeidQueue({ productId, onCleared }: {
                    : <Lock className="h-4 w-4 text-warning" />}
           <span className="font-medium text-foreground">
             {cleared
-              ? "Nothing is waiting. Sources are masked and indexed."
-              : `${items.length} detection(s) open · ${waiting} source(s) held`}
+              ? "Nothing is waiting. Personal details are hidden and your sources are ready."
+              : `${items.length} item(s) to answer · ${waiting} source(s) held`}
           </span>
           {!cleared && (
             <span className="text-muted-foreground">
-              — nothing is indexed, embedded or sent to a model until these are
-              answered.
+              — these sources are not used for anything until you answer.
             </span>
           )}
         </div>
@@ -934,7 +934,7 @@ export function SafetyDeidQueue({ productId, onCleared }: {
           "rounded-lg border px-3 py-2 text-xs",
           scan.clean ? "border-success/40 bg-success/10" : "border-destructive/40 bg-destructive/10")}>
           {scan.clean
-            ? "No identifier patterns found in the masked narratives or the indexed chunks."
+            ? "No personal details found in your processed sources."
             : `${scan.findings.length} identifier(s) found in text that should be clean.`}
         </div>
       )}
@@ -943,7 +943,7 @@ export function SafetyDeidQueue({ productId, onCleared }: {
         <PolishedEmpty
           icon={<CheckCircle2 className="h-8 w-8 text-success" />}
           title="Nothing to review"
-          subtitle="What the masking pass was sure of was masked without asking. Anything it was not sure of would appear here."
+          subtitle="Personal details we were sure of are already hidden. Anything we were not sure of would appear here for you to decide."
         />
       ) : (
         <div className="overflow-x-auto rounded-xl border border-border">
@@ -980,7 +980,7 @@ export function SafetyDeidQueue({ productId, onCleared }: {
                                 item, "mask",
                                 (document.getElementById(`type-${item.id}`) as
                                   HTMLSelectElement | null)?.value)}>
-                        Mask it
+                        Hide it
                       </Button>
                       <Button size="sm" variant="outline" className="h-8"
                               disabled={busy !== null}

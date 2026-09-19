@@ -517,7 +517,9 @@ def processing_status(csr_project_id: str, db: Session = Depends(get_db),
 def _draft_out(draft: CsrSectionDraft, citations: list | None = None) -> dict:
     return {
         "id": draft.id, "version": draft.version, "content": draft.content,
-        "created_by": draft.created_by, "model": draft.model,
+        # No "model": which vendor wrote a draft is ours to know. It stays on
+        # the row for the audit trail.
+        "created_by": draft.created_by,
         "generation_params": draft.generation_params,
         "created_at": draft.created_at,
         "citations": [

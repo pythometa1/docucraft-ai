@@ -39,7 +39,7 @@ from app.authz import APPROVE_DOCUMENT, READ_AUDIT, require
 from app.db import get_db
 from app.models import SuggestionLog, User
 from app.ownership import owned_document_version
-from app.security import error
+from app.security import error, require_internal_endpoints
 
 router = APIRouter(tags=["metrics"])
 
@@ -54,7 +54,7 @@ ORDERING_NOTE = (
 MAX_LOG_PAGE = 500
 
 
-@router.get("/metrics")
+@router.get("/metrics", dependencies=[Depends(require_internal_endpoints)])
 def read_metrics(
     window_days: int = metrics_service.DEFAULT_WINDOW_DAYS,
     db: Session = Depends(get_db),
@@ -79,7 +79,7 @@ def read_metrics(
     }
 
 
-@router.get("/metrics/calibration-log")
+@router.get("/metrics/calibration-log", dependencies=[Depends(require_internal_endpoints)])
 def read_calibration_log(
     limit: int = 100,
     offset: int = 0,
@@ -147,7 +147,8 @@ class EscapedErrorReport(BaseModel):
     check_name: str = metrics_service.ESCAPED_WRONG_VALUE
 
 
-@router.post("/metrics/escaped-errors", status_code=201)
+@router.post("/metrics/escaped-errors", status_code=201,
+             dependencies=[Depends(require_internal_endpoints)])
 def report_escaped_error(
     body: EscapedErrorReport,
     db: Session = Depends(get_db),

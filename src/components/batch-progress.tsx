@@ -49,6 +49,7 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { SkeletonBar } from "@/components/skeletons";
 import { plainly } from "@/components/processing-banner";
+import { qaNoteLines } from "@/lib/friendly";
 import {
   DUR,
   EASE_OUT,
@@ -145,7 +146,7 @@ export function useBatchWatch(): BatchWatch {
         })
         .catch((e: any) => {
           failures.current += 1;
-          const reason = e?.message ?? String(e);
+          const reason = plainly(String(e?.message ?? e));
           if (failures.current > POLL_TOLERANCE) {
             setStopped(true);
             setError(reason);
@@ -196,13 +197,13 @@ const OUTCOME: Record<string, {
     edge: "border-border",
     bar: "bg-ai-idle",
     heading: "Queued",
-    hint: "Waiting for a worker to pick this up.",
+    hint: "It will start shortly.",
   },
   running: {
     tone: "text-ai-active",
     edge: "border-ai-active/30",
     bar: "bg-ai-active",
-    heading: "Rendering",
+    heading: "Generating",
     hint: "Each row is filled from your data and checked before the next one starts.",
   },
   completed: {
@@ -224,15 +225,15 @@ const OUTCOME: Record<string, {
     edge: "border-ai-blocked/40",
     bar: "bg-ai-blocked",
     heading: "Stopped before it ran",
-    hint: "The sample documents failed their checks, so the rest were never attempted — "
-      + "that gate exists so a bad mapping costs a handful of documents rather than a thousand.",
+    hint: "The first documents checked did not pass, so the rest were held back. "
+      + "Fix what is listed below and generate again.",
   },
   failed: {
     tone: "text-ai-blocked",
     edge: "border-ai-blocked/40",
     bar: "bg-ai-blocked",
     heading: "Failed",
-    hint: "The batch stopped on an error rather than a QA verdict. Nothing further was attempted.",
+    hint: "The batch stopped on an error. Nothing further was attempted.",
   },
 };
 
@@ -243,7 +244,7 @@ const OUTCOME: Record<string, {
  *  the checks never ran on it. */
 const ROW_STATE: Record<string, { label: string; chip: string }> = {
   generated: {
-    label: "Passed QA",
+    label: "Passed checks",
     chip: "border-ai-confident/40 bg-ai-confident/10 text-ai-confident",
   },
   pending_review: {
@@ -251,11 +252,11 @@ const ROW_STATE: Record<string, { label: string; chip: string }> = {
     chip: "border-ai-uncertain/40 bg-ai-uncertain/10 text-ai-uncertain",
   },
   blocked: {
-    label: "Failed QA",
+    label: "Failed checks",
     chip: "border-ai-blocked/40 bg-ai-blocked/10 text-ai-blocked",
   },
   failed: {
-    label: "Did not render",
+    label: "Not produced",
     chip: "border-ai-blocked/40 bg-ai-blocked/10 text-ai-blocked",
   },
 };
@@ -325,14 +326,12 @@ function QaNotes({ notes, dot, still }: { notes: string[]; dot: string; still: b
   if (!notes.length) return null;
   return (
     <ul className="mt-1.5 space-y-1">
-      {notes.map((note, i) => {
+      {qaNoteLines(notes).map((note, i) => {
         const body = (
           <>
             <span aria-hidden className={cn("mt-[6px] h-1 w-1 shrink-0 rounded-full", dot)} />
-            {/* Server prose, scrubbed of internal vocabulary on the way out. The
-                stored note is what an auditor reads back, so it is reworded here
-                rather than at the source. */}
-            <span>{plainly(String(note))}</span>
+            {/* Customer wording; the stored note stays verbatim for the audit. */}
+            <span>{note}</span>
           </>
         );
         const line = "flex items-start gap-1.5 text-[11.5px] leading-relaxed text-muted-foreground";
@@ -379,13 +378,13 @@ function DrawnEdge({ tone = "bg-ai-blocked", still }: { tone?: string; still: bo
 /** One sample slot. Either the verdict it arrived with, or a placeholder saying
  *  plainly that nothing has been reported for it yet -- never a made-up
  *  intermediate phase, because the runner does not publish one. */
-function SampleSlot({ row, n, showNotes, still }: {
-  row: Row | undefined; n: number; showNotes: boolean; still: boolean;
+function SampleSlot({ row, showNotes, still }: {
+  row: Row | undefined; showNotes: boolean; still: boolean;
 }) {
   if (!row) {
     return (
       <div className={cn(SLOT_BASE, "border-dashed border-border/70 bg-surface-elevated/20")}>
-        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Sample {n}</div>
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Checked first</div>
         <SkeletonBar className="mt-2 h-2.5 w-20" />
         <div className="mt-2 text-[11px] text-muted-foreground">Not reported yet</div>
       </div>
@@ -406,7 +405,7 @@ function SampleSlot({ row, n, showNotes, still }: {
     >
       {failed && <DrawnEdge still={still} />}
       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-        Sample {n} · row {row.row_index}
+        Checked first · row {row.row_index}
       </div>
       <div className={cn("mt-1.5 inline-flex rounded-full border px-1.5 py-px text-[10.5px] font-medium", meta.chip)}>
         {meta.label}
@@ -452,17 +451,15 @@ function CanaryGate({ state, behind, reduced }: {
   const caption =
     state === "shut"
       ? behind && behind > 0
-        ? `${behind.toLocaleString()} rows were never attempted.`
+        ? "The rest of the batch was not attempted."
         : "Nothing further was attempted."
       : state === "open"
         ? behind && behind > 0
-          ? `Open — the remaining ${behind.toLocaleString()} rows were released.`
-          : "Open — every row in this batch was a sample."
+          ? "Passed — the rest of the batch continued."
+          : "Passed — every document in this batch was checked first."
         : state === "unknown"
-          ? "The run stopped before the samples returned a verdict."
-          : behind && behind > 0
-            ? `${behind.toLocaleString()} rows held until the samples pass.`
-            : "The rest of the batch is held until the samples pass.";
+          ? "The run stopped before the first checks finished."
+          : "The rest of the batch continues once these pass.";
 
   return (
     <div className="mt-3">
@@ -687,7 +684,7 @@ export function BatchProgressPanel({ watch, className }: { watch: BatchWatch; cl
       a.click();
       URL.revokeObjectURL(url);
     } catch (e: any) {
-      toast.error("Could not download this batch", { description: e?.message ?? String(e) });
+      toast.error("Could not download this batch", { description: plainly(String(e?.message ?? e)) });
     } finally {
       setDownloading(false);
     }
@@ -798,10 +795,9 @@ export function BatchProgressPanel({ watch, className }: { watch: BatchWatch; cl
                 className={cn("mt-px h-4 w-4 shrink-0", gate === "shut" ? "text-ai-blocked" : "text-ai-active")}
               />
               <div className="min-w-0">
-                <h4 className="text-[12.5px] font-semibold tracking-tight">Sample check</h4>
+                <h4 className="text-[12.5px] font-semibold tracking-tight">Checked first</h4>
                 <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
-                  {sampleSize} rows taken from across the batch are filled and fully checked first. The rest
-                  are attempted only if every one of them comes back clean.
+                  A few documents are checked first; the rest continue once they pass.
                 </p>
               </div>
             </div>
@@ -810,15 +806,14 @@ export function BatchProgressPanel({ watch, className }: { watch: BatchWatch; cl
               className="mt-3 grid gap-2"
               style={{ gridTemplateColumns: `repeat(auto-fit, minmax(9.5rem, 1fr))` }}
             >
-              {Array.from({ length: sampleSize }).map((_, i) => (
-                <SampleSlot
-                  key={i}
-                  row={samples[i]}
-                  n={i + 1}
-                  showNotes={gate !== "shut"}
-                  still={reduced}
-                />
+              {/* Arrived slots plus one pending placeholder, so the screen
+                  never draws how many documents are checked first. */}
+              {samples.slice(0, sampleSize).map((row, i) => (
+                <SampleSlot key={i} row={row} showNotes={gate !== "shut"} still={reduced} />
               ))}
+              {samples.length < sampleSize && (
+                <SampleSlot row={undefined} showNotes={false} still={reduced} />
+              )}
             </div>
 
             <CanaryGate state={gate} behind={behind} reduced={reduced} />
@@ -833,7 +828,7 @@ export function BatchProgressPanel({ watch, className }: { watch: BatchWatch; cl
                 className="mt-3 rounded-lg border border-ai-blocked/35 bg-ai-blocked/[0.07] p-3"
               >
                 <p className="text-[12px] font-medium leading-relaxed text-foreground">
-                  {job.error ? plainly(String(job.error)) : "The samples did not pass, so the batch stopped here."}
+                  {job.error ? plainly(String(job.error)) : "The first documents checked did not pass, so the batch stopped here."}
                 </p>
                 <ul className="mt-2.5 space-y-2.5">
                   {failedSamples.map((row) => (
@@ -921,10 +916,10 @@ export function BatchProgressPanel({ watch, className }: { watch: BatchWatch; cl
         {terminal && (
           rows.length > 0 ? (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <CountTile label="Passed QA" value={progress.generated ?? 0} tone="text-ai-confident" />
+              <CountTile label="Passed checks" value={progress.generated ?? 0} tone="text-ai-confident" />
               <CountTile label="Need a decision" value={progress.pending_review ?? 0} tone="text-ai-uncertain" />
-              <CountTile label="Failed QA" value={progress.blocked ?? 0} tone="text-ai-blocked" />
-              <CountTile label="Did not render" value={progress.failed ?? 0} tone="text-ai-blocked" />
+              <CountTile label="Failed checks" value={progress.blocked ?? 0} tone="text-ai-blocked" />
+              <CountTile label="Not produced" value={progress.failed ?? 0} tone="text-ai-blocked" />
             </div>
           ) : (
             /* No counts because no row was ever reported -- said out loud, so
@@ -955,7 +950,7 @@ export function BatchProgressPanel({ watch, className }: { watch: BatchWatch; cl
             fill path is rules on the server, which is why a batch moves at this
             speed, and that is worth saying once, quietly. */}
         <div className="space-y-1 border-t border-border/60 pt-3 text-[11px] leading-relaxed text-muted-foreground">
-          <p>Filling runs on this project's own rules. No model is called while a batch runs.</p>
+          <p>Every document is filled from your data and checked before it's ready.</p>
           {progress.locale && (
             <p>
               Dates and numbers formatted for{" "}

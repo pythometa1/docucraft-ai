@@ -6,6 +6,7 @@ occasionally wrong: a token count that could only ever be zero, a range control
 that changed nothing, and a template ranking that multiplied.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -200,17 +201,21 @@ def _record(db, org_id, *, model="claude-sonnet-5", input_tokens=1000, output_to
 
 def test_tokens_are_summed_from_the_calls_that_were_actually_made(org):
     """They used to be summed from `generation_jobs.token_usage`, which nothing
-    in the repository ever wrote -- so the number was structurally always 0."""
+    in the repository ever wrote -- so the number was structurally always 0.
+    The figure is the operator's: token counts describe how the product is
+    built, so the customer tiles do not carry it."""
     db, _token, org_id, _project = org
     _record(db, org_id, input_tokens=1000, output_tokens=500, when=_ago(1))
     _record(db, org_id, input_tokens=2000, output_tokens=250, when=_ago(2))
 
     since, until, days = analytics.window("7d")
-    tiles = {t["key"]: t for t in
-             analytics.kpis(db, org_id=org_id, since=since, until=until, days=days)["tiles"]}
+    summary = analytics.cost_summary(db, org_id=org_id, since=since, until=until)
+    assert summary["total_tokens"] == 3750
+    assert summary["calls"] == 2
 
-    assert tiles["tokens_consumed"]["value"] == 3750
-    assert tiles["tokens_consumed"]["sample"]["calls"] == 2
+    kpis = analytics.kpis(db, org_id=org_id, since=since, until=until, days=days)
+    assert "tokens_consumed" not in {t["key"] for t in kpis["tiles"]}
+    assert "token" not in json.dumps(kpis)
 
 
 def test_spend_with_no_calls_is_unavailable_rather_than_zero(org):

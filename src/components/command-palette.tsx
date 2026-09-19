@@ -37,7 +37,7 @@ import { useNavigate } from "@tanstack/react-router";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  BarChart3, BookOpen, ClipboardCheck, FileText, FolderKanban, Gauge,
+  BarChart3, BookOpen, ClipboardCheck, FileText, FolderKanban,
   LayoutTemplate, MessageSquare, Settings, Shield, Users,
 } from "lucide-react";
 
@@ -65,11 +65,10 @@ const DESTINATIONS = [
   { label: "Templates", to: "/templates" as const, icon: FileText },
   { label: "Review", to: "/review" as const, icon: ClipboardCheck },
   { label: "Analytics", to: "/analytics" as const, icon: BarChart3 },
-  { label: "Quality", to: "/quality" as const, icon: Gauge },
   { label: "Team", to: "/team" as const, icon: Users },
   { label: "Audit Log", to: "/audit-log" as const, icon: Shield },
   { label: "Settings", to: "/settings" as const, icon: Settings },
-  { label: "Docs", to: "/docs" as const, icon: BookOpen },
+  { label: "Guide", to: "/guide" as const, icon: BookOpen },
 ];
 
 /** The template's state in the words the templates screen uses. Falls through to

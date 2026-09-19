@@ -10,6 +10,7 @@ a paragraph that no longer exists.
 """
 
 import io
+import json
 
 import docx
 import pytest
@@ -536,7 +537,9 @@ def test_the_first_template_of_its_kind_mints_a_family(app_client, org_a):
 
     assert res.status_code == 201, res.text
     body = res.json()
-    assert body["decision"]["branch"] == "NEW_FAMILY"
+    # The public outcome is a plain word; the branch enum names the method.
+    assert body["decision"]["outcome"] == "new"
+    assert "branch" not in body["decision"]
     assert body["family_created"] is True
     assert body["family_id"]
     assert body["manifest"] is None
@@ -562,9 +565,26 @@ def test_a_revision_inherits_the_approved_manifest_and_reports_the_delta(app_cli
 
     assert res.status_code == 201, res.text
     body = res.json()
-    assert body["decision"]["branch"] == "REUSE_MANIFEST", body["decision"]["reason"]
+    assert body["decision"]["outcome"] == "reused", body["decision"]["reason"]
     assert body["decision"]["parent_manifest_id"] == parent_manifest_id
-    assert body["decision"]["similarity"] >= 0.9
+    # No similarity and no threshold on the wire, in the reason or anywhere else.
+    import re as _re
+    _dump = json.dumps(body)
+    assert "similarity" not in _dump, _re.findall(r'.{150}similarity.{150}', _dump)
+    assert not any(ch.isdigit() for ch in body["decision"]["reason"])
+    assert all("similarity" not in c for c in body["decision"]["considered"])
+
+    # The measurement is still taken and kept: on the row, for the operator.
+    from app.db import SessionLocal
+    from app.models import TemplateManifest
+
+    db = SessionLocal()
+    try:
+        row = db.get(TemplateManifest, body["manifest"]["id"])
+        assert row.prescan_summary["inheritance"]["branch"] == "REUSE_MANIFEST"
+        assert row.confidence >= 0.9
+    finally:
+        db.close()
 
     # The draft is a draft. Nothing here is approved by inheriting it.
     assert body["manifest"]["status"] == "draft"

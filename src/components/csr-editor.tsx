@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { StageSkeleton } from "@/components/skeletons";
 import { DOC_TYPE_LABELS } from "@/components/csr-sources";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const STATUS_TONE: Record<string, string> = {
   not_started: "bg-muted text-muted-foreground border-border",
@@ -80,7 +81,7 @@ export function CsrEditor({ csrProjectId, sections, onSectionsChanged }: {
         setSources(res.sources);
         setVersions(res.versions);
       })
-      .catch((e) => { if (live) toast.error("Draft could not be loaded", { description: e?.message ?? String(e) }); })
+      .catch((e) => { if (live) toast.error("Draft could not be loaded", { description: plainly(e?.message ?? String(e)) }); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [activeId]);
@@ -117,7 +118,7 @@ export function CsrEditor({ csrProjectId, sections, onSectionsChanged }: {
         toast.success(`Section ${res.section.section_number} drafted (v${res.version}).`);
       }
     } catch (e: any) {
-      toast.error("The section could not be drafted", { description: e?.message ?? String(e) });
+      toast.error("The section could not be drafted", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -135,7 +136,7 @@ export function CsrEditor({ csrProjectId, sections, onSectionsChanged }: {
       const res = await api.csrGetDraft(activeId);
       setSources(res.sources);
     } catch (e: any) {
-      toast.error("Could not save", { description: e?.message ?? String(e) });
+      toast.error("Could not save", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -148,7 +149,7 @@ export function CsrEditor({ csrProjectId, sections, onSectionsChanged }: {
       const updated = await api.csrSetSectionStatus(activeId, status);
       onSectionsChanged(sections.map((s) => (s.id === activeId ? updated : s)));
     } catch (e: any) {
-      toast.error("Could not change status", { description: e?.message ?? String(e) });
+      toast.error("Could not change status", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -302,7 +303,7 @@ export function CsrEditor({ csrProjectId, sections, onSectionsChanged }: {
             ) : draft === null ? (
               <div className="space-y-3 py-6 text-center">
                 <p className="text-sm text-muted-foreground">
-                  Nothing drafted yet. This section will be written from your indexed
+                  Nothing drafted yet. This section will be written from your uploaded
                   sources — {DOC_TYPE_LABELS.protocol.toLowerCase()}, SAP, statistical
                   outputs — and every number it states will cite one.
                 </p>
@@ -330,7 +331,8 @@ export function CsrEditor({ csrProjectId, sections, onSectionsChanged }: {
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-xs text-muted-foreground">
                   <span>
-                    v{draft.version} · {draft.created_by === "ai" ? `drafted by ${draft.model ?? "the model"}` : "edited by hand"}
+                    {/* Which model drafted it is not the writer's concern, and not sent. */}
+                    v{draft.version} · {draft.created_by === "ai" ? "AI draft" : "edited by hand"}
                   </span>
                   <div className="flex gap-2">
                     <Button size="sm" variant="outline" onClick={() => setEditing(draft.content)}>Edit</Button>
@@ -446,7 +448,7 @@ export function CsrEditor({ csrProjectId, sections, onSectionsChanged }: {
                       <ul className="space-y-1">
                         {unresolved.map((c) => (
                           <li key={c.id} className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-foreground">
-                            {c.marker} points at no source this section retrieved.
+                            {c.marker} points at no source this section was drafted from.
                           </li>
                         ))}
                       </ul>

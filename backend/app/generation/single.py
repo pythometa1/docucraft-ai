@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.generation.filenames import document_filename
 from app.audit.service import log_audit
 from app.generation.docx_renderer import FillResult, fill_template
 from app.generation.pdf_fill import fill_pdf_template
@@ -166,7 +167,9 @@ def generate_one(
     )
 
     extension = "pdf" if is_pdf else "docx"
-    filename = f"{project.name}_{project.display_id}_{document.display_id}_{language}.{extension}"
+    filename = document_filename(
+        document_type=project.document_type, created_at=document.created_at,
+        document_id=document.id, language=language, ext=extension)
     return SingleGeneration(
         document=document, version=version, generation=generation, fill=fill,
         filename=filename, locale=resolved, locale_source=locale_source,

@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, TableSkeleton } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 export const DOC_TYPE_LABELS: Record<string, string> = {
   protocol: "Study Protocol (+ amendments)",
@@ -53,8 +54,8 @@ const STATUS_TONE: Record<string, string> = {
 };
 
 const STATUS_LABEL: Record<string, string> = {
-  queued: "Queued", parsing: "Parsing", chunking: "Chunking",
-  indexing: "Indexing", done: "Indexed", failed: "Failed",
+  queued: "Queued", parsing: "Reading", chunking: "Reading",
+  indexing: "Preparing", done: "Ready", failed: "Failed",
 };
 
 function StatusCell({ document }: { document: CsrDocument }) {
@@ -65,10 +66,7 @@ function StatusCell({ document }: { document: CsrDocument }) {
       {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
       {document.processing_status === "done" && <CheckCircle2 className="h-3.5 w-3.5" />}
       {document.processing_status === "failed" && <XCircle className="h-3.5 w-3.5" />}
-      {STATUS_LABEL[document.processing_status] ?? document.processing_status}
-      {document.processing_status === "done" && document.chunk_count > 0 && (
-        <span className="text-muted-foreground">· {document.chunk_count} sources</span>
-      )}
+      {STATUS_LABEL[document.processing_status] ?? "Processing"}
     </span>
   );
 }
@@ -145,9 +143,9 @@ export function CsrSources({ csrProjectId, onReadiness }: {
       setStaged([]);
       if (fileInput.current) fileInput.current.value = "";
       await load();
-      toast.success("Sources uploaded — process them to make them retrievable.");
+      toast.success("Sources uploaded — process them so sections can be drafted from them.");
     } catch (e: any) {
-      toast.error("Upload failed", { description: e?.message ?? String(e) });
+      toast.error("Upload failed", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -160,7 +158,7 @@ export function CsrSources({ csrProjectId, onReadiness }: {
       toast.info(`Processing ${res.queued} file${res.queued === 1 ? "" : "s"}…`);
       await load();
     } catch (e: any) {
-      toast.error("Could not start processing", { description: e?.message ?? String(e) });
+      toast.error("Could not start processing", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -172,7 +170,7 @@ export function CsrSources({ csrProjectId, onReadiness }: {
       await api.csrRetryDocument(document.id);
       await load();
     } catch (e: any) {
-      toast.error("Retry failed", { description: e?.message ?? String(e) });
+      toast.error("Retry failed", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -181,11 +179,11 @@ export function CsrSources({ csrProjectId, onReadiness }: {
   async function remove(document: CsrDocument) {
     setBusy(document.id);
     try {
-      const res = await api.csrDeleteDocument(document.id);
-      toast.success(`${document.filename} removed (${res.purged_chunks} sources purged).`);
+      await api.csrDeleteDocument(document.id);
+      toast.success(`${document.filename} removed.`);
       await load();
     } catch (e: any) {
-      toast.error("Could not remove this source", { description: e?.message ?? String(e) });
+      toast.error("Could not remove this source", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -196,12 +194,12 @@ export function CsrSources({ csrProjectId, onReadiness }: {
       await api.csrRetagDocument(document.id, doc_type);
       await load();
     } catch (e: any) {
-      toast.error("Could not re-tag this source", { description: e?.message ?? String(e) });
+      toast.error("Could not re-tag this source", { description: plainly(e?.message ?? String(e)) });
     }
   }
 
   if (documents === null) return <TableSkeleton rows={4} cols={4} />;
-  if (error) return <ErrorBanner title="Sources could not be loaded" message="Try again in a moment." detail={error} />;
+  if (error) return <ErrorBanner title="Sources could not be loaded" message="Try again in a moment." detail={plainly(error)} />;
 
   const pending = documents.some((d) => ["queued", "failed"].includes(d.processing_status));
 
@@ -213,7 +211,7 @@ export function CsrSources({ csrProjectId, onReadiness }: {
           <span>
             Safety narratives and listings may contain patient-level data. Upload
             de-identified sources wherever possible. Files are restricted to this project's
-            members, are never used for model training, and are purged when the CSR is deleted.
+            members, are never used to train AI, and are purged when the CSR is deleted.
           </span>
         </div>
 
@@ -335,7 +333,7 @@ export function CsrSources({ csrProjectId, onReadiness }: {
                           onClick={() => remove(document)}
                           disabled={busy !== null}
                           className="rounded p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                          title="Remove this source and its chunks"
+                          title="Remove this source"
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
@@ -393,7 +391,7 @@ export function CsrSources({ csrProjectId, onReadiness }: {
             </div>
             <p className="border-t border-border pt-2 text-xs text-muted-foreground">
               {readiness.ready_to_generate
-                ? "Every required source is indexed — sections can be drafted."
+                ? "Every required source is processed — sections can be drafted."
                 : `Still missing: ${readiness.missing_required.map((t) => DOC_TYPE_LABELS[t]).join(", ")}.`}
             </p>
           </>

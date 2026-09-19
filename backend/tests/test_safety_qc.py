@@ -125,7 +125,10 @@ def test_a_check_that_crashes_fails_closed_and_the_others_still_run(
     findings = _run(report)
     failed = [f for f in findings if f.code == "QC_CHECK_FAILED"]
     assert failed and failed[0].severity == qc.BLOCKER
-    assert "boom" in failed[0].message
+    # Names the check, never the exception: the message is exported.
+    assert failed[0].message.startswith("The broken check could not run.")
+    assert failed[0].detail == {"check": "broken"}
+    assert "boom" not in failed[0].message
     # The rest ran.
     assert "NOT_SIGNED_OFF" in _codes(findings)
 
@@ -387,6 +390,34 @@ def test_a_gap_and_an_open_judgment_each_block(report):
     codes = _codes(_run(report), qc.BLOCKER)
     assert "DATA_NEEDED" in codes
     assert "ASSESSMENT_REQUIRED" in codes
+
+
+#: What a real PBRER draft came back with: the model quoting its brief.
+LEAKED_DRAFT = (
+    "4 Case Series Review\n\n"
+    "In the interval, 3 cases were received [CONFIRMED SAFETY DATA: table_totals]. "
+    "The product was authorised as stated [Product and period metadata]. "
+    "Totals are in the report workspace [table_totals].\n"
+    "[DATA NEEDED: the hepatic case count]\n"
+)
+
+
+def test_a_draft_quoting_its_brief_blocks_and_the_gap_markers_still_do(report):
+    _write(report, "4", LEAKED_DRAFT)
+    findings = _run(report)
+    found = [f for f in findings if f.code == "PROMPT_TEXT_IN_DRAFT"]
+    assert found and found[0].severity == qc.BLOCKER
+    assert sorted(found[0].detail["found"]) == sorted([
+        "[CONFIRMED SAFETY DATA: table_totals]", "[Product and period metadata]",
+        "[table_totals]"])
+    # The intended gap marker is not swallowed by the new check.
+    assert "DATA_NEEDED" in _codes(findings, qc.BLOCKER)
+    assert qc.exportable(findings) is False
+
+
+def test_a_clean_draft_has_no_prompt_text(report):
+    _write(report, "4", "4 Case Series Review\n\nThree cases [S1, p.2] and [S5; S1].\n")
+    assert "PROMPT_TEXT_IN_DRAFT" not in _codes(_run(report))
 
 
 def test_a_table_marker_nothing_builds_blocks(report):

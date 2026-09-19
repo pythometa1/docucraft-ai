@@ -35,6 +35,7 @@ import { ErrorBanner } from "@/components/error-banner";
 import { PolishedEmpty, TableSkeleton } from "@/components/skeletons";
 import { SwapIn } from "@/components/motion";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 type Tab = "results" | "stability" | "specifications" | "batches" | "conflicts";
 
@@ -90,7 +91,7 @@ function ConformanceChip({ outcome, reason }: { outcome: string; reason: string 
       : "border-border bg-muted text-muted-foreground";
   const Icon = outcome === "pass" ? CheckCircle2 : outcome === "fail" ? XCircle : HelpCircle;
   return (
-    <span title={reason}
+    <span title={plainly(reason)}
           className={cn("inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[0.65rem] font-medium capitalize", tone)}>
       <Icon className="h-3 w-3" />
       {outcome === "unknown" ? "Not checked" : outcome}
@@ -117,7 +118,7 @@ function ValueCell({ row, onSaved }: { row: CmcResultRow; onSaved: (r: CmcResult
       onSaved({ ...row, ...saved });
       setEditing(null);
     } catch (e: any) {
-      toast.error("Could not save this value", { description: e?.message ?? String(e) });
+      toast.error("Could not save this value", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -284,7 +285,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
       }
       await load();
     } catch (e: any) {
-      toast.error("Could not verify", { description: e?.message ?? String(e) });
+      toast.error("Could not verify", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -297,7 +298,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
       toast.success(`Kept ${done.value_text}; discarded ${done.discarded}.`);
       await load();
     } catch (e: any) {
-      toast.error("Could not resolve", { description: e?.message ?? String(e) });
+      toast.error("Could not resolve", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -324,7 +325,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
   }
 
   if (results === null) return <TableSkeleton rows={6} cols={6} />;
-  if (error) return <ErrorBanner title="The data could not be loaded" message="Try again in a moment." detail={error} />;
+  if (error) return <ErrorBanner title="The data could not be loaded" message="Try again in a moment." detail={plainly(error)} />;
 
   if (!counts.results && !counts.stability && !counts.specifications
       && !counts.batches && !query) {
@@ -360,7 +361,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
           )}
           <span className="text-muted-foreground">
             {summary?.all_verified
-              ? "— these can be rendered into the dossier."
+              ? "— these can go into the dossier."
               : "— unverified values cannot reach a document."}
           </span>
         </div>
@@ -479,7 +480,7 @@ export function CmcDataGrid({ cmcProjectId, documents }: {
                     <td className="px-3 py-1.5 font-mono text-xs text-muted-foreground">
                       {t.limit_operator
                         ? `${t.limit_operator} ${[t.limit_lower, t.limit_upper].filter(Boolean).join(" – ") || "—"}`
-                        : <span title="This criterion could not be reduced to a numeric bound, so conformance is judged by a person.">not comparable</span>}
+                        : <span title="This criterion is not a simple numeric limit, so a person judges conformance.">not comparable</span>}
                     </td>
                     <td className="px-3 py-1.5 font-mono text-xs">{t.method_id ?? "—"}</td>
                     <td className="px-3 py-1.5 text-xs capitalize">{t.stage}</td>

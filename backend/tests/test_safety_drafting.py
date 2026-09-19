@@ -108,6 +108,36 @@ def _draft(provider, **overrides):
     return drafting.draft_section(**kwargs)
 
 
+
+class _FailingProvider:
+    """A provider call that failed, carrying the kind of text an SDK puts in
+    its exceptions -- which must reach the log and never the user."""
+
+    def structured(self, *, system, prompt, schema, purpose="generate"):
+        class _Result:
+            data = None
+            model = "stub-model"
+            error = "401 from api.vendor.example: key sk-live-abc rejected"
+        return _Result()
+
+
+def test_a_failed_section_draft_says_so_without_the_providers_text():
+    with pytest.raises(drafting.DraftingFailed) as refused:
+        _draft(_FailingProvider())
+    message = str(refused.value)
+    assert message == ("The AI draft of section 1 could not be produced right now. "
+                       "Please try again.")
+    assert "sk-live" not in message and "vendor" not in message
+
+
+def test_a_failed_narrative_says_so_without_the_providers_text():
+    with pytest.raises(drafting.DraftingFailed) as refused:
+        drafting.draft_narrative(case_id="D-1", product_name="X", case_record={"a": 1},
+                                 get_provider=lambda *a, **k: _FailingProvider())
+    message = str(refused.value)
+    assert message.startswith("The AI narrative for case D-1 could not be produced")
+    assert "sk-live" not in message
+
 def test_an_identifier_in_the_extracts_refuses_the_call():
     """§2's fourth principle: never a model call on un-masked text. Retrieval
     only ever reads masked chunks, and this is the backstop if that ever stops
@@ -507,3 +537,30 @@ def test_the_assessment_grammar():
         == ["a", "b"]
     assert table_markers("a\n[TABLE: one]\ntext [TABLE: inline]\n[TABLE: two]") \
         == ["one", "two"]
+
+
+# ------------------------------------------------ the brief stays out of the report
+
+def test_the_prompt_forbids_echoing_its_brief_and_the_spec_prompt_is_untouched():
+    prompt = drafting.build_prompt(
+        section_code="4", section_title="Case Series Review", deliverable_name="PBRER",
+        structure_basis="ICH E2C(R2)", target_regions=["EU"],
+        product={"product_name": "Draftazine"}, report={}, rsi={},
+        confirmed_data={"table_totals": {"cases": 3}}, baseline_text=None,
+        guidance=None, extracts="[S1] text", instruction="Be brief")
+    assert prompt.endswith(drafting.OUTPUT_RULES)
+    assert prompt.startswith(drafting.SYSTEM_PROMPT.split("{")[0])
+    assert "[ASSESSMENT REQUIRED: ...]" in drafting.OUTPUT_RULES
+    assert "workspace" in drafting.OUTPUT_RULES and "table_totals" in drafting.OUTPUT_RULES
+    assert drafting.PROMPT_VERSION == "pv-m6-2"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("[CONFIRMED SAFETY DATA: table_totals]", ["[CONFIRMED SAFETY DATA: table_totals]"]),
+    ("See [Product and period metadata].", ["[Product and period metadata]"]),
+    ("Totals [case_counts]", ["[case_counts]"]),
+    ("[S5; S1, p.2] [TABLE: summary_tab_soc_pt] [DATA NEEDED: interval_cases]", []),
+    ("[ASSESSMENT REQUIRED: causality] [sic] [PATIENT-1a2b] [1]", []),
+])
+def test_prompt_artifacts(text, expected):
+    assert drafting.prompt_artifacts(text) == expected

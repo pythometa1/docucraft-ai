@@ -209,7 +209,7 @@ const FEATURES = [
   { icon: MessageSquare, title: "Conversational Generation", desc: "Chat with AI to describe what you need — get a document back." },
   { icon: CheckCircle2, title: "Section-Level Control", desc: "Choose exactly which sections get AI-generated, which stay verbatim." },
   { icon: Users2, title: "Approval Workflows", desc: "Multi-step review with role-based approvals for regulated industries." },
-  { icon: FileCheck, title: "Complete Audit Trail", desc: "Every change tracked. Every prompt logged. Regulatory-ready." },
+  { icon: FileCheck, title: "Complete Audit Trail", desc: "Every change tracked. Every AI action logged. Regulatory-ready." },
 ];
 
 const USE_CASES = [

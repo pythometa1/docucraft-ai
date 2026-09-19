@@ -24,9 +24,11 @@
  * brackets". They are advice, not a gate — the person about to press Generate is
  * the one who can judge them.
  *
- * The bands come from §13, and a mapping in REVIEW is not an error -- it is the
- * system saying a person should look before it writes somebody's salary into a
- * letter.
+ * Each field arrives with a status -- matched, please confirm, please check,
+ * choose a column -- and a short reason in words. A field that asks to be
+ * checked is not an error: it is the system saying a person should look before
+ * it writes somebody's salary into a letter. How the engine arrived at a status
+ * (its scores, thresholds and signals) stays on the server.
  *
  * Nothing on this screen names the manifest. The identifiers below still do,
  * because that is what the endpoints are called and renaming them here would
@@ -41,18 +43,15 @@
  * A field pointing at the wrong column is invisible in a list of dropdowns and
  * obvious the moment the lines cross. So the template's fields are one column,
  * the spreadsheet's real headers are the other, and a curve runs between them
- * whose weight and dash carry the band the scorer actually returned. The select
+ * whose weight and dash carry the status the server returned. The select
  * is still there and still the control -- the drawing is a second reading of the
  * same state, not a replacement for it.
  *
  * **What is deliberately not drawn.** `binding-suggestions` is one synchronous
  * request with no progress feed, so there is no pipeline to narrate and none is
  * invented: while it is in flight the board shows a skeleton in the geometry the
- * real rows arrive in, and the story of how the number was reached is told by
- * `confidence_policy`, which is a fact the server sends rather than a sequence we
- * mimed. Nothing here reports a stage, a count or a signal the response did not
- * carry: a field whose column was chosen by hand has no measured score, and it
- * says so instead of showing a zero.
+ * real rows arrive in. A field whose column was chosen by hand says so, rather
+ * than borrowing the status of the column it replaced.
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -61,17 +60,23 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
   ArrowRight,
+  Check,
   CheckCircle2,
   ChevronDown,
+  CircleDashed,
+  CircleHelp,
   Download,
+  Eye,
   FileText,
   Loader2,
+  Pencil,
   RefreshCw,
   Table2,
   Wand2,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
-import { api } from "@/lib/api";
+import { api, type BindingStatus, type BindingSuggestion } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { type BatchWatch } from "@/components/batch-progress";
 import { ErrorBanner } from "@/components/error-banner";
@@ -86,6 +91,7 @@ import {
   useReducedMotionFlag,
 } from "@/components/motion";
 import { plainly } from "@/components/processing-banner";
+import { warningText } from "@/lib/friendly";
 import { PolishedEmpty, SkeletonBar } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
 
@@ -107,160 +113,75 @@ type ManifestWarning = {
   paragraph_index?: number;
 };
 
-/** One scored (field, column) pairing, exactly as `binding-suggestions` sends
- *  it: the leader carries these on the suggestion itself, every other candidate
- *  carries them in `alternatives`. Both are the same four facts, so the screen
- *  reads them through one shape and never has to care which list a number came
- *  from. `vetoes` are bare codes here because that is how alternatives serialise;
- *  the leader's `{code, explanation}` objects are flattened into the same form
- *  and their explanations kept in a lexicon. */
-type Candidate = {
-  source_ref: string;
-  score: number;
-  band: string;
-  evidence: string[];
-  vetoes: string[];
+type Suggestion = BindingSuggestion;
+
+/** How each status is painted, from the app's intelligence ramp, so "sure",
+ *  "unsure" and "stopped" look the same here as on the processing banner. A
+ *  "confirm" is the working colour rather than a second green: the engine has
+ *  an answer and is waiting on a person. */
+const STATUS_STYLE: Record<BindingStatus, string> = {
+  matched: "border-ai-confident/30 bg-ai-confident/10 text-ai-confident",
+  confirm: "border-ai-active/30 bg-ai-active/10 text-ai-active",
+  review: "border-ai-uncertain/30 bg-ai-uncertain/10 text-ai-uncertain",
+  unmatched: "border-ai-blocked/30 bg-ai-blocked/10 text-ai-blocked",
 };
 
-type Veto = { code: string; explanation?: string };
-
-type Suggestion = {
-  field_id: string;
-  column: string | null;
-  confidence: number;
-  score?: number;
-  band?: string;
-  vetoes?: Veto[];
-  evidence?: string[];
-  alternatives?: Candidate[];
-  method?: string;
-  rationale?: string;
-  origin?: string;
-  type?: string;
-  declared_type?: string | null;
-  observed_type?: string | null;
-  sample_value?: string | null;
+const STATUS_LABEL: Record<BindingStatus, string> = {
+  matched: "Matched",
+  confirm: "Please confirm",
+  review: "Please check",
+  unmatched: "Choose a column",
 };
 
-/** What the response says about how its own numbers were produced. Sent on
- *  every `binding-suggestions` reply; the shared API client types the response
- *  down to the keys the previous screen used, so it is widened where it is read
- *  rather than by editing a client four other screens share. */
-type ConfidencePolicy = {
-  weights_calibrated?: boolean;
-  signals_computed?: Record<string, string>;
-  signals_not_computed?: Record<string, string>;
-  max_attainable_score?: number;
-  auto_accept_reachable?: boolean;
-  bands?: { auto_accept?: number; confirm?: number; review?: number };
+const STATUS_MEANING: Record<BindingStatus, string> = {
+  matched: "Matched. Still yours to change.",
+  confirm: "A likely column is selected. Confirm it or pick another.",
+  review: "Worth a look before this writes into a letter.",
+  unmatched: "No confident match. Pick a column by hand.",
 };
 
-/** The bands are painted from the app's intelligence ramp rather than from a
- *  palette of their own, so "sure", "unsure" and "stopped" look the same here as
- *  they do on the processing banner and on a document's status chip. A reader
- *  learns the colour once.
- *
- *  CONFIRM is the working colour rather than a second green: the engine has an
- *  answer and is waiting on a person, which is a different thing from having
- *  applied one. */
-const BAND_STYLE: Record<string, string> = {
-  AUTO_ACCEPT: "border-ai-confident/30 bg-ai-confident/10 text-ai-confident",
-  CONFIRM: "border-ai-active/30 bg-ai-active/10 text-ai-active",
-  REVIEW: "border-ai-uncertain/30 bg-ai-uncertain/10 text-ai-uncertain",
-  BLOCK: "border-ai-blocked/30 bg-ai-blocked/10 text-ai-blocked",
-};
+const STATUS_ORDER: BindingStatus[] = ["matched", "confirm", "review", "unmatched"];
 
-const BAND_MEANING: Record<string, string> = {
-  AUTO_ACCEPT: "Strong evidence. Applied automatically, still reversible.",
-  CONFIRM: "Good evidence. Pre-selected — one click to accept.",
-  REVIEW: "Worth a look before this writes into a letter.",
-  BLOCK: "No usable evidence. Pick a column by hand.",
-};
+/** Not a status. A column somebody chose by hand is theirs, and the honest
+ *  drawing of that is the idle colour, not the verdict on the column it replaced. */
+const MANUAL = "MANUAL";
 
-const BAND_ORDER = ["AUTO_ACCEPT", "CONFIRM", "REVIEW", "BLOCK"] as const;
-
-/** Not a band. A column somebody chose by hand that was never one of this
- *  field's candidates has no score, no band and no evidence -- and the honest
- *  drawing of "nothing was measured" is the idle colour, not a fifth verdict. */
-const UNSCORED = "UNSCORED";
-
-/** How a connector is drawn, per band. The line is the band: weight, dash and
- *  colour together, so the shape of the mapping can be read without reading a
- *  single pill. Colours come from the intelligence ramp as CSS variables because
- *  an SVG stroke cannot take a Tailwind text colour. */
-const BAND_LINE: Record<string, {
+/** How a connector is drawn, per status. The line is the status: weight, dash
+ *  and colour together, so the shape of the mapping can be read without reading
+ *  a single pill. Colours come from the intelligence ramp as CSS variables
+ *  because an SVG stroke cannot take a Tailwind text colour. */
+const STATUS_LINE: Record<string, {
   colour: string; width: number; opacity: number; dashed: boolean; pulse: boolean;
 }> = {
-  AUTO_ACCEPT: { colour: "var(--ai-confident)", width: 2.1, opacity: 1, dashed: false, pulse: false },
-  CONFIRM: { colour: "var(--ai-active)", width: 1.6, opacity: 0.78, dashed: false, pulse: false },
-  REVIEW: { colour: "var(--ai-uncertain)", width: 1.4, opacity: 0.7, dashed: true, pulse: true },
-  BLOCK: { colour: "var(--ai-blocked)", width: 2.6, opacity: 0.9, dashed: false, pulse: false },
-  [UNSCORED]: { colour: "var(--ai-idle)", width: 1.1, opacity: 0.5, dashed: false, pulse: false },
+  matched: { colour: "var(--ai-confident)", width: 2.1, opacity: 1, dashed: false, pulse: false },
+  confirm: { colour: "var(--ai-active)", width: 1.6, opacity: 0.78, dashed: false, pulse: false },
+  review: { colour: "var(--ai-uncertain)", width: 1.4, opacity: 0.7, dashed: true, pulse: true },
+  unmatched: { colour: "var(--ai-blocked)", width: 2.6, opacity: 0.9, dashed: false, pulse: false },
+  [MANUAL]: { colour: "var(--ai-idle)", width: 1.1, opacity: 0.5, dashed: false, pulse: false },
 };
 
-/** The dashed band's pulse, precomputed per band. A keyframe array built during
- *  render is a new target every render, so pointing at another field would
- *  restart every pulse on the board -- with its delay reapplied, which reads as
- *  the lines stuttering. One array per band, made once. */
+/** The dashed line's pulse, precomputed per status. A keyframe array built
+ *  during render is a new target every render, so pointing at another field
+ *  would restart every pulse on the board. One array per status, made once. */
 const PULSE_KEYFRAMES: Record<string, number[]> = Object.fromEntries(
-  Object.entries(BAND_LINE).map(([band, line]) => [
-    band,
+  Object.entries(STATUS_LINE).map(([status, line]) => [
+    status,
     [line.opacity * 0.5, line.opacity, line.opacity * 0.5],
   ]),
 );
 
-/** Short names for §13's signals. The server sends the identifier and a
- *  paragraph of prose; the identifier is an engineer's word and the paragraph is
- *  too long for a chip, so the chip gets one of these and the paragraph goes in
- *  the tooltip and the policy panel, unaltered except for the rewrites below. */
-const SIGNAL_LABEL: Record<string, string> = {
-  exact_name_match: "Name match",
-  semantic_similarity: "Name meaning",
-  historical_approvals: "Precedent here",
-  type_compatibility: "Type check",
-  sentence_context_match: "Sentence around the placeholder",
-  family_inheritance: "Similar templates",
-  business_rule_consistency: "Fits the rest of the template",
-};
-
-/** The order the four live signals are shown in: strongest kind of evidence
- *  first, so a row scanned left to right degrades the same way every time. */
-const COMPUTED_SIGNALS = [
-  "exact_name_match",
-  "semantic_similarity",
-  "historical_approvals",
-  "type_compatibility",
-] as const;
-
-/** `plainly()` handles the compiler's vocabulary. The confidence policy carries
- *  a second one: it is written for whoever maintains the scorer, so it cites
- *  module paths, record sections and the signal identifiers by name. Those are
- *  swapped for what they hold and nothing else is touched — the whole point of
- *  the panel is that the provenance of the number is stated on the record, and
- *  paraphrasing the provenance would defeat it. */
-const INTERNAL_NAMES: [RegExp, string][] = [
-  [/app\.retrieval\.mapping_memory/g, "this organisation's own approval history"],
-  [/app\.retrieval\.vector/g, "the text-similarity index"],
-  [/§7's expression layer/g, "the rule layer"],
-  [/§\d+/g, "the scoring rule set"],
-  [/\bmanifest_bindings\b/g, "the saved column mappings"],
-  [/\bhistorical_approvals\b/g, "past approvals"],
-];
-
-function readable(text: string): string {
-  let out = text;
-  for (const [pattern, replacement] of INTERNAL_NAMES) out = out.replace(pattern, replacement);
-  return plainly(out);
-}
-
-function Pill({ band }: { band?: string }) {
-  if (!band) return null;
+function Pill({ status, hasColumn = false }: { status?: BindingStatus; hasColumn?: boolean }) {
+  if (!status) return null;
+  // The lowest status still pre-selects its best guess, so "Choose a column"
+  // above a selected column contradicts the screen. With a guess in place the
+  // ask is to check it; with nothing selected it really is to choose.
+  const unsureGuess = status === "unmatched" && hasColumn;
   return (
     <span
-      title={BAND_MEANING[band] ?? band}
-      className={cn("shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium", BAND_STYLE[band] ?? "")}
+      title={unsureGuess ? "A guess is selected, but it is uncertain. Check it or pick another column." : STATUS_MEANING[status]}
+      className={cn("shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium", STATUS_STYLE[status])}
     >
-      {band.replace("_", " ")}
+      {unsureGuess ? "Unsure — please check" : STATUS_LABEL[status]}
     </span>
   );
 }
@@ -286,29 +207,11 @@ function StepHeader({ step, active, done, title, hint }: {
   );
 }
 
-/** What the engine took from the template, in one line.
- *
- *  A component of its own for two reasons: `useCountUp` is a hook and this line
- *  renders behind a conditional, and the meter and the figure are driven by the
- *  same number, so the bar fills as the percentage climbs instead of snapping to
- *  a width the text has not reached yet. */
-function ReadingSummary({ fields, conditions, confidence, readBy }: {
-  fields: number;
-  conditions: number;
-  /** Null where the reading recorded no figure. Not zero -- see below. */
-  confidence: number | null;
-  readBy?: string;
-}) {
-  const measured = confidence != null;
+/** What the template asks for, in one line. A component of its own because
+ *  `useCountUp` is a hook and this line renders behind a conditional. */
+function ReadingSummary({ fields, conditions }: { fields: number; conditions: number }) {
   const fieldCount = Math.round(useCountUp(fields));
   const conditionCount = Math.round(useCountUp(conditions));
-  // `enabled` is the whole point of the guard: a reading with no recorded
-  // confidence used to arrive here as `?? 0`, and a meter filling to nothing
-  // beside "0% confident" says the engine measured this template and had no
-  // faith in it. What actually happened is that nobody wrote a number down, so
-  // the line says that instead.
-  const percent = Math.round(useCountUp(Math.round((confidence ?? 0) * 100), 700, measured));
-
   return (
     <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs text-muted-foreground">
       <span>
@@ -318,31 +221,6 @@ function ReadingSummary({ fields, conditions, confidence, readBy }: {
       <span>
         <span className="font-medium tabular-nums text-foreground">{conditionCount}</span> conditions
       </span>
-      {readBy && (
-        <>
-          <span aria-hidden className="text-border-strong">·</span>
-          <span>read by <span className="font-mono text-foreground">{readBy}</span></span>
-        </>
-      )}
-      <span aria-hidden className="text-border-strong">·</span>
-      {measured ? (
-        <span className="inline-flex items-center gap-1.5">
-          {/* scaleX rather than width: a bar that is laid out again on every frame
-              is the one animation on this screen that can drop frames, and the
-              transform is composited. */}
-          <span aria-hidden className="h-1 w-14 overflow-hidden rounded-full bg-border">
-            <span
-              className="block h-full origin-left rounded-full bg-ai-confident"
-              style={{ transform: `scaleX(${percent / 100})` }}
-            />
-          </span>
-          <span className="tabular-nums">{percent}% confident</span>
-        </span>
-      ) : (
-        <span title="Nothing in this reading recorded one, which is not the same as a low one.">
-          no confidence figure recorded
-        </span>
-      )}
     </div>
   );
 }
@@ -366,231 +244,37 @@ function groupWarnings(warnings: ManifestWarning[]) {
 /* Reading the response                                                       */
 /* -------------------------------------------------------------------------- */
 
-/** The scored candidate for a (field, column) pairing, or null when the server
- *  never scored that pairing.
- *
- *  Null is the important return. A suggestion with no column carries
- *  `confidence: 0.0`, and that zero is "there was no column", not "we measured
- *  this pairing and it came to nothing" -- showing it as a score would be the
- *  screen inventing a measurement. Likewise a column somebody picked by hand
- *  that was never proposed has no entry anywhere in the response, so there is
- *  nothing to show and the row says as much. */
-function measuredFor(s: Suggestion, column: string | undefined): Candidate | null {
-  if (!column) return null;
-  if (s.column && column === s.column) {
-    return {
-      source_ref: column,
-      score: s.score ?? s.confidence,
-      band: s.band ?? "",
-      evidence: s.evidence ?? [],
-      vetoes: (s.vetoes ?? []).map((v) => v.code),
-    };
-  }
-  return (s.alternatives ?? []).find((a) => a.source_ref === column) ?? null;
+/** The status of the column now selected for a field: the server's own status
+ *  while its answer is selected, MANUAL for anything a person chose instead,
+ *  and nothing when no column is selected. */
+function statusFor(s: Suggestion, column: string | undefined): string {
+  if (!column) return "";
+  return s.column && column === s.column ? s.status : MANUAL;
 }
 
-/** `name` -> the detail the server attached, or null when the signal fired at
- *  full strength and carried no detail. Undefined means the signal is not in
- *  this candidate's evidence at all, which is a different statement again. */
-function evidenceDetail(evidence: string[], name: string): string | null | undefined {
-  for (const entry of evidence) {
-    if (entry === name) return null;
-    if (entry.startsWith(`${name}:`)) return entry.slice(name.length + 1);
-  }
-  return undefined;
-}
-
-type SignalState = "fired" | "measured" | "none" | "absent";
-
-type SignalChip = { name: string; state: SignalState; text: string; title: string };
-
-/** One chip per live signal, from the evidence strings and nothing else.
- *
- *  Four states, and the difference between the last three is the whole reason
- *  this exists. `fired` is evidence that supports the mapping. `measured` is a
- *  number the scorer took and whose contribution is governed by a floor stated
- *  in the policy, so the figure is shown and no verdict is claimed for it.
- *  `none` is a signal that was computed and found nothing. `absent` is a signal
- *  nobody computed for this pairing -- which is not the same as finding nothing,
- *  and is never drawn as a zero. */
-function signalChips(
-  candidate: Candidate,
-  suggestion: Suggestion,
-  policy: ConfidencePolicy | null,
-  vetoLexicon: Record<string, string>,
-): SignalChip[] {
-  const prose = (name: string) => readable(policy?.signals_computed?.[name] ?? "");
-  const chips: SignalChip[] = [];
-
-  for (const name of COMPUTED_SIGNALS) {
-    const detail = evidenceDetail(candidate.evidence, name);
-    const label = SIGNAL_LABEL[name] ?? name;
-
-    if (name === "exact_name_match") {
-      if (detail === undefined) {
-        chips.push({ name, state: "absent", text: label, title: "Not read for this column." });
-      } else if (detail === null) {
-        chips.push({ name, state: "fired", text: "Names match", title: prose(name) });
-      } else {
-        chips.push({ name, state: "none", text: "Names differ", title: prose(name) });
-      }
-      continue;
-    }
-
-    if (name === "semantic_similarity") {
-      if (detail === undefined) {
-        chips.push({ name, state: "absent", text: label, title: "Not read for this column." });
-      } else if (detail === null) {
-        chips.push({ name, state: "fired", text: label, title: prose(name) });
-      } else {
-        // `cos=0.83`. The floor that decides whether it counted is stated in the
-        // policy prose and is not on the wire as a number, so the figure is
-        // reported and the verdict is left to the sentence in the tooltip.
-        const cosine = detail.startsWith("cos=") ? detail.slice(4) : detail;
-        chips.push({ name, state: "measured", text: `Name meaning ${cosine}`, title: prose(name) });
-      }
-      continue;
-    }
-
-    if (name === "historical_approvals") {
-      if (detail === undefined) {
-        chips.push({
-          name,
-          state: "absent",
-          text: label,
-          title: "No approval history was consulted for this field.",
-        });
-      } else if (detail === null) {
-        // The signal saturates towards 1 and only drops its detail at full
-        // strength. Reachable in principle, and the chip must not read the
-        // count out of a string that is not there.
-        chips.push({ name, state: "fired", text: label, title: prose(name) });
-      } else {
-        const count = Number.parseInt(detail, 10);
-        if (Number.isFinite(count) && count > 0) {
-          chips.push({
-            name,
-            state: "fired",
-            text: `Approved here ${count}×`,
-            title: prose(name),
-          });
-        } else {
-          chips.push({
-            name,
-            state: "none",
-            text: "No precedent here",
-            title: "This organisation has not approved this column for this field before.",
-          });
-        }
-      }
-      continue;
-    }
-
-    // type_compatibility. The scorer emits it only when the types agree, so its
-    // absence is read from the veto and from the two type fields rather than
-    // guessed at.
-    if (detail !== undefined) {
-      const [observed, declared] = (detail ?? "").split("->");
-      chips.push({
-        name,
-        state: "fired",
-        text: declared ? `Type ${observed} fits ${declared}` : label,
-        title: prose(name),
-      });
-    } else if (candidate.vetoes.includes("declared_type_mismatch")) {
-      chips.push({
-        name,
-        state: "none",
-        text: `Type ${suggestion.observed_type ?? "?"} ≠ ${suggestion.declared_type ?? "?"}`,
-        title: vetoLexicon.declared_type_mismatch ?? prose(name),
-      });
-    } else {
-      chips.push({
-        name,
-        state: "absent",
-        text: "Type not decided",
-        title: !suggestion.declared_type
-          ? "This field declares no type, so there was nothing to check the column's values against."
-          : !suggestion.observed_type
-            ? "This column has no values to read a type from."
-            : "The type check did not reach a verdict for this column.",
-      });
-    }
-  }
-
-  return chips;
-}
-
-const CHIP_STATE: Record<SignalState, string> = {
-  fired: "border-ai-confident/30 bg-ai-confident/10 text-ai-confident",
-  measured: "border-ai-active/25 bg-ai-active/10 text-ai-active",
-  none: "border-border bg-transparent text-muted-foreground",
-  absent: "border-dashed border-border bg-transparent text-muted-foreground/70",
+/** What each status looks like where the score ring used to sit: a tinted tile
+ *  with an icon, so the state reads at a glance without a number. The same
+ *  36px footprint, so the connector still leaves the card at the height it
+ *  always did. "" is a field with nothing selected yet. */
+const STATUS_MARK: Record<string, { icon: LucideIcon; tile: string; label: string }> = {
+  matched: { icon: Check, tile: "border-ai-confident/40 bg-ai-confident/15 text-ai-confident", label: "Matched" },
+  confirm: { icon: CheckCircle2, tile: "border-ai-active/40 bg-ai-active/15 text-ai-active", label: "Please confirm" },
+  review: { icon: Eye, tile: "border-ai-uncertain/40 bg-ai-uncertain/15 text-ai-uncertain", label: "Please check" },
+  unmatched: { icon: CircleHelp, tile: "border-ai-blocked/40 bg-ai-blocked/15 text-ai-blocked", label: "Choose a column" },
+  [MANUAL]: { icon: Pencil, tile: "border-border bg-surface-elevated text-muted-foreground", label: "Chosen by hand" },
+  "": { icon: CircleDashed, tile: "border-dashed border-border bg-transparent text-muted-foreground", label: "No column selected" },
 };
 
-function SignalStrip({ chips }: { chips: SignalChip[] }) {
+function StatusMark({ status }: { status: string }) {
+  const mark = STATUS_MARK[status] ?? STATUS_MARK[MANUAL];
+  const Icon = mark.icon;
   return (
-    <div className="flex flex-wrap gap-1">
-      {chips.map((chip) => (
-        <span
-          key={chip.name}
-          title={chip.title}
-          className={cn(
-            "rounded border px-1.5 py-0.5 text-[10px] leading-none",
-            CHIP_STATE[chip.state],
-          )}
-        >
-          {chip.text}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* The confidence badge                                                       */
-/* -------------------------------------------------------------------------- */
-
-/** A real score, as a ring that fills and a number that climbs to it.
- *
- *  `strokeDashoffset` rather than a width, so nothing is laid out again while it
- *  fills. Rendered only where a measurement exists -- there is no zero state
- *  here on purpose, because a ring animating to empty says "we looked and found
- *  nothing" about a pairing nobody scored.
- *
- *  `reduced` comes down as a prop, like `Connector`'s does. One of these renders
- *  per field, and `useReducedMotionFlag()` opens a `matchMedia` and subscribes
- *  to it on every call -- so reading it here was one media-query object and one
- *  listener per field on the board. The screen reads it once. */
-function ConfidenceBadge({ value, band, reduced }: {
-  value: number; band: string; reduced: boolean;
-}) {
-  const clamped = Math.max(0, Math.min(1, value));
-  const percent = Math.round(useCountUp(Math.round(clamped * 100), 700, true));
-
-  const radius = 15;
-  const circumference = 2 * Math.PI * radius;
-  const line = BAND_LINE[band] ?? BAND_LINE[UNSCORED];
-
-  return (
-    <span className="relative flex h-9 w-9 shrink-0 items-center justify-center" title={BAND_MEANING[band] ?? band}>
-      <svg viewBox="0 0 36 36" className="h-9 w-9 -rotate-90" aria-hidden>
-        <circle cx="18" cy="18" r={radius} fill="none" strokeWidth="2.5" className="stroke-border" />
-        <motion.circle
-          cx="18"
-          cy="18"
-          r={radius}
-          fill="none"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          style={{ stroke: line.colour }}
-          strokeDasharray={circumference}
-          initial={{ strokeDashoffset: reduced ? circumference * (1 - clamped) : circumference }}
-          animate={{ strokeDashoffset: circumference * (1 - clamped) }}
-          transition={reduced ? { duration: 0 } : { duration: DUR.revealSlow, ease: EASE_OUT }}
-        />
-      </svg>
-      <span className="absolute text-[10px] font-semibold tabular-nums">{percent}</span>
+    <span
+      title={mark.label}
+      className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border", mark.tile)}
+    >
+      <Icon className="h-4 w-4" strokeWidth={2.25} aria-hidden />
+      <span className="sr-only">{mark.label}</span>
     </span>
   );
 }
@@ -599,14 +283,14 @@ function ConfidenceBadge({ value, band, reduced }: {
 /* The connector overlay                                                      */
 /* -------------------------------------------------------------------------- */
 
-type Link = { key: string; fieldId: string; column: string; band: string };
+type Link = { key: string; fieldId: string; column: string; status: string };
 type DrawnLink = Link & { d: string };
 
 /** One curve from a field to its column.
  *
  *  The draw is `pathLength`, which framer-motion renders as a normalised dash
  *  offset -- a stroke growing along its own path, not a box whose width is being
- *  animated. A dashed band cannot be drawn that way (the dash pattern and the
+ *  animated. A dashed line cannot be drawn that way (the dash pattern and the
  *  draw pattern are the same attribute), so REVIEW draws solid and then hands
  *  over to a dashed twin, which is also where its slow pulse lives.
  *
@@ -622,7 +306,7 @@ function Connector({ link, d, index, overridden, dimmed, reduced, visible }: {
   reduced: boolean;
   visible: boolean;
 }) {
-  const line = BAND_LINE[link.band] ?? BAND_LINE[UNSCORED];
+  const line = STATUS_LINE[link.status] ?? STATUS_LINE[MANUAL];
   // A correction is not part of the arrival sequence: it answers a click that
   // just happened, so it draws immediately and quickly.
   const delay = overridden || reduced ? 0 : staggerDelay(index, 40);
@@ -646,7 +330,7 @@ function Connector({ link, d, index, overridden, dimmed, reduced, visible }: {
         style={{ stroke: line.colour }}
         strokeWidth={line.width}
         initial={{ pathLength: reduced ? 1 : 0, opacity: line.opacity }}
-        // A dashed band cannot be drawn by pathLength -- the draw and the dash
+        // A dashed line cannot be drawn by pathLength -- the draw and the dash
         // are the same attribute -- so it draws solid and hands over to the
         // dashed twin below the moment the stroke is complete.
         animate={{ pathLength: 1, opacity: line.dashed ? 0 : line.opacity }}
@@ -664,7 +348,7 @@ function Connector({ link, d, index, overridden, dimmed, reduced, visible }: {
           style={{ stroke: line.colour }}
           strokeWidth={line.width}
           initial={{ opacity: reduced ? line.opacity : 0 }}
-          animate={{ opacity: pulsing ? PULSE_KEYFRAMES[link.band] : line.opacity }}
+          animate={{ opacity: pulsing ? PULSE_KEYFRAMES[link.status] : line.opacity }}
           transition={
             pulsing
               ? { duration: 2.4, ease: EASE_IN_OUT, repeat: Infinity, delay: delay + draw }
@@ -682,18 +366,15 @@ function Connector({ link, d, index, overridden, dimmed, reduced, visible }: {
 
 /** `reduced` is a prop for the same reason `Connector`'s is: one of these
  *  renders per field, and a per-instance `useReducedMotionFlag()` is a
- *  `matchMedia` object and a `change` listener per field. Read once by the
- *  screen, handed down here and on to `ConfidenceBadge`. */
+ *  `matchMedia` object and a `change` listener per field. */
 function FieldCard({
-  suggestion, chosen, columns, index, policy, vetoLexicon, overridden, active,
+  suggestion, chosen, columns, index, overridden, active,
   reduced, onBind, onHover, registerRef, onLayoutChange,
 }: {
   suggestion: Suggestion;
   chosen: string;
   columns: string[];
   index: number;
-  policy: ConfidencePolicy | null;
-  vetoLexicon: Record<string, string>;
   overridden: boolean;
   active: boolean;
   reduced: boolean;
@@ -703,35 +384,23 @@ function FieldCard({
   onLayoutChange: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const candidate = measuredFor(suggestion, chosen);
-  const band = candidate?.band || (chosen ? UNSCORED : "");
-  // Every column the scorer ranked for this field, the one it led with
-  // included. `alternatives` omits the leader, so listing it alone would leave
-  // a reader who corrected a mapping with no way back to the engine's own
-  // answer except by remembering its name.
-  const scored: Candidate[] = [
-    ...(suggestion.column ? [measuredFor(suggestion, suggestion.column)!] : []),
+  // Every column offered for this field, in the server's order, the one it led
+  // with first -- so a reader who corrected a mapping has a way back to the
+  // engine's own answer without remembering its name.
+  const offered = [
+    ...(suggestion.column ? [suggestion.column] : []),
     ...(suggestion.alternatives ?? []),
-  ].sort((a, b) => b.score - a.score);
-  const others = scored.filter((a) => a.source_ref !== chosen);
+  ];
+  const others = offered.filter((c) => c !== chosen);
 
-  // Whether what is selected is still the engine's own answer. Two things hang
-  // off it. The rationale is the server's sentence about the column *it*
-  // proposed, so once somebody has chosen a different one it describes a mapping
-  // that is no longer on screen and goes away rather than misattributing itself.
-  // And the band: a field the engine found no column for carries BLOCK with no
-  // pairing behind it, which is a real statement about the field and is worth
-  // showing -- but only while nobody has answered it.
+  // Whether what is selected is still the engine's own answer. The reason is
+  // the server's sentence about the column *it* proposed, so once somebody has
+  // chosen a different one it goes away rather than misattributing itself; the
+  // status of a field with no column still speaks until somebody answers it.
   const atServerAnswer = chosen === (suggestion.column ?? "");
-  const rationale = atServerAnswer ? suggestion.rationale : "";
-  const shownBand = candidate?.band || (atServerAnswer ? suggestion.band : undefined);
-
-  // §13's no-precedent evidence, for a column the reader chose themselves. The
-  // leader's own case is already carried by its veto chip, so this only speaks
-  // where the correction is. There is no rejection flag anywhere in the
-  // response, so this says what the token actually supports and no more.
-  const precedent = overridden && candidate ? evidenceDetail(candidate.evidence, "historical_approvals") : undefined;
-  const noPrecedent = typeof precedent === "string" && Number.parseInt(precedent, 10) === 0;
+  const reason = atServerAnswer ? suggestion.reason : "";
+  const shownStatus = atServerAnswer ? suggestion.status : undefined;
+  const markStatus = chosen ? statusFor(suggestion, chosen) : suggestion.status;
 
   return (
     <motion.div
@@ -747,20 +416,7 @@ function FieldCard({
       )}
     >
       <div className="flex items-start gap-2.5">
-        {candidate ? (
-          <ConfidenceBadge value={candidate.score} band={band} reduced={reduced} />
-        ) : (
-          <span
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-dashed border-border text-[10px] text-muted-foreground"
-            title={
-              chosen
-                ? "Chosen by hand. This pairing was not among the ones scored, so there is no score to show."
-                : "No column yet, so there is nothing to score."
-            }
-          >
-            —
-          </span>
-        )}
+        <StatusMark status={markStatus} />
 
         <div className="min-w-0 flex-1 space-y-1.5">
           <div className="flex items-center gap-1.5">
@@ -775,7 +431,7 @@ function FieldCard({
                 decides a section
               </span>
             )}
-            <Pill band={shownBand} />
+            <Pill status={shownStatus} hasColumn={Boolean(chosen)} />
           </div>
 
           <select
@@ -793,32 +449,12 @@ function FieldCard({
             </p>
           )}
 
-          {rationale && (
-            <p className="text-[11px] leading-relaxed text-muted-foreground">{plainly(rationale)}</p>
+          {reason && (
+            <p className="text-[11px] leading-relaxed text-muted-foreground">{reason}</p>
           )}
 
-          {candidate && (
-            <SignalStrip chips={signalChips(candidate, suggestion, policy, vetoLexicon)} />
-          )}
-
-          {candidate?.vetoes.map((code) => (
-            <p key={code} className="flex items-start gap-1.5 text-[11px] leading-relaxed text-ai-uncertain">
-              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-              <span>{vetoLexicon[code] ?? <span className="font-mono">{code}</span>}</span>
-            </p>
-          ))}
-
-          {noPrecedent && (
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              No precedent — this organisation has not approved this column for this field before.
-            </p>
-          )}
-
-          {chosen && !candidate && (
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Chosen by hand. This column was not one of the ones scored for this field, so nothing
-              was measured about the pairing.
-            </p>
+          {chosen && !atServerAnswer && overridden && (
+            <p className="text-[11px] leading-relaxed text-muted-foreground">Chosen by hand.</p>
           )}
 
           {others.length > 0 && (
@@ -829,22 +465,18 @@ function FieldCard({
                 className="flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
               >
                 <ChevronDown className={cn("h-3 w-3 transition-transform", open && "rotate-180")} />
-                {others.length} other column{others.length === 1 ? "" : "s"} scored for this field
+                {others.length} other column{others.length === 1 ? "" : "s"} offered for this field
               </button>
               {open && (
                 <ul className="mt-1 space-y-1">
-                  {others.map((alt) => (
-                    <li key={alt.source_ref}>
+                  {others.map((column) => (
+                    <li key={column}>
                       <button
                         type="button"
-                        onClick={() => onBind(suggestion.field_id, alt.source_ref)}
+                        onClick={() => onBind(suggestion.field_id, column)}
                         className="flex w-full items-center gap-2 rounded-md border border-border px-2 py-1 text-left text-[11px] transition-colors hover:border-border-strong"
                       >
-                        <span className="min-w-0 flex-1 truncate font-mono">{alt.source_ref}</span>
-                        <span className="tabular-nums text-muted-foreground">
-                          {Math.round(alt.score * 100)}
-                        </span>
-                        <Pill band={alt.band} />
+                        <span className="min-w-0 flex-1 truncate font-mono">{column}</span>
                       </button>
                     </li>
                   ))}
@@ -947,82 +579,6 @@ function UnmatchedPanel({
 }
 
 /* -------------------------------------------------------------------------- */
-/* What the score is made of                                                  */
-/* -------------------------------------------------------------------------- */
-
-/** The provenance panel, straight off the response.
- *
- *  This is what replaced the agent trace somebody will ask for. There is no
- *  progress feed on `binding-suggestions` and no stages are published for it, so
- *  narrating four invented steps would be a lie told at 320ms a frame. What is
- *  real is `confidence_policy`: which signals were combined, which were not and
- *  why, what the arithmetic can reach, and that the weights behind it have not
- *  been fitted to anything yet. It tells the same story and every line of it is
- *  on the wire. */
-function PolicyPanel({ policy }: { policy: ConfidencePolicy }) {
-  const computed = Object.entries(policy.signals_computed ?? {});
-  const missing = Object.entries(policy.signals_not_computed ?? {});
-  const ceiling = policy.max_attainable_score;
-  const floor = policy.bands?.auto_accept;
-
-  return (
-    <FadeIn className="ml-10">
-      <section className="space-y-3 rounded-lg border border-border bg-background/40 p-3">
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          No model is asked for any of this. Each score below is arithmetic over the signals the
-          engine could measure, and evidence only ever adds — a second weak signal raises a score
-          and can never lower it.
-        </p>
-
-        {computed.length > 0 && (
-          <ul className="space-y-1.5">
-            {computed.map(([name, prose]) => (
-              <li key={name} className="text-[11px] leading-relaxed">
-                <span className="font-medium text-ai-confident">{SIGNAL_LABEL[name] ?? name}</span>
-                <span className="text-muted-foreground"> — {readable(prose)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        {missing.length > 0 && (
-          <div className="space-y-1.5 border-t border-border pt-2.5">
-            <p className="text-[11px] font-medium text-muted-foreground">Not measured, and why</p>
-            <ul className="space-y-1.5">
-              {missing.map(([name, prose]) => (
-                <li key={name} className="text-[11px] leading-relaxed text-muted-foreground/80">
-                  <span className="font-medium">{SIGNAL_LABEL[name] ?? name}</span> — {readable(prose)}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {(ceiling != null || floor != null || policy.weights_calibrated === false) && (
-          <div className="space-y-1 border-t border-border pt-2.5 text-[11px] leading-relaxed text-muted-foreground">
-            {ceiling != null && floor != null && (
-              <p>
-                The highest score reachable with the signals above is{" "}
-                <span className="tabular-nums text-foreground">{Math.round(ceiling * 100)}</span>, and
-                the top band starts at{" "}
-                <span className="tabular-nums text-foreground">{Math.round(floor * 100)}</span>
-                {policy.auto_accept_reachable === false && " — so nothing reaches it today"}.
-              </p>
-            )}
-            {policy.weights_calibrated === false && (
-              <p>
-                The weights behind these signals are starting values. They have not been fitted to
-                measured reviewer decisions yet, so treat a score as a ranking, not a probability.
-              </p>
-            )}
-          </div>
-        )}
-      </section>
-    </FadeIn>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
 
 export function DocumentMapping({ project, watch, onGenerating }: {
   project: any;
@@ -1063,12 +619,9 @@ export function DocumentMapping({ project, watch, onGenerating }: {
   const [bindings, setBindings] = useState<Record<string, string>>({});
   const [unmatched, setUnmatched] = useState<UnmatchedValue[]>([]);
   const [valueMap, setValueMap] = useState<Record<string, Record<string, string>>>({});
-  // The two halves of the response the previous screen threw away: how the
-  // engine says its own numbers were made, and how the bands fell when the
-  // spreadsheet was read.
-  const [policy, setPolicy] = useState<ConfidencePolicy | null>(null);
-  const [bandSummary, setBandSummary] = useState<Record<string, number> | null>(null);
-  const [policyOpen, setPolicyOpen] = useState(false);
+  // How the statuses fell when the spreadsheet was read -- counted once, from
+  // the response, so correcting a mapping below does not rewrite it.
+  const [statusSummary, setStatusSummary] = useState<Record<BindingStatus, number> | null>(null);
   // Fields the reader has re-pointed themselves. Only used for presentation: a
   // correction draws immediately instead of taking its turn in the arrival
   // stagger, and it is where the no-precedent note speaks.
@@ -1098,8 +651,7 @@ export function DocumentMapping({ project, watch, onGenerating }: {
     setBindings({});
     setUnmatched([]);
     setValueMap({});
-    setPolicy(null);
-    setBandSummary(null);
+    setStatusSummary(null);
     setOverridden({});
     setUnmatchedAck(false);
     // The running batch is deliberately *not* cleared here. It belongs to the
@@ -1189,23 +741,20 @@ export function DocumentMapping({ project, watch, onGenerating }: {
     setSuggestError(null);
     try {
       const r = await api.bindingSuggestions(manifest.id, sourceVersionId, sheet || undefined);
-      // `confidence_policy` and `band_summary` are on every reply from this
-      // endpoint; the shared client types the response down to the keys the old
-      // screen read. Widened here rather than in the client, which four other
-      // screens import and none of them wants this shape.
-      const full = r as typeof r & {
-        confidence_policy?: ConfidencePolicy;
-        band_summary?: Record<string, number>;
-      };
-      setSuggestions((full.suggestions ?? []) as Suggestion[]);
-      setColumns(full.columns ?? []);
+      const rows = r.suggestions ?? [];
+      setSuggestions(rows);
+      setColumns(r.columns ?? []);
+      // Every proposed column is pre-selected, whatever its status -- as it was
+      // when the screen read bands. A status says how hard to look, not whether
+      // to fill the select.
       const seed: Record<string, string> = {};
-      for (const s of full.suggestions ?? []) if (s.column) seed[s.field_id] = s.column;
+      for (const s of rows) if (s.column) seed[s.field_id] = s.column;
       setBindings(seed);
-      setUnmatched(full.unmatched_condition_values ?? []);
+      setUnmatched(r.unmatched_condition_values ?? []);
       setValueMap({});
-      setPolicy(full.confidence_policy ?? null);
-      setBandSummary(full.band_summary ?? null);
+      const counts = { matched: 0, confirm: 0, review: 0, unmatched: 0 } as Record<BindingStatus, number>;
+      for (const s of rows) counts[s.status] = (counts[s.status] ?? 0) + 1;
+      setStatusSummary(counts);
       setOverridden({});
       setUnmatchedAck(false);
     } catch (e: any) {
@@ -1297,22 +846,19 @@ export function DocumentMapping({ project, watch, onGenerating }: {
     else columnEls.current.delete(column);
   }, []);
 
-  /** Which curves exist, and what band each one is in. The band comes from the
-   *  candidate that matches the column now selected -- so correcting a mapping
-   *  to a column the scorer did rank restyles the line to that candidate's real
-   *  band, and correcting it to one nobody scored draws the idle line instead of
-   *  keeping the band the old column earned. */
+  /** Which curves exist, and how each is drawn. The server's status while its
+   *  own column is selected; the idle line for a column a person chose, rather
+   *  than the status the old column earned. */
   const links: Link[] = useMemo(() => {
     const out: Link[] = [];
     for (const s of suggestions) {
       const column = bindings[s.field_id];
       if (!column) continue;
-      const candidate = measuredFor(s, column);
       out.push({
         key: `${s.field_id}→${column}`,
         fieldId: s.field_id,
         column,
-        band: candidate?.band || UNSCORED,
+        status: statusFor(s, column),
       });
     }
     return out;
@@ -1432,26 +978,9 @@ export function DocumentMapping({ project, watch, onGenerating }: {
   // would fill this sheet's headers from that sheet's rows.
   const sheetBlocksGeneration = sheets.length > 1 && !!sheet && sheet !== sheets[0];
 
-  // Veto explanations arrive attached to the leading candidate only; every
-  // alternative carries the bare code. The explanation for a code is the same
-  // wherever it fires, so one pass over the response builds the lexicon the
-  // whole board reads from -- and a code nobody explained is shown verbatim
-  // rather than paraphrased, because that is the string somebody quotes.
-  const vetoLexicon: Record<string, string> = {};
-  for (const s of suggestions) {
-    for (const v of s.vetoes ?? []) {
-      if (v?.code && v.explanation && !vetoLexicon[v.code]) vetoLexicon[v.code] = v.explanation;
-    }
-  }
-
   const boundColumns = new Set(Object.values(bindings).filter(Boolean));
-  const columnBand: Record<string, string> = {};
-  for (const link of links) columnBand[link.column] = link.band;
-
-  const autoAcceptTitle =
-    policy?.auto_accept_reachable === false && policy.max_attainable_score != null && policy.bands?.auto_accept != null
-      ? `Empty by arithmetic, not by chance: with the signals measured today the highest score reachable is ${Math.round(policy.max_attainable_score * 100)}, and this band starts at ${Math.round(policy.bands.auto_accept * 100)}.`
-      : BAND_MEANING.AUTO_ACCEPT;
+  const columnStatus: Record<string, string> = {};
+  for (const link of links) columnStatus[link.column] = link.status;
 
   return (
     <div className="space-y-5">
@@ -1550,8 +1079,6 @@ export function DocumentMapping({ project, watch, onGenerating }: {
             <ReadingSummary
               fields={(manifest.fields ?? []).length}
               conditions={conditions.length}
-              confidence={manifest.confidence ?? null}
-              readBy={manifest.compiled_by}
             />
             <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" variant="outline" onClick={downloadSourceTemplate} disabled={!!busy}>
@@ -1590,17 +1117,18 @@ export function DocumentMapping({ project, watch, onGenerating }: {
           <section className="rounded-xl border border-ai-uncertain/25 bg-ai-uncertain/5 p-4">
             <p className="flex items-center gap-1.5 text-sm font-medium text-ai-uncertain">
               <AlertTriangle className="h-4 w-4 shrink-0" />
-              {warningGroups.length} thing{warningGroups.length === 1 ? "" : "s"} the engine was unsure about
+              {warningGroups.length} thing{warningGroups.length === 1 ? "" : "s"} worth checking
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              None of these stop you generating. They are the places a document is most likely to come
-              back with a QA failure, so they are worth a look first.
+              None of these stop you generating. They are the places a document is most likely to
+              need a fix, so they are worth a look first.
             </p>
             <ul className="mt-2 space-y-1">
               {warningGroups.slice(0, 4).map((g) => (
                 <li key={g.code} className="text-xs text-muted-foreground">
-                  <span className="font-mono text-[10px] uppercase opacity-70">{g.code}</span>{" "}
-                  {plainly(g.message || g.occurrences[0]?.detail || "")}
+                  {/* The server's sentence is written for rule authors, so the
+                      reader gets a mapped one keyed on the code. */}
+                  {warningText(g.code)}
                   {g.occurrences.length > 1 && (
                     <span className="opacity-70"> · {g.occurrences.length} places</span>
                   )}
@@ -1706,42 +1234,29 @@ export function DocumentMapping({ project, watch, onGenerating }: {
 
           {suggestions.length > 0 && (
             <>
-              {/* The legend is the band summary the server sent when it read the
-                  spreadsheet, not a live recount -- correcting a mapping below
-                  changes that row's band and not this line, and the label says
-                  which of the two it is. */}
+              {/* How the statuses fell when the spreadsheet was read, not a
+                  live recount -- correcting a mapping below changes that row and
+                  not this line, and the label says which of the two it is. */}
               <div className="ml-10 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                {bandSummary && BAND_ORDER.map((band) => (
+                {statusSummary && STATUS_ORDER.map((status) => (
                   <span
-                    key={band}
-                    title={band === "AUTO_ACCEPT" ? autoAcceptTitle : BAND_MEANING[band]}
+                    key={status}
+                    title={STATUS_MEANING[status]}
                     className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground"
                   >
                     <span
                       aria-hidden
                       className="h-2 w-2 rounded-full"
-                      style={{ background: BAND_LINE[band].colour, opacity: BAND_LINE[band].opacity }}
+                      style={{ background: STATUS_LINE[status].colour, opacity: STATUS_LINE[status].opacity }}
                     />
-                    <span className="tabular-nums text-foreground">{bandSummary[band] ?? 0}</span>
-                    {band.replace("_", " ").toLowerCase()}
+                    <span className="tabular-nums text-foreground">{statusSummary[status] ?? 0}</span>
+                    {STATUS_LABEL[status].toLowerCase()}
                   </span>
                 ))}
-                {bandSummary && (
+                {statusSummary && (
                   <span className="text-[11px] text-muted-foreground/70">when the spreadsheet was read</span>
                 )}
-                {policy && (
-                  <button
-                    type="button"
-                    onClick={() => setPolicyOpen((v) => !v)}
-                    className="ml-auto flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-                  >
-                    <ChevronDown className={cn("h-3 w-3 transition-transform", policyOpen && "rotate-180")} />
-                    What this score is made of
-                  </button>
-                )}
               </div>
-
-              {policy && policyOpen && <PolicyPanel policy={policy} />}
 
               <div
                 ref={boardRef}
@@ -1782,8 +1297,6 @@ export function DocumentMapping({ project, watch, onGenerating }: {
                       chosen={bindings[s.field_id] ?? ""}
                       columns={columns}
                       index={i}
-                      policy={policy}
-                      vetoLexicon={vetoLexicon}
                       overridden={!!overridden[s.field_id]}
                       active={hovered === s.field_id}
                       reduced={reduced}
@@ -1801,7 +1314,7 @@ export function DocumentMapping({ project, watch, onGenerating }: {
                   </p>
                   {columns.map((c, i) => {
                     const bound = boundColumns.has(c);
-                    const band = columnBand[c];
+                    const status = columnStatus[c];
                     return (
                       <motion.div
                         key={c}
@@ -1819,7 +1332,7 @@ export function DocumentMapping({ project, watch, onGenerating }: {
                             aria-hidden
                             className="h-1.5 w-1.5 shrink-0 rounded-full"
                             style={{
-                              background: (BAND_LINE[band] ?? BAND_LINE[UNSCORED]).colour,
+                              background: (STATUS_LINE[status] ?? STATUS_LINE[MANUAL]).colour,
                             }}
                           />
                         ) : (

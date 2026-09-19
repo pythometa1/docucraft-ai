@@ -85,7 +85,8 @@ def inspect_package(path: str | Path, *, require_document: bool = True) -> Packa
     try:
         archive = zipfile.ZipFile(str(path))
     except zipfile.BadZipFile as exc:
-        raise MalformedPackageError(f"Not a readable Office package: {exc}") from exc
+        # The zip library's text stays on the chained exception, for the log.
+        raise MalformedPackageError("Not a readable Office package") from exc
 
     with archive:
         infos = archive.infolist()

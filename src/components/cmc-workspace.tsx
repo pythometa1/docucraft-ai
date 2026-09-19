@@ -33,6 +33,7 @@ import { CmcEditor } from "@/components/cmc-editor";
 import { CmcQuality } from "@/components/cmc-quality";
 import { CmcSources } from "@/components/cmc-sources";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const SUBMISSION_TYPES = ["IND", "IMPD", "NDA", "ANDA", "MAA", "variation", "other"];
 const REGIONS = ["FDA", "EMA", "CDSCO", "PMDA", "HC", "other"];
@@ -47,8 +48,8 @@ function Disclaimer() {
   return (
     <p className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-foreground">
       AI-assisted drafting tool for CMC and regulatory writers. Sections require human review and
-      approval before export. Specification, batch and stability tables are rendered from data you
-      have verified — no model writes a number into this dossier.
+      approval before export. Specification, batch and stability tables are filled in from data you
+      have verified — every figure comes straight from your data.
     </p>
   );
 }
@@ -70,7 +71,7 @@ export function CmcWorkspace({ project }: { project: { id: string; name: string 
   }, [project.id, refresh]);
 
   if (cmc === undefined) return <StageSkeleton lines={4} />;
-  if (error) return <ErrorBanner title="The dossier could not be loaded" message="Try again in a moment." detail={error} />;
+  if (error) return <ErrorBanner title="The dossier could not be loaded" message="Try again in a moment." detail={plainly(error)} />;
 
   return (
     <div className="space-y-4">
@@ -114,7 +115,7 @@ function CmcSetup({ projectId, onCreated }: { projectId: string; onCreated: () =
       toast.success("Dossier created — choose what you are writing next.");
       onCreated();
     } catch (e: any) {
-      toast.error("The dossier could not be created", { description: e?.message ?? String(e) });
+      toast.error("The dossier could not be created", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }
@@ -125,7 +126,7 @@ function CmcSetup({ projectId, onCreated }: { projectId: string; onCreated: () =
       <div>
         <h2 className="text-base font-semibold text-foreground">What is this dossier about?</h2>
         <p className="text-sm text-muted-foreground">
-          Everything here becomes generation metadata for every section, and the target regions
+          Every section draws on what you enter here, and the target regions
           decide which regional items 3.2.R asks for.
         </p>
       </div>
@@ -205,15 +206,15 @@ function CmcOverview({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => voi
 
   async function purge() {
     if (!window.confirm(
-      "Delete this quality dossier? Its uploaded sources, their index, every extracted "
-      + "value and all section drafts are purged. The portal project itself remains.")) return;
+      "Delete this quality dossier? Its uploaded sources, every value read from "
+      + "them and all section drafts are purged. The portal project itself remains.")) return;
     setBusy("purge");
     try {
       await api.cmcDeleteProject(cmc.id);
       toast.success("Dossier purged.");
       onChanged();
     } catch (e: any) {
-      toast.error("Could not delete this dossier", { description: e?.message ?? String(e) });
+      toast.error("Could not delete this dossier", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -290,7 +291,7 @@ function CmcOverview({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => voi
       {tab === "sources" && readiness && !readiness.ready_to_generate && (
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
           <AlertTriangle className="h-3.5 w-3.5" />
-          Sections cannot be drafted until the required sources are indexed and their values checked.
+          Sections cannot be drafted until the required sources are processed and their values checked.
         </p>
       )}
     </div>
@@ -331,7 +332,7 @@ function Deliverables({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => vo
       toast.success("Added — its section tree is ready.");
       onChanged();
     } catch (e: any) {
-      toast.error("Could not add this deliverable", { description: e?.message ?? String(e) });
+      toast.error("Could not add this deliverable", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -348,7 +349,7 @@ function Deliverables({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => vo
       setJustifying(null);
       setJustification("");
     } catch (e: any) {
-      toast.error("Could not update this section", { description: e?.message ?? String(e) });
+      toast.error("Could not update this section", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -429,7 +430,7 @@ function Deliverables({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => vo
                     </span>
                     {section.table_key && (
                       <span className="shrink-0 rounded bg-brand/10 px-1.5 text-[0.6rem] font-medium text-brand"
-                            title="This section renders a table from verified data, not prose.">
+                            title="This section is a table filled in from your verified data.">
                         <ListTree className="mr-0.5 inline h-2.5 w-2.5" />data
                       </span>
                     )}
@@ -526,7 +527,7 @@ function Sites({ cmc, onChanged }: { cmc: CmcProject; onChanged: () => void }) {
       setForm({ name: "", address: "", identifier: "" });
       onChanged();
     } catch (e: any) {
-      toast.error("Could not add this site", { description: e?.message ?? String(e) });
+      toast.error("Could not add this site", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(false);
     }

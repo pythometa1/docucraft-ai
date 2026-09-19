@@ -24,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { StageSkeleton } from "@/components/skeletons";
 import { cn } from "@/lib/utils";
+import { plainly } from "@/components/processing-banner";
 
 const MARKER_RE = /\[S(\d+)(?:,\s*([^\]]+))?\]/g;
 const DATA_NEEDED_RE = /\[DATA NEEDED:([^\]]*)\]/g;
@@ -51,7 +52,7 @@ function LockedTable({ table }: { table: CmcRenderedTable }) {
           <Lock className="h-3 w-3 text-brand" /> {table.title}
         </span>
         <span className="text-[0.65rem] text-muted-foreground">
-          Rendered from verified data — edit in Data review
+          From your verified data — edit in Data review
           {table.unverified > 0 && ` · ${table.unverified} unverified`}
         </span>
       </div>
@@ -145,7 +146,7 @@ export function CmcEditor({ cmcProjectId, sections, onSectionsChanged }: {
         setVersions(res.versions);
         if (res.draft?.content) await loadTables(res.draft.content);
       })
-      .catch((e) => { if (live) toast.error("Draft could not be loaded", { description: e?.message }); })
+      .catch((e) => { if (live) toast.error("Draft could not be loaded", { description: plainly(e?.message ?? "") }); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [activeId]);
@@ -170,7 +171,7 @@ export function CmcEditor({ cmcProjectId, sections, onSectionsChanged }: {
         toast.success(`${res.section.section_code} drafted (v${res.version}).`);
       }
     } catch (e: any) {
-      toast.error("The section could not be drafted", { description: e?.message ?? String(e) });
+      toast.error("The section could not be drafted", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -187,7 +188,7 @@ export function CmcEditor({ cmcProjectId, sections, onSectionsChanged }: {
       await loadTables(saved.content);
       toast.success(`Saved as version ${saved.version}.`);
     } catch (e: any) {
-      toast.error("Could not save", { description: e?.message ?? String(e) });
+      toast.error("Could not save", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -200,7 +201,7 @@ export function CmcEditor({ cmcProjectId, sections, onSectionsChanged }: {
       const updated = await api.cmcSetSectionStatus(activeId, status);
       onSectionsChanged(sections.map((s) => (s.id === activeId ? updated : s)));
     } catch (e: any) {
-      toast.error("Could not change status", { description: e?.message ?? String(e) });
+      toast.error("Could not change status", { description: plainly(e?.message ?? String(e)) });
     } finally {
       setBusy(null);
     }
@@ -273,7 +274,7 @@ export function CmcEditor({ cmcProjectId, sections, onSectionsChanged }: {
           ? <LockedTable key={`tbl${index}`} table={table} />
           : <p key={`tbl${index}`}
                className="my-2 rounded border border-warning/40 bg-warning/10 px-2 py-1 text-xs">
-              [TABLE: {match[1]}] — no data to render yet.
+              A table belongs here, but it has no data yet — add its values in Data review.
             </p>);
       } else {
         buffer.push(line);
@@ -401,8 +402,8 @@ export function CmcEditor({ cmcProjectId, sections, onSectionsChanged }: {
             ) : draft === null ? (
               <div className="space-y-3 py-6 text-center">
                 <p className="text-sm text-muted-foreground">
-                  Nothing drafted yet. This section is written from your indexed sources
-                  {active.table_key && ", and its table is rendered from verified data rather than written"}.
+                  Nothing drafted yet. This section is written from your uploaded sources
+                  {active.table_key && ", and its table is filled in from the values you verified"}.
                 </p>
                 <Button onClick={generate} disabled={busy !== null}>
                   {busy === "generate"
@@ -413,8 +414,8 @@ export function CmcEditor({ cmcProjectId, sections, onSectionsChanged }: {
             ) : editing !== null ? (
               <div className="space-y-3">
                 <p className="text-xs text-muted-foreground">
-                  Table markers stay as <code className="font-mono">[TABLE: key]</code> — the table
-                  itself is rendered from the store at export.
+                  Leave lines like <code className="font-mono">[TABLE: …]</code> where they are — the
+                  table is filled in from your verified data when you export.
                 </p>
                 <Textarea rows={18} value={editing} onChange={(e) => setEditing(e.target.value)}
                           className="font-mono text-sm" />
@@ -432,8 +433,8 @@ export function CmcEditor({ cmcProjectId, sections, onSectionsChanged }: {
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-xs text-muted-foreground">
                   <span>
-                    v{draft.version} · {draft.created_by === "ai"
-                      ? `drafted by ${draft.model ?? "the model"}` : "edited by hand"}
+                    {/* Which model drafted it is not the writer's concern, and not sent. */}
+                    v{draft.version} · {draft.created_by === "ai" ? "AI draft" : "edited by hand"}
                   </span>
                   <div className="flex gap-2">
                     <Button size="sm" variant="outline" onClick={() => setEditing(draft.content)}>Edit</Button>

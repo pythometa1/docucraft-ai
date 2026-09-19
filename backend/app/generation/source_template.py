@@ -194,7 +194,37 @@ def _header_note(column: Column) -> str:
     return "\n".join(parts)
 
 
-def build_workbook(manifest: dict, *, template_name: str = "") -> bytes:
+#: Who a header note is from when the organisation's name is not known.
+DEFAULT_NOTE_AUTHOR = "Template"
+
+#: `docProps/app.xml` with nothing in it. openpyxl writes its own
+#: "Microsoft Excel Compatible / Openpyxl" there unconditionally, which names
+#: the library that built the file to anyone who opens its properties.
+_NEUTRAL_APP_XML = (
+    b'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/'
+    b'extended-properties"/>'
+)
+
+
+def _neutral_package(raw: bytes) -> bytes:
+    """The workbook with its extended properties emptied, entry for entry, and
+    every entry header on the fixed clock rather than the server's local time."""
+    import zipfile
+
+    from app.generation.reproducibility import write_fixed
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(raw)) as source, \
+            zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "docProps/app.xml":
+                data = _NEUTRAL_APP_XML
+            write_fixed(target, info.filename, data=data)
+    return out.getvalue()
+
+
+def build_workbook(manifest: dict, *, template_name: str = "", author: str = "") -> bytes:
     """The .xlsx a person fills in for this template, as bytes.
 
     The data sheet is created first because `extract_records` reads
@@ -202,8 +232,12 @@ def build_workbook(manifest: dict, *, template_name: str = "") -> bytes:
     would make the default read return documentation instead of records.
     """
     columns = plan_columns(manifest)
+    note_author = (author or "").strip() or DEFAULT_NOTE_AUTHOR
 
     workbook = Workbook()
+    # The sending organisation, or nobody -- never the library ("openpyxl").
+    workbook.properties.creator = (author or "").strip()
+    workbook.properties.lastModifiedBy = (author or "").strip()
     data = workbook.active
     data.title = DATA_SHEET
 
@@ -218,7 +252,7 @@ def build_workbook(manifest: dict, *, template_name: str = "") -> bytes:
         cell.font = _HEADER_FONT
         cell.fill = _REQUIRED_FILL if column.required else _HEADER_FILL
         cell.alignment = Alignment(vertical="center", wrap_text=False)
-        cell.comment = Comment(_header_note(column), "DocuMind")
+        cell.comment = Comment(_header_note(column), note_author)
         data.column_dimensions[letter].width = max(14, min(38, len(column.field_id) + 4))
 
         validation = _validation_for(column)
@@ -268,7 +302,7 @@ def build_workbook(manifest: dict, *, template_name: str = "") -> bytes:
 
     buffer = io.BytesIO()
     workbook.save(buffer)
-    return buffer.getvalue()
+    return _neutral_package(buffer.getvalue())
 
 
 def filename_for(template_name: str) -> str:

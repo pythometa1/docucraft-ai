@@ -16,6 +16,7 @@ import {
   ScanLine,
   Search,
   Sparkles,
+  Trash2,
   Wand2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -25,7 +26,10 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BlueprintImportDialog } from "@/components/blueprint-import-dialog";
+import { plainly } from "@/components/processing-banner";
 import { BlueprintKitDialog } from "@/components/blueprint-kit-dialog";
+import { DeleteTemplateDialog } from "@/components/delete-template-dialog";
+import { BulkSelectBar, SelectBox, useSelection, type Selection } from "@/components/bulk-select";
 import { FadeIn, Stagger, StaggerItem, useCountUp } from "@/components/motion";
 import { CardGridSkeleton, PolishedEmpty } from "@/components/skeletons";
 import { ErrorBanner } from "@/components/error-banner";
@@ -36,9 +40,9 @@ export const Route = createFileRoute("/_app/templates")({
   head: () => ({
     meta: [
       { title: "Templates — DocuMind AI" },
-      { name: "description", content: "Read a legacy .docx into an editable template, correct what the engine understood, and publish it as something the fill engine can execute." },
+      { name: "description", content: "Turn an existing Word template into an editable one, review what was found, and publish it ready to generate documents." },
       { property: "og:title", content: "Template authoring — DocuMind AI" },
-      { property: "og:description", content: "Legacy template in, mappable template out." },
+      { property: "og:description", content: "Your existing templates, ready to generate documents." },
     ],
   }),
   component: TemplatesPage,
@@ -60,7 +64,7 @@ const KIND: Record<Blueprint["kind"], { icon: LucideIcon; origin: string }> = {
   legacy: { icon: ScanLine, origin: "Read from a Word document" },
   inherited: { icon: FileSymlink, origin: "Carried over from a project" },
   kit: { icon: LayoutTemplate, origin: "Started from a kit" },
-  library: { icon: Library, origin: "Migrated from the old token library" },
+  library: { icon: Library, origin: "Migrated from the old template library" },
   blank: { icon: FilePlus2, origin: "Started from a blank page" },
 };
 
@@ -100,6 +104,38 @@ const STATUS: Record<Blueprint["status"], {
 /** One chip shape for the whole card, so the status pill and the version pill
  *  sit on the same baseline without the utility string being typed twice. */
 const CHIP = "inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[10.5px] font-medium leading-none";
+
+// Stable across renders: useSelection memoises on these.
+const blueprintId = (b: Blueprint) => b.id;
+const anyTemplate = () => true;
+
+/** Remove several templates, one request each (there is no bulk endpoint).
+ *  Drafts are deleted. A published template the server refuses to delete
+ *  (BLUEPRINT_IN_USE) is archived instead -- the same end state the single
+ *  delete offers: off the list, with everything generated from it unchanged. */
+async function removeTemplates(ids: string[]) {
+  const deleted: string[] = [];
+  const archived: string[] = [];
+  const refused: { reason: string }[] = [];
+  for (const id of ids) {
+    try {
+      await api.deleteBlueprint(id);
+      deleted.push(id);
+    } catch (e: any) {
+      if (e?.code !== "BLUEPRINT_IN_USE") {
+        refused.push({ reason: plainly(e?.message ?? String(e)) });
+        continue;
+      }
+      try {
+        await api.archiveBlueprint(id);
+        archived.push(id);
+      } catch (e2: any) {
+        refused.push({ reason: plainly(e2?.message ?? String(e2)) });
+      }
+    }
+  }
+  return { deleted, archived, refused };
+}
 
 type SortKey = "updated" | "name" | "created";
 
@@ -175,6 +211,8 @@ function TemplatesPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [kitOpen, setKitOpen] = useState(false);
   const [migrating, setMigrating] = useState<string | null>(null);
+  // The one template whose delete dialog is open, if any.
+  const [toDelete, setToDelete] = useState<{ id: string; name: string } | null>(null);
 
   const refresh = () => {
     setLoading(true);
@@ -184,7 +222,7 @@ function TemplatesPage() {
       // message is kept rather than dropped: an empty grid and a failed request
       // look identical on screen and mean opposite things.
       api.listBlueprints().catch((e: any) => {
-        setLoadError(e?.message ?? String(e));
+        setLoadError(plainly(e?.message ?? String(e)));
         return { items: [] as Blueprint[] };
       }),
       // The old token library. Still readable so nobody's authoring work
@@ -192,7 +230,7 @@ function TemplatesPage() {
       api.listLibrary().catch(() => ({ items: [] as any[] })),
     ])
       .then(([bp, lib]) => { setBlueprints(bp.items); setLegacy(lib.items ?? []); })
-      .catch((e: any) => toast.error("Could not load templates", { description: e?.message }))
+      .catch((e: any) => toast.error("Could not load templates", { description: plainly(e?.message ?? "") }))
       .finally(() => setLoading(false));
   };
 
@@ -211,6 +249,10 @@ function TemplatesPage() {
     });
   }, [blueprints, q, sort]);
 
+  // Over what is on screen, so a search narrows what "Select all" ticks.
+  const selection = useSelection(list, blueprintId, anyTemplate);
+  const chosenNames = list.filter((b) => selection.has(b.id)).map((b) => b.name);
+
   return (
     <div className="mx-auto max-w-[1400px] space-y-5 p-6 lg:p-8">
       <FadeIn className="flex flex-wrap items-start justify-between gap-4">
@@ -224,10 +266,10 @@ function TemplatesPage() {
             )}
           </div>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            Put a legacy <code className="text-xs">.docx</code> in and it is pre-scanned and
-            processed: placeholders, author instructions and conditional sections are identified for
-            you. Correct what it got wrong, take the document back, and publish it as a template the
-            fill engine can execute.
+            Upload an existing <code className="text-xs">.docx</code> and its placeholders, author
+            instructions and conditional sections are identified for you. Review and adjust anything
+            you like, download the document whenever you need it, and publish it as a template ready
+            to generate documents.
           </p>
         </div>
         <div className="flex gap-2">
@@ -241,12 +283,12 @@ function TemplatesPage() {
         </div>
       </FadeIn>
 
-      {/* What the colours mean — the same three the pre-scanner classifies runs into. */}
+      {/* What each kind of template text does in the finished document. */}
       <FadeIn delay={0.04} className="relative overflow-hidden rounded-xl surface-raised">
         <span aria-hidden className="grid-noise pointer-events-none absolute inset-0 opacity-[0.35]" />
         <div className="relative flex flex-wrap items-center gap-x-6 gap-y-2 p-4 text-sm">
           <span className="mr-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            How a template is read
+            Legend
           </span>
           <Legend label="Static text — copied as written" cssVar="--color-foreground" glyph="Aa" />
           <Legend label="Placeholder — filled from your data" cssVar="--color-token-source" Icon={Braces} />
@@ -301,16 +343,32 @@ function TemplatesPage() {
       {loading ? (
         <CardGridSkeleton count={6} />
       ) : list.length > 0 ? (
+        <>
+        <BulkSelectBar
+          selection={selection}
+          noun="template"
+          pluralNoun="templates"
+          names={chosenNames}
+          description={
+            "Drafts are deleted. Templates that have already been published are archived instead: "
+            + "they leave this list, and every document generated from them stays exactly as it is."
+          }
+          onDelete={removeTemplates}
+          onDone={refresh}
+        />
         <Stagger className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {list.map((b) => (
             <StaggerItem key={b.id} className="h-full">
               <TemplateCard
                 blueprint={b}
                 onOpen={() => navigate({ to: "/templates/$blueprintId", params: { blueprintId: b.id } })}
+                onDelete={() => setToDelete({ id: b.id, name: b.name })}
+                selection={selection}
               />
             </StaggerItem>
           ))}
         </Stagger>
+        </>
       ) : loadError ? null : q.length > 0 ? (
         <PolishedEmpty
           icon={<Search className="h-5 w-5" />}
@@ -326,7 +384,7 @@ function TemplatesPage() {
         <PolishedEmpty
           icon={<Wand2 className="h-5 w-5" />}
           title="No templates yet"
-          subtitle="Start with a Word document you already send — an offer letter, a contract, a study report. It is read as it is, brackets and coloured instructions and all."
+          subtitle="Start with a Word document you already send — an offer letter, a contract, a study report. It is read as it is, placeholders and author instructions and all."
           action={
             <Button onClick={() => setImportOpen(true)} className="gap-2">
               <Wand2 className="h-4 w-4" /> Read a legacy template
@@ -339,12 +397,12 @@ function TemplatesPage() {
         <FadeIn className="rounded-xl border border-ai-uncertain/30 bg-ai-uncertain/[0.06] p-4">
           <p className="mb-1 flex items-center gap-1.5 text-sm font-medium">
             <AlertTriangle className="h-3.5 w-3.5 text-ai-uncertain" />
-            {legacy.length} template{legacy.length === 1 ? "" : "s"} in the old token library
+            {legacy.length} template{legacy.length === 1 ? "" : "s"} in the old template library
           </p>
           <p className="text-xs text-muted-foreground">
-            These were authored as coloured tokens, which produced markup the fill engine could
-            never read — so they could never actually fill a document. Migrating one turns its tokens
-            into placeholders and conditions; nothing is deleted, the entry stays where it is.
+            These were made in an older format that cannot generate documents. Migrating one
+            turns it into a template you can edit and publish; nothing is deleted, the original
+            stays where it is.
           </p>
           <div className="mt-3 space-y-1.5">
             {legacy.map((t: any) => (
@@ -360,7 +418,7 @@ function TemplatesPage() {
                       toast.success("Migrated", { description: t.name });
                       navigate({ to: "/templates/$blueprintId", params: { blueprintId: bp.id } });
                     } catch (e: any) {
-                      toast.error("Could not migrate", { description: e?.message ?? String(e) });
+                      toast.error("Could not migrate", { description: plainly(e?.message ?? String(e)) });
                     } finally { setMigrating(null); }
                   }}
                 >
@@ -371,6 +429,16 @@ function TemplatesPage() {
             ))}
           </div>
         </FadeIn>
+      )}
+
+      {toDelete && (
+        <DeleteTemplateDialog
+          blueprintId={toDelete.id}
+          name={toDelete.name}
+          open
+          onOpenChange={(o) => { if (!o) setToDelete(null); }}
+          onGone={refresh}
+        />
       )}
 
       <BlueprintKitDialog
@@ -393,7 +461,10 @@ function TemplatesPage() {
  *  The whole thing is a single button rather than a panel with a link in it:
  *  there is exactly one destination, and a card where only part of the surface
  *  opens it is a card people click twice. */
-function TemplateCard({ blueprint: b, onOpen }: { blueprint: Blueprint; onOpen: () => void }) {
+function TemplateCard({ blueprint: b, onOpen, onDelete, selection }: {
+  blueprint: Blueprint; onOpen: () => void; onDelete: () => void; selection: Selection;
+}) {
+  const chosen = selection.has(b.id);
   // Both maps are indexed defensively. `kind` and `status` are unions here, but
   // they are the backend's enums -- a value added there arrives as an unstyled
   // card rather than as an undefined read on the next render.
@@ -404,6 +475,9 @@ function TemplateCard({ blueprint: b, onOpen }: { blueprint: Blueprint; onOpen: 
   const updated = relativeTime(b.updated_at);
 
   return (
+    // The delete control is a sibling of the card's button, not a child: a
+    // button inside a button is invalid, and a click on it must not open the card.
+    <div className={cn("relative h-full rounded-xl", chosen && "ring-2 ring-brand")}>
     <button
       onClick={onOpen}
       className={cn(
@@ -439,7 +513,7 @@ function TemplateCard({ blueprint: b, onOpen }: { blueprint: Blueprint; onOpen: 
         </span>
 
         <div className="min-w-0 flex-1">
-          <div className="flex items-start gap-2">
+          <div className="flex items-start gap-2 pr-7">
             <span className="min-w-0 flex-1 truncate font-medium leading-snug">{b.name}</span>
             <ArrowRight className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition-all duration-200 group-hover:translate-x-0.5 group-hover:opacity-100" />
           </div>
@@ -457,7 +531,7 @@ function TemplateCard({ blueprint: b, onOpen }: { blueprint: Blueprint; onOpen: 
         </div>
       </div>
 
-      <div className="relative mt-3 flex items-center gap-1.5 border-t border-border/60 pt-2.5 text-[11.5px] text-muted-foreground">
+      <div className="relative mt-3 flex items-center gap-1.5 border-t border-border/60 pt-2.5 pr-8 text-[11.5px] text-muted-foreground">
         <Clock className="h-3 w-3 shrink-0" />
         <span>Last updated</span>
         {updated ? (
@@ -467,6 +541,20 @@ function TemplateCard({ blueprint: b, onOpen }: { blueprint: Blueprint; onOpen: 
         )}
       </div>
     </button>
+    {/* Top-right, on the title line; a sibling of the card button like the trash. */}
+    <span className="absolute right-4 top-4 flex h-5 items-center">
+      <SelectBox id={b.id} selection={selection} label={b.name} />
+    </span>
+    <button
+      type="button"
+      onClick={onDelete}
+      aria-label={`Delete template ${b.name}`}
+      title="Delete template"
+      className="absolute bottom-2.5 right-3 flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40"
+    >
+      <Trash2 className="h-3.5 w-3.5" />
+    </button>
+    </div>
   );
 }
 

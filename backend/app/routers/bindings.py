@@ -5,10 +5,11 @@ columns, propose a mapping onto the manifest's fields, let a reviewer correct
 it, preview one row, then run the batch.
 
 `binding-suggestions` is where §13 meets a person. It answers with each
-target's *ranked* candidates and, for every one of them, the score, the
-approval band, the vetoes that fired and the evidence the score was built
-from -- because a reviewer asked to accept a number cannot audit a number, and
-the mapping this product gets wrong is the plausible one.
+target's column, what the reviewer should do about it (matched / confirm /
+review / unmatched), a short reason in words, and the other columns in ranked
+order. The score, band, vetoes and evidence behind that are the scoring method:
+they are written to the suggestion log on every read, for calibration, and not
+sent to the browser.
 """
 
 import io
@@ -27,21 +28,21 @@ from sqlalchemy.orm import Session
 from app.audit.service import log_audit
 from app.db import get_db
 from app.expressions.plain_english import annotate_conditions
+from app.manifests.public import document_summary, scrub
 from app.metrics import record_binding_decisions, record_binding_suggestions
 from app.models import (
     DocumentVersion, FieldDictionary, GeneratedDocument, GenerationJob,
-    ManifestBinding, Project, SourceFile, SourceVersion, TemplateFile,
+    ManifestBinding, SourceFile, SourceVersion, TemplateFile,
     TemplateManifest, TemplateVersion, User,
 )
 from app.ownership import owned_manifest, owned_project, owned_source_version
 from app.generation.document_status import DOWNLOADABLE
+from app.generation.filenames import generated_document_filename, unique_name
+from app.generation.reproducibility import write_fixed
 from app.security import error, get_current_user
 from app.compiler import confidence as cf
 from app.generation.batch_runner import run_batch, run_row
-from app.generation.source_resolver import (
-    SIGNALS_COMPUTED, SIGNALS_NOT_COMPUTED, bindable_targets, max_attainable_score,
-    suggest_bindings,
-)
+from app.generation.source_resolver import bindable_targets, suggest_bindings
 from app.retrieval.mapping_memory import FIELD_TYPES, FieldContext, MappingMemory
 from app.retrieval.vector import HashingEmbedder
 from app.templates.parsers.docx_prescan import prescan
@@ -202,31 +203,88 @@ def _memory_lookups(db: Session, org_id: str, manifest_id: str, targets: dict) -
     return {field_id: memory.lookup(context, org_id) for field_id, context in contexts.items()}
 
 
-def _veto_out(codes) -> list:
-    """A veto a reviewer can act on: the rule that fired, in words."""
-    return [{"code": code, "explanation": cf.VETO_HELP.get(code, "")} for code in codes]
+#: §13's bands, as the four things a reviewer is asked to do. The band names
+#: and the floors behind them are the scoring method; the screen needs only
+#: whether to trust, confirm, look, or choose.
+_STATUS_BY_BAND = {
+    cf.Band.AUTO_ACCEPT.value: "matched",
+    cf.Band.CONFIRM.value: "confirm",
+    cf.Band.REVIEW.value: "review",
+    cf.Band.BLOCK.value: "unmatched",
+}
+
+#: A veto, said as the reason a person should look -- never the rule, the
+#: margin or the signal count that fired it.
+_VETO_REASON = {
+    cf.VETO_TYPE_MISMATCH: "Values don't look like this kind of field",
+    cf.VETO_AMBIGUOUS: "Another column looks just as likely",
+    cf.VETO_THIN_EVIDENCE: "Worth a second look for this kind of value",
+    cf.VETO_NO_PRECEDENT: "Not used for this field before",
+}
+
+#: The strongest supporting signal, in words, best first.
+_SIGNAL_REASON = (
+    ("exact_name_match", "Column name matches"),
+    ("historical_approvals", "Used before in your organisation"),
+    ("semantic_similarity", "Column name is similar"),
+    ("type_compatibility", "Values look similar"),
+)
 
 
-def _confidence_policy() -> dict:
-    """What produced the numbers below, stated on the response itself.
+def _name_match_reason(method: str | None) -> str:
+    """`exact_name_match` fires by three routes (source_resolver._exact_match),
+    and only one of them is the names actually matching. Saying "Column name
+    matches" for `letter_date` <- "Offer Date" because a reviewer confirmed that
+    pair earlier is a false statement on the screen, so the route -- carried on
+    the suggestion as `method` -- picks the words."""
+    if method == "dictionary":
+        return "Matched to this column before in your organisation"
+    if method == "mergefield":
+        return "Matches the field in your template"
+    return "Column name matches"
 
-    A score whose provenance lives only in a design document is a number a
-    reviewer has to take on trust. This says which of §13's seven signals were
-    combined, which were not and why, and -- because it follows from the
-    missing three -- that nothing can reach the auto-accept band today.
-    """
-    ceiling = max_attainable_score()
+
+def _public_reason(suggestion, decision) -> str:
+    """One short sentence, with no number in it, for why a column was offered."""
+    if not suggestion.column:
+        # Two different findings, and a reviewer acts on them differently.
+        return ("Every matching column is already used by another field"
+                if decision else "No confident match")
+    for code in (cf.VETO_TYPE_MISMATCH, cf.VETO_AMBIGUOUS):
+        if code in suggestion.vetoes:
+            return _VETO_REASON[code]
+    scored = next((c for c in (decision.ranked if decision else ())
+                   if c.candidate.source_ref == suggestion.column), None)
+    supporting = {sig.name: sig for sig in scored.candidate.supporting_signals()} if scored else {}
+    for name, reason in _SIGNAL_REASON:
+        if name in supporting:
+            if name == "exact_name_match":
+                return _name_match_reason(getattr(suggestion, "method", None))
+            return reason
+    for code in suggestion.vetoes:
+        if code in _VETO_REASON:
+            return _VETO_REASON[code]
+    return "No confident match"
+
+
+def _public_suggestion(s, target, decision, sample: dict) -> dict:
+    """A suggestion as the screen needs it: the column, what to do about it,
+    why, and the other columns in order. The score, band, evidence and vetoes
+    are logged by `record_binding_suggestions`, not sent."""
     return {
-        "weights_calibrated": cf.WEIGHTS_CALIBRATED,
-        "signals_computed": SIGNALS_COMPUTED,
-        "signals_not_computed": SIGNALS_NOT_COMPUTED,
-        "max_attainable_score": round(ceiling, 4),
-        "auto_accept_reachable": ceiling >= cf.AUTO_ACCEPT_FLOOR,
-        "bands": {
-            "auto_accept": cf.AUTO_ACCEPT_FLOOR,
-            "confirm": cf.CONFIRM_FLOOR,
-            "review": cf.REVIEW_FLOOR,
-        },
+        "field_id": s.field_id,
+        "column": s.column,
+        "status": _STATUS_BY_BAND.get(s.band, "review"),
+        "reason": _public_reason(s, decision),
+        # Best first, names only. The order is the ranking; the numbers behind
+        # it stay on the server.
+        "alternatives": [a.get("source_ref") for a in s.alternatives if a.get("source_ref")],
+        # `origin` tells the UI that colleague_type is a condition variable,
+        # not a placeholder -- it has no slot in the document but every
+        # conditional block depends on it.
+        "origin": target.origin if target else "field",
+        "type": target.type if target else "string",
+        "sample_value": sample.get(s.column) if s.column else None,
     }
 
 
@@ -238,12 +296,11 @@ def binding_suggestions(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Ranked candidates per target, each with its §13 score, band and evidence.
+    """Per target: the column, a status, a reason in words, and ranked alternatives.
 
     Not one winner per field. §13 defines the REVIEW band as "presented with
-    ranked alternatives and the reasoning behind each", and its ambiguity veto
-    -- two candidates within 0.05 -- is a statement about the list. Returning
-    only the leader would hide the tie that makes the leader unsafe.
+    ranked alternatives", and an ambiguous leader is a statement about the list,
+    so the alternatives travel -- as names, in order.
     """
     manifest = owned_manifest(db, manifest_id, user)
     version = owned_source_version(db, source_version_id, user)
@@ -267,7 +324,7 @@ def binding_suggestions(
     # weights in §13, and it cannot be reconstructed later." This is the moment
     # the evidence exists -- a saved binding keeps the answer and throws away
     # everything that led to it -- so the log is written here, on the read, with
-    # the same scores and vetoes that go back in the response.
+    # the full scores and vetoes, which the response itself no longer carries.
     try:
         record_binding_suggestions(
             db, org_id=user.org_id, manifest=manifest, plan=plan,
@@ -286,37 +343,8 @@ def binding_suggestions(
     return {
         "columns": columns,
         "row_count": len(records),
-        "confidence_policy": _confidence_policy(),
-        "band_summary": plan.band_counts(),
         "suggestions": [
-            {
-                "field_id": s.field_id,
-                "column": s.column,
-                # `confidence` is now §13's score rather than a label for the
-                # tier that proposed the column. `score` is the same number
-                # under the name the record uses.
-                "confidence": s.confidence,
-                "score": s.confidence,
-                "band": s.band,
-                "vetoes": _veto_out(s.vetoes),
-                "evidence": s.evidence,
-                # Every other candidate for this field, best first, each with
-                # its own score and reasons. This is what the REVIEW band is.
-                "alternatives": s.alternatives,
-                "auto_apply": s.auto_applicable,
-                "method": s.method,
-                "rationale": s.rationale,
-                # `origin` tells the UI that colleague_type is a condition
-                # variable, not a placeholder -- it has no slot in the document
-                # but every conditional block depends on it.
-                "origin": targets[s.field_id].origin if s.field_id in targets else "field",
-                "type": targets[s.field_id].type if s.field_id in targets else "string",
-                "declared_type": s.declared_type,
-                # Measured from the values, so a reviewer can see why a type
-                # mismatch vetoed a mapping that looks right by name.
-                "observed_type": s.observed_type,
-                "sample_value": sample.get(s.column) if s.column else None,
-            }
+            _public_suggestion(s, targets.get(s.field_id), plan.decisions.get(s.field_id), sample)
             for s in plan.suggestions
         ],
         "unmatched_fields": plan.unmatched_fields,
@@ -503,12 +531,13 @@ def manifest_preview(manifest_id: str, db: Session = Depends(get_db), user: User
 
     return {
         "paragraph_count": len(scan.paragraphs),
-        "prescan_summary": manifest.prescan_summary,
-        "blocks": manifest.blocks,
+        # The same allow-listed counts and item shapes as the manifest itself.
+        "document_summary": document_summary(manifest.prescan_summary),
+        "blocks": scrub(manifest.blocks),
         # Same §7 rendering as the manifest detail view. The preview is where a
         # reviewer reads a condition next to the paragraphs it governs, so it is
         # the last screen that could show syntax where meaning was meant to be.
-        "conditions": annotate_conditions(manifest.conditions),
+        "conditions": scrub(annotate_conditions(manifest.conditions)),
         "paragraphs": paragraphs,
     }
 
@@ -740,6 +769,7 @@ def download_batch(job_id: str, db: Session = Depends(get_db), user: User = Depe
     buffer = io.BytesIO()
     skipped: list[str] = []
     written = 0
+    taken: set = set()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for version_id in version_ids:
             version = db.get(DocumentVersion, version_id)
@@ -751,8 +781,7 @@ def download_batch(job_id: str, db: Session = Depends(get_db), user: User = Depe
             # weaker of the two checks available here.
             if document is None or document.org_id != user.org_id:
                 continue
-            project = db.get(Project, document.project_id)
-            name = f"{project.name}_{document.display_id}_{document.language}.docx"
+            name = generated_document_filename(db, document, "docx")
             if version.status not in DOWNLOADABLE:
                 skipped.append(f"{name}: not approved (currently {version.status}), so it was left out")
                 continue
@@ -760,13 +789,14 @@ def download_batch(job_id: str, db: Session = Depends(get_db), user: User = Depe
             if not path.exists():
                 skipped.append(f"{name}: the file is no longer on disk")
                 continue
-            archive.write(path, arcname=name)
+            # Fixed header clock and attributes, and never two entries of one name.
+            write_fixed(archive, unique_name(name, taken), path=str(path))
             written += 1
 
         if skipped:
-            archive.writestr(
-                "_FAILED.txt",
-                "These documents are not in this archive:\n\n" + "\n".join(skipped) + "\n",
+            write_fixed(
+                archive, "_FAILED.txt",
+                data="These documents are not in this archive:\n\n" + "\n".join(skipped) + "\n",
             )
 
     if not written:

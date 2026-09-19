@@ -20,6 +20,7 @@ this system could produce.
 """
 
 import json
+import logging
 
 from app.csr.ich_e3 import source_types_for
 from app.docgen.markers import (
@@ -27,6 +28,8 @@ from app.docgen.markers import (
     parse_data_needed,
 )
 from app.llm.provider import get_llm_provider
+
+log = logging.getLogger(__name__)
 
 #: The metering label for this capability. One string, spelled the same way
 #: every time it is asked for, because the cost report groups on it.
@@ -204,13 +207,15 @@ def draft_section(*, section_number: str, section_title: str, guidance: str | No
         purpose="generate",
     )
     if result.data is None:
+        log.warning("CSR draft of Section %s failed: %s", section_number,
+                    result.error or "no structured reply")
         raise DraftingFailed(
-            f"The model could not draft Section {section_number}: "
-            f"{result.error or 'it returned no structured reply'}")
+            f"The AI draft of Section {section_number} could not be produced right now. "
+            "Please try again.")
     content = (result.data.get("content") or "").strip()
     if not content:
         raise DraftingFailed(
-            f"The model returned an empty draft for Section {section_number}.")
+            f"The AI returned an empty draft for Section {section_number}. Please try again.")
 
     return DraftResult(
         content=content,

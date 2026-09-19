@@ -210,7 +210,10 @@ def test_a_test_fill_that_raises_is_a_finding_not_a_crash(template, run):
         template, [_Result(FULL_READING)], [_review("approved")], test_fill=_explode,
     )
     assert not outcome.ok
-    assert "template is corrupt" in outcome.reason
+    # Still a finding that stops the compile -- but the stored reason is shown
+    # to clients, so it says the fill failed without carrying the exception.
+    assert "sample data failed" in outcome.reason
+    assert "template is corrupt" not in outcome.reason
 
 
 def test_readings_from_several_chunks_are_merged_on_id(template, run, monkeypatch):

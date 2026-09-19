@@ -5,10 +5,11 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Project, SourceChunk, SourceFile, SourceVersion, User
+from app.public_errors import public_message
 from app.security import error, get_current_user
 from app.audit.service import log_audit
 from app.ownership import owned_project, owned_source_file, owned_source_version
-from app.generation.source_ingestion import content_sha256, extract
+from app.generation.source_ingestion import SourceUnreadable, content_sha256, extract
 from app.generation.source_ingestion import RECORD_FILE_TYPES, extract_records
 from app.retrieval.indexing import index_source_columns
 from app.retrieval.store import SqlVectorStore
@@ -85,10 +86,12 @@ def upload_source(project_id: str, file: UploadFile = File(...), name: str | Non
                     doc_type=project.document_type if project else None,
                 )
             except Exception as exc:  # noqa: BLE001 - never fail an upload over the index
-                sf.ingest_error = f"indexed: no ({type(exc).__name__}: {exc})"
+                sf.ingest_error = "indexed: no (" + public_message(
+                    exc, "the columns could not be indexed", user_facing=(SourceUnreadable,)) + ")"
     except Exception as exc:
         sf.status = "failed"
-        sf.ingest_error = str(exc)
+        sf.ingest_error = public_message(
+            exc, "This file could not be read.", user_facing=(SourceUnreadable,))
 
     log_audit(db, user, "Uploaded source", "source_file", sf.id, project_id, "success" if sf.status == "ready" else "warning", sf.name)
     db.commit()

@@ -341,7 +341,7 @@ An LLM does appear in this product — for grounded chat, for `prompt` tokens in
 | PDF extract | `PyMuPDF (fitz)` + `pdfplumber` (tables) + `ocrmypdf`/Tesseract fallback | Layout-aware text + tables + OCR for scans. |
 | XLSX/CSV | `openpyxl`, `pandas` | Sheets → markdown tables / records. |
 | PPTX | `python-pptx` | Slide text extraction. |
-| LLM | Anthropic Claude API (default) behind `LLMProvider` interface | Long context, strong structured-output + tool-use behavior for the JSON block contract (§10.6); provider registry also supports Azure OpenAI / OpenAI / watsonx / local Ollama, matching the Settings → AI Models tab exactly. |
+| LLM | Anthropic Claude API (default) behind `LLMProvider` interface | Long context, strong structured-output + tool-use behavior for the JSON block contract (§10.6); provider registry also supports Azure OpenAI / OpenAI / local Ollama, matching the Settings → AI Models tab exactly. |
 | Embeddings | Pluggable `EmbeddingProvider`: Voyage AI / OpenAI `text-embedding-3-large` / self-hosted `bge-m3` | Multilingual — required for the frontend's per-language output filenames. |
 | Reranker (recommended) | Cohere Rerank or `bge-reranker-v2-m3` (self-host) | Large precision lift on retrieval before the LLM call (§10.5). |
 | Auth | OIDC (Keycloak/Azure AD/Okta) + JWT | Enterprise SSO, matches "SSO (Okta)" toggle already in the Settings → Security tab. |
@@ -1671,7 +1671,7 @@ backend/
 │   │   ├── router.py            # analytics, team, audit-log, settings (§25)
 │   │   └── models.py
 │   ├── providers/
-│   │   ├── llm/                 # LLMProvider interface + Anthropic/OpenAI/watsonx/Ollama impls
+│   │   ├── llm/                 # LLMProvider interface + Anthropic/OpenAI/Ollama impls
 │   │   └── embedding/           # EmbeddingProvider interface + Voyage/OpenAI/bge-m3 impls
 │   └── workers/
 │       ├── celery_app.py

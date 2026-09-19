@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.public_errors import public_message
 from app.audit.service import log_audit
 from app.db import delete_in_order, get_db
 from app.models import (
@@ -1513,7 +1514,7 @@ def read_columns(pv_document_id: str, db: Session = Depends(get_db),
     values under another field's name, and everything downstream is then right
     about the wrong thing.
     """
-    from app.docgen.extraction import extract
+    from app.docgen.extraction import UnsupportedSource, extract
     from app.safety.line_listing import DATE_ORDER_KEY, FIELDS, suggest
 
     document = _owned_document(db, pv_document_id, user)
@@ -1528,7 +1529,9 @@ def read_columns(pv_document_id: str, db: Session = Depends(get_db),
                             source_name=document.original_filename)
     except Exception as exc:  # noqa: BLE001 - an unreadable file is not a 500
         raise error("PV_SOURCE_UNREADABLE",
-                    f"{document.original_filename} could not be read: {exc}", 422)
+                    f"{document.original_filename} could not be read. "
+                    + public_message(exc, "Check that it is a readable table file.",
+                                     user_facing=(UnsupportedSource,)), 422)
     tables = [t for t in extraction.tables if len(t.rows) >= 2]
     if not tables:
         raise error("PV_NO_TABLE",
@@ -2737,7 +2740,8 @@ def _draft_out(draft) -> dict:
     if draft is None:
         return None
     return {"id": draft.id, "version": draft.version, "content": draft.content,
-            "origin": draft.origin, "model": draft.model,
+            # The model stays on the row, not on the wire.
+            "origin": draft.origin,
             "prompt_version": draft.prompt_version,
             "created_by": draft.created_by, "created_at": draft.created_at,
             "data_needed": parse_data_needed(draft.content),
@@ -3367,8 +3371,7 @@ def draft_case_narrative(case_id: str, db: Session = Depends(get_db),
               f"{case.worldwide_case_id} v{narrative.version}")
     db.commit()
     return {"case_id": case.id, "version": narrative.version,
-            "content": result.content, "data_needed": result.data_needed,
-            "model": result.model}
+            "content": result.content, "data_needed": result.data_needed}
 
 
 # ============================================================ M7: QC
@@ -3667,8 +3670,11 @@ def export_report(report_instance_id: str, body: PvExportRequest,
                  f"{report.qppv_signoff_at:%Y-%m-%d}")
     header = (f"{product.product_name} | {name} | {report.period_start} to "
               f"{report.period_end} | CONFIDENTIAL")
-    stem = f"{report.doc_type_key}-{report.period_end}" + (
-        f"-{body.region}" if body.region else "")
+    # Named after the report a reader knows, never its internal key.
+    from app.generation.filenames import safe_filename
+
+    stem = safe_filename(f"{name} - {report.period_end}" + (
+        f" - {body.region}" if body.region else ""), fallback="Safety report")
     base = f"pv-export/{product.id}"
     stamp = now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -3692,6 +3698,25 @@ def export_report(report_instance_id: str, body: PvExportRequest,
     except Exception:
         _cleanup(written)
         raise
+
+    internal = []
+    for file_entry in written:
+        if file_entry["kind"] != "report":
+            continue
+        text = export_mod.document_text(str(abs_path(file_entry["blob_path"])))
+        internal.extend({**hit, "file": file_entry["filename"]}
+                        for hit in export_mod.internal_markers(text, citations=body.citations))
+    if internal:
+        _cleanup(written)
+        log_audit(db, user, "Refused a safety report export: drafting markers in the document",
+                  "pv_report_instance", report.id, product.project_id, "warning",
+                  ", ".join(sorted({h["kind"] for h in internal})))
+        db.commit()
+        raise error("PV_EXPORT_INTERNAL_MARKERS",
+                    f"{len(internal)} drafting marker(s) were found in the finished document, "
+                    "which has been deleted rather than offered for download. Edit the "
+                    "sections that contain them and export again.",
+                    409, {"found": internal[:50]})
 
     identifiers = deident.confirmed_identifiers(db, product.id)
     found = []
@@ -3795,8 +3820,12 @@ def download_pv_export(pv_export_id: str, index: int = Query(0, ge=0),
     log_audit(db, user, "Downloaded a safety report export", "pv_export", record.id,
               None, "info", entry.get("filename"))
     db.commit()
-    return FileResponse(str(path), filename=entry.get("filename") or path.name,
-                        media_type=_MEDIA_TYPES.get(path.suffix, "application/octet-stream"))
+    from app.generation.filenames import content_disposition
+
+    return FileResponse(str(path),
+                        media_type=_MEDIA_TYPES.get(path.suffix, "application/octet-stream"),
+                        headers={"Content-Disposition": content_disposition(
+                            entry.get("filename") or path.name)})
 
 
 @router.get("/pv/reports/{report_instance_id}/audit")

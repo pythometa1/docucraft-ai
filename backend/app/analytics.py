@@ -245,6 +245,65 @@ def cost_trend(db, *, org_id: str, since: datetime, until: datetime, days: int) 
     }
 
 
+#: The spend buckets in the product's words. `metering` groups by the engine's
+#: operations; a customer sees what they were doing, and two engine buckets that
+#: are both "a person changing a template or a document" read as one.
+ACTIVITY_LABELS = {
+    "compile": "Template reading",
+    "generate": "Drafting",
+    "chat": "Chat",
+    "authoring": "Editing",
+    "edit": "Editing",
+}
+OTHER_ACTIVITY = "Other"
+
+
+def cost_report(db, *, org_id: str, since: datetime, until: datetime, days: int) -> dict:
+    """`/analytics/cost` as a customer may see it.
+
+    Total spend over time as one series, and spend by activity. No model names,
+    no per-model series and no token counts: which vendor ran a call, and how
+    many tokens it took, describe how the product is built rather than what the
+    customer bought. `unpriced_calls` stays as a count -- it is why a total can
+    be short -- but never names the models behind it.
+    """
+    summary = cost_summary(db, org_id=org_id, since=since, until=until)
+    trend = cost_trend(db, org_id=org_id, since=since, until=until, days=days)
+    models = trend["models"]
+
+    by_activity: dict[str, dict] = {}
+    for row in cost_by_operation(db, org_id=org_id, since=since, until=until):
+        label = ACTIVITY_LABELS.get(row["key"], OTHER_ACTIVITY)
+        slot = by_activity.setdefault(label, {"activity": label, "calls": 0, "cost_usd": None})
+        slot["calls"] += row["calls"]
+        if row["cost_usd"] is not None:
+            slot["cost_usd"] = round((slot["cost_usd"] or 0.0) + row["cost_usd"], 6)
+
+    return {
+        "summary": {
+            "calls": summary["calls"],
+            "cost_usd": summary["cost_usd"],
+            "unpriced_calls": summary["unpriced_calls"],
+        },
+        "trend": {
+            "granularity": trend["granularity"],
+            # One series: the per-model columns summed back into a total.
+            "items": [
+                {"bucket": item["bucket"],
+                 "cost_usd": round(sum(item.get(m) or 0.0 for m in models), 6)}
+                for item in trend["items"]
+            ],
+        },
+        "by_activity": sorted(by_activity.values(),
+                              key=lambda r: -(r["cost_usd"] or 0.0)),
+        "by_template": [
+            {"template_file_id": r["template_file_id"], "name": r["name"],
+             "cost_usd": r["cost_usd"]}
+            for r in cost_by_template(db, org_id=org_id, since=since, until=until)
+        ],
+    }
+
+
 def _bucket_labels(since: datetime, until: datetime, *, weekly: bool) -> list:
     step = timedelta(days=7 if weekly else 1)
     labels, cursor = [], _naive(since).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -386,7 +445,21 @@ def compile_summary(db, *, org_id: str, since: datetime, until: datetime, days: 
         "compiled": sum(by_status.values()),
         "failed": failed,
         "by_status": by_status,
-        "duration": timing,
+        "duration": _public_timing(timing),
+    }
+
+
+def _public_timing(row: dict | None) -> dict | None:
+    """The SLO row with the engine's name for the operation and its rationale
+    taken off: a neutral label, the target as prose, and what was measured."""
+    if row is None:
+        return None
+    return {
+        "label": "Template reading time",
+        "target": row["target"],
+        "status": row["status"],
+        "measured": row["measured"],
+        "failed_runs": row["failed_runs"],
     }
 
 
@@ -440,24 +513,17 @@ def kpis(db, *, org_id: str, since: datetime, until: datetime, days: int) -> dic
         _tile("documents_generated", "Documents generated",
               "Documents produced in the selected window.", "documents", 1,
               value=float(documents), sample={"all_time": int(all_time)}),
-        _tile("tokens_consumed", "Tokens consumed",
-              "Input plus output tokens across every model call in the window.",
-              "tokens", 2,
-              value=float(spend["total_tokens"]) if spend["calls"] else None,
-              reason=None if spend["calls"] else
-              "No model call has been recorded in this window.",
-              sample={"input": spend["input_tokens"], "output": spend["output_tokens"],
-                      "calls": spend["calls"]}),
         _tile("spend_usd", "Spend",
-              "What those model calls cost, at the rate in force when each ran.",
+              "What processing cost in the window, at the rate in force at the time.",
               "USD", 3, direction="down",
               value=spend["cost_usd"],
               reason=None if spend["cost_usd"] is not None else (
-                  "No priced model call in this window."
-                  + (f" {spend['unpriced_calls']} call(s) used a model with no configured rate."
+                  "No priced activity in this window."
+                  + (f" {spend['unpriced_calls']} item(s) have no configured rate yet."
                      if spend["unpriced_calls"] else "")),
-              sample={"unpriced_calls": spend["unpriced_calls"],
-                      "unpriced_models": spend["unpriced_models"]}),
+              # A count, never the names: which models went unpriced is a
+              # list of the vendors behind the product.
+              sample={"unpriced_calls": spend["unpriced_calls"]}),
         _tile("approval_rate_pct", "Approval rate",
               "Share of document versions in the window that reached approved.",
               "%", 4,
@@ -467,12 +533,12 @@ def kpis(db, *, org_id: str, since: datetime, until: datetime, days: int) -> dic
               "No document version was created in this window, and a rate over nothing "
               "is not zero per cent.",
               sample=version_counts),
-        _tile("compile_p95_seconds", "Compile time (p95)",
-              "How long reading a template into a manifest takes, at the 95th percentile.",
+        _tile("compile_p95_seconds", "Template setup time (p95)",
+              "How long a new template takes to be ready to use, at the 95th percentile.",
               "seconds", 5, direction="down",
               value=round(measured["p95_ms"] / 1000.0, 1) if measured else None,
               reason=None if measured else
-              "No template compile has been timed in this window.",
+              "No template was set up in this window.",
               sample={"samples": measured["samples"]} if measured else {}),
         _tile("seconds_per_document", "Median time per document",
               "Batch wall clock divided by the rows it produced.", "seconds", 6,

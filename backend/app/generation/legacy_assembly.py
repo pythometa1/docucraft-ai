@@ -74,8 +74,13 @@ def _add_runs(paragraph, node, bold=False, italic=False, underline=False):
 
 
 def assemble_from_html(content_html: str, output_path: str) -> None:
+    from app.generation.reproducibility import normalise_docx
+    from app.templates.base_docx import BASE_DOCX
+
     soup = BeautifulSoup(content_html, "lxml")
-    document = docx.Document()
+    # The neutral base rather than python-docx's default package, whose
+    # properties name python-docx as the author (see `templates.base_docx`).
+    document = docx.Document(BASE_DOCX)
     body = soup.find("body") or soup
 
     for node in body.find_all(["h1", "h2", "h3", "p", "ul", "ol", "blockquote"], recursive=False) or body.children:
@@ -98,3 +103,5 @@ def assemble_from_html(content_html: str, output_path: str) -> None:
             _add_runs(p, node)
 
     document.save(output_path)
+    # Fixed archive clocks and scrubbed properties, as every other writer does.
+    normalise_docx(output_path)
